@@ -264,6 +264,22 @@
           (throw (ex-info (str node " never became ready")
                           {:node node :log (tail log 40)})))))))
 
+(defn- daemon-env
+  "Environment for a remote echod. AWS credentials come from this process,
+  so a bucket on s3s-fs authenticates the same way the control node does."
+  [test]
+  (into {"RUST_LOG" (or (:rust-log test) "info")}
+        (keep (fn [k]
+                (when-let [v (System/getenv k)]
+                  (when-not (str/blank? v)
+                    [k v])))
+              ["AWS_ACCESS_KEY_ID"
+               "AWS_SECRET_ACCESS_KEY"
+               "AWS_SESSION_TOKEN"
+               "AWS_REGION"
+               "AWS_DEFAULT_REGION"
+               "AWS_EC2_METADATA_DISABLED"])))
+
 (defn- start-remote!
   [test node backing]
   (let [dir remote-dir
@@ -278,7 +294,7 @@
             {:logfile log
              :pidfile pidfile
              :chdir dir
-             :env {"RUST_LOG" (or (:rust-log test) "info")}}
+             :env (daemon-env test)}
             bin
             (rest (args test node backing))))
     (when-not (wait-ready (core/node-url test node) 40)

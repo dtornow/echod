@@ -6,8 +6,10 @@
   that move membership, drop acknowledgements, and freeze a conditional
   write in mid-flight. A partition between nodes does not split that path.
   Partitioning a node from the store is `:partition`, and it is remote
-  only: locally every node is a process on this machine talking to a
-  directory. It is not part of the default suite.
+  only: local processes share this machine's network stack, so the same
+  iptables rule would also cut the client. The rule drops the store port,
+  not every packet to that host, so SSH and the worker stay up. It is not
+  part of the default suite. Run it against the nodes from `bin/lxc-up`.
 
   `:heal` resumes every node and starts any that are down. The generator
   runs it after the fault window, then waits, then the clients read."
@@ -36,6 +38,24 @@
         (when-not (str/starts-with? (str s) "file:")
           (try (.getHost (java.net.URI. (str s))) (catch Exception _ nil))))))
 
+(defn store-port
+  "TCP port of `--endpoint`, when the URI names one."
+  [test]
+  (when-let [ep (:endpoint test)]
+    (try
+      (let [p (.getPort (java.net.URI. (str ep)))]
+        (when (pos? p) p))
+      (catch Exception _ nil))))
+
+(defn partition-args
+  "iptables arguments that drop one node's TCP to the store. Naming the
+  endpoint port keeps SSH and the worker up when the bucket shares a
+  machine with the control host."
+  [host port]
+  (concat [:iptables :-A :OUTPUT :-p :tcp :-d (str host)]
+          (when port [:--dport (str port)])
+          [:-j :DROP]))
+
 (defn- pick
   "Which nodes a fault hits. Two nodes have no minority that is smaller
   than a half, so one of them is the fault."
@@ -60,14 +80,15 @@
   [test nodes]
   (let [host (store-host test)]
     (when (:local? test)
-      (throw (ex-info "partition is remote only: local nodes share a directory, and iptables between them splits nothing"
+      (throw (ex-info "partition is remote only: local nodes share the host network, so an iptables rule would also cut the client"
                       {})))
     (when (str/blank? host)
       (throw (ex-info "partition needs --endpoint or a store URL with a host" {})))
-    (c/on-nodes test nodes
-                (fn [_ _]
-                  (c/su (c/exec :iptables :-A :OUTPUT :-p :tcp :-d host :-j :DROP))))
-    {:partitioned (vec nodes) :from host}))
+    (let [port (store-port test)]
+      (c/on-nodes test nodes
+                  (fn [_ _]
+                    (c/su (apply c/exec (partition-args host port)))))
+      {:partitioned (vec nodes) :from host :port port})))
 
 (defn- unpartition!
   [test]

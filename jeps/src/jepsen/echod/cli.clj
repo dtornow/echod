@@ -191,7 +191,7 @@
         nemesis (:nemesis opts)]
     (when (and local? (some #{:partition} nemesis))
       (throw (IllegalArgumentException.
-              "partition is remote only: local nodes share a directory, and iptables between them splits nothing")))
+              "partition is remote only: local nodes share the host network, so an iptables rule would also cut the client. Use bin/lxc-up.")))
     (assoc parsed :options
            (-> opts
                (assoc :local? local?

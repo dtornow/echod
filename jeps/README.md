@@ -104,11 +104,44 @@ have committed before the acknowledgement was lost. Final reads retry those.
 `heal` resumes everyone and starts anyone who is down, then the test waits
 (`--heal-time`) before the final reads.
 
-`partition` drops a remote node's traffic to the store. It is not in the
-standard suite, and `--local` rejects it: the processes share a directory, so
-iptables between them splits nothing. Clock jumps are not a fault here. The
-strict model would call a timeout a bug, and the deadline model would call a
-missed timeout a bug.
+`partition` cuts one node's path to the bucket and leaves its path to the
+client and the worker up. It drops TCP to the store endpoint's port
+(`--endpoint`, for example `10.0.3.1:18014`), not every packet to that host.
+Nodes never talk to each other, so splitting them from each other tests
+nothing. The fault that matters is a node that cannot reach the bucket.
+
+It is not in the standard suite, and `--local` rejects it. Those processes
+share the host's network stack, so an iptables rule on the host would also
+cut the client. Run it on LXC nodes, each in its own network namespace:
+
+```
+bin/lxc-up
+```
+
+That brings up `lxcbr0` (`10.0.3.1/24`), DHCP, `n1` and `n2`, root SSH, and
+`s3s-fs` on `10.0.3.1:18014`. Then, from this directory:
+
+```
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/jeps_lxc
+AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s AWS_REGION=us-east-1 \
+AWS_EC2_METADATA_DISABLED=true \
+lein run test --bin ../target/release/echod \
+  --store s3://echod --endpoint http://10.0.3.1:18014 \
+  --region us-east-1 --worker-host 10.0.3.1 \
+  --nemesis partition -n n1 -n n2
+```
+
+`bin/lxc-up` writes that key and installs it for root on each node. Jepsen's
+SSH client asks the agent first and throws if no agent is running, so a
+password alone never gets a turn.
+
+`--worker-host` is the bridge address. The worker's default, `127.0.0.1`,
+is the container's own loopback, which the node cannot call.
+
+Clock jumps are not a fault here. The strict model would call a timeout a
+bug, and the deadline model would call a missed timeout a bug. LXC
+containers share the host clock.
 
 ## Reading a result
 
