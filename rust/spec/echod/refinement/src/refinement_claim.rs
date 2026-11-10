@@ -9,22 +9,22 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::{ServerConfig, Spec as AbstractSpec};
+use echod_abstract_spec::{Config as AbstractConfig, Spec as AbstractSpec};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::model::{Fleet, Spec as ConcreteSpec};
+use echod_concrete_spec::{Config as ConcreteConfig, Spec as ConcreteSpec};
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::refinement::refines;
 
 verus! {
 
 /// Every concrete boundary trace is an abstract boundary trace, with the
-/// fleet retry timeout mapped directly into the abstract server configuration.
-pub open spec fn refinement_claim(concrete_config: Fleet) -> bool {
+/// concrete retry timeout mapped directly into the abstract configuration.
+pub open spec fn refinement_claim(concrete_config: ConcreteConfig) -> bool {
     refines(
         ConcreteSpec,
         concrete_config,
         AbstractSpec,
-        ServerConfig {
+        AbstractConfig {
             retry_timeout: concrete_config.retry_timeout,
         },
     )

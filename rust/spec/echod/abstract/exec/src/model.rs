@@ -328,7 +328,7 @@ fn request_results(
 }
 
 fn run(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     call: &Call,
     now: Time,
@@ -435,7 +435,7 @@ fn internal_result(
 }
 
 fn run_timeout_from(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     i: usize,
@@ -521,7 +521,7 @@ fn due_result(before: &Proc, outcome: InOut) -> (result: ProcessResult)
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
-fn keep(config: &ServerConfig, state: &Proc, now: Time, work: Work) -> (results: Vec<ProcessResult>)
+fn keep(config: &Config, state: &Proc, now: Time, work: Work) -> (results: Vec<ProcessResult>)
     ensures
         results_v(results@) == spec_keep(*config, state@, now, work@, Seq::empty()),
 {
@@ -537,7 +537,7 @@ fn keep(config: &ServerConfig, state: &Proc, now: Time, work: Work) -> (results:
 }
 
 fn over_callbacks(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     awaited: &String,
@@ -574,7 +574,7 @@ fn over_callbacks(
 }
 
 fn over_listeners(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     awaited: &String,
@@ -611,7 +611,7 @@ fn over_listeners(
 }
 
 fn over_promises(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     keys: &Vec<String>,
@@ -668,7 +668,7 @@ fn over_promises(
 }
 
 fn over_tasks(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     keys: &Vec<String>,
@@ -732,7 +732,7 @@ fn over_tasks(
 }
 
 fn over_schedules(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
     keys: &Vec<String>,
@@ -781,7 +781,7 @@ fn over_schedules(
 
 /// The steps the three maps offer, in the order the specification walks
 /// them: `spec_derived`.
-fn derived(config: &ServerConfig, state: &Proc, now: Time) -> (results: Vec<ProcessResult>)
+fn derived(config: &Config, state: &Proc, now: Time) -> (results: Vec<ProcessResult>)
     ensures
         results_v(results@) == spec_derived(*config, state@, now),
 {
@@ -807,7 +807,7 @@ fn derived(config: &ServerConfig, state: &Proc, now: Time) -> (results: Vec<Proc
 }
 
 fn run_timeout(
-    config: &ServerConfig,
+    config: &Config,
     state: &Proc,
     now: Time,
 ) -> (results: Vec<ProcessResult>)
@@ -845,7 +845,7 @@ impl Proc {
     /// One event at the service: `spec_service`.
     pub fn on_event(
         &self,
-        config: &ServerConfig,
+        config: &Config,
         now: Time,
         event: &ProcessEvent<Pid, Message>,
     ) -> (results: Vec<ProcessResult>)
@@ -865,7 +865,7 @@ impl Proc {
     }
 }
 
-pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, Proc)>)
+pub fn initial(_config: &Config) -> (states: Vec<(Pid, Proc)>)
     ensures
         states@.map_values(|entry: (Pid, Proc)| (entry.0, entry.1@))
             == SpecModel.processes(*_config),
@@ -901,7 +901,7 @@ pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, Proc)>)
         states
 }
 
-pub fn injectable(_config: &ServerConfig, message: &Message) -> (injectable: bool)
+pub fn injectable(_config: &Config, message: &Message) -> (injectable: bool)
     ensures
         injectable == SpecModel.injectable(*_config, *message),
 {

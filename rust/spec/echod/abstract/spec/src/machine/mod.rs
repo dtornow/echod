@@ -28,12 +28,12 @@ pub enum Dispatch {
 
 /// Passive configuration read by the transition relation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ServerConfig {
+pub struct Config {
     pub retry_timeout: Time,
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self { ServerConfig { retry_timeout: 5_000 } }
+impl Default for Config {
+    fn default() -> Self { Config { retry_timeout: 5_000 } }
 }
 
 /// 503, shaped like the concrete node's `spec_unavailable`.

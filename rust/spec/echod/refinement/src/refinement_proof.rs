@@ -6,7 +6,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::model::Fleet;
+use echod_concrete_spec::Config as ConcreteConfig;
 
 mod interpretation {
 //! A concrete document, read as part of the abstract store.
@@ -54,7 +54,7 @@ use echod_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised, axio
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::ServerConfig;
+use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
@@ -233,7 +233,7 @@ pub(crate) open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> 
 /// queues and sends nothing, the next document reads as the next store,
 /// every other key reads as before, and the store stays finite.
 pub(crate) open spec fn request_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     request: Request,
     key: Seq<char>,
     doc: DocV,
@@ -1128,7 +1128,7 @@ pub(crate) proof fn lemma_origin_insert(
 }
 
 pub(crate) proof fn lemma_promise_get_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     id: String,
     doc: DocV,
     s: AStore,
@@ -1173,7 +1173,7 @@ pub(crate) proof fn lemma_promise_get_agrees(
 }
 
 pub(crate) proof fn lemma_promise_create_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::PromiseCreateReq,
     doc: DocV,
     s: AStore,
@@ -1264,7 +1264,7 @@ pub(crate) proof fn lemma_promise_create_agrees(
 }
 
 pub(crate) proof fn lemma_promise_settle_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::PromiseSettleReq,
     doc: DocV,
     s: AStore,
@@ -1393,7 +1393,7 @@ pub(crate) proof fn lemma_promise_settle_agrees(
 
 /// The three promise handlers agree, each on its own key.
 pub(crate) proof fn lemma_promise_handlers_agree(
-    config: ServerConfig,
+    config: AbstractConfig,
     request: Request,
     doc: DocV,
     s: AStore,
@@ -1448,10 +1448,10 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use super::interpretation::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
+use echod_concrete_spec::{Config as ConcreteConfig, Spec as CModel};
+#[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{
-    Fleet, Message as CMessage, Spec as CModel, NodeV, Pid as CPid,
-    spec_string,
-    StoreV as CStore,
+    Message as CMessage, NodeV, Pid as CPid, spec_string, StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
@@ -1465,15 +1465,15 @@ use echod_concrete_spec::store::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::{
-    Spec as AModel, Pid as APid, spec_run_timeout, Proc as AProc,
-};
+use echod_abstract_spec::model::{Pid as APid, spec_run_timeout};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::view::{InternalV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::{Dispatch, Output, ServerConfig};
+use echod_abstract_spec::{
+    Config as AbstractConfig, Dispatch, Output, Proc as AProc, Spec as AModel,
+};
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::Envelope;
 #[cfg(verus_keep_ghost)]
@@ -1495,13 +1495,13 @@ pub(crate) open spec fn node_at(world: State<CModel>, i: int) -> NodeV {
 }
 
 /// The store, in the slot after the nodes.
-pub(crate) open spec fn store_at(fleet: Fleet, world: State<CModel>) -> CStore {
+pub(crate) open spec fn store_at(fleet: ConcreteConfig, world: State<CModel>) -> CStore {
     world.process[fleet.nodes as int].1->Store_0
 }
 
 /// Slots `0 .. nodes` are the nodes, each at its own address; the last slot
 /// is the store. The world `initial` builds has this shape and a step keeps it.
-pub(crate) open spec fn shaped(fleet: Fleet, world: State<CModel>) -> bool {
+pub(crate) open spec fn shaped(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     &&& world.process.len() == fleet.nodes + 1
     &&& forall|i: int|
         0 <= i < fleet.nodes ==> {
@@ -1582,12 +1582,12 @@ pub(crate) open spec fn intended(node: NodeV, key: Seq<char>) -> DocV {
 }
 
 /// The slot of the node that owns `key`.
-pub(crate) open spec fn owner(fleet: Fleet, key: Seq<char>) -> int {
+pub(crate) open spec fn owner(fleet: ConcreteConfig, key: Seq<char>) -> int {
     (spec_fnv(key) % fleet.nodes) as int
 }
 
 /// The document the concrete world stands for under `key`.
-pub(crate) open spec fn effective(fleet: Fleet, world: State<CModel>, key: Seq<char>) -> DocV {
+pub(crate) open spec fn effective(fleet: ConcreteConfig, world: State<CModel>, key: Seq<char>) -> DocV {
     if fleet.nodes == 0 {
         spec_empty_doc(key)
     } else {
@@ -1597,7 +1597,7 @@ pub(crate) open spec fn effective(fleet: Fleet, world: State<CModel>, key: Seq<c
 
 /// Lean's `StoreRep`: under every key, the concrete world reads as the
 /// abstract store.
-pub(crate) open spec fn store_interpreted(fleet: Fleet, world: State<CModel>, s: AStore) -> bool {
+pub(crate) open spec fn store_interpreted(fleet: ConcreteConfig, world: State<CModel>, s: AStore) -> bool {
     forall|key: Seq<char>| #[trigger] doc_rel(key, effective(fleet, world, key), s)
 }
 
@@ -1637,7 +1637,7 @@ pub(crate) open spec fn items(occurrences: Seq<PendingV>) -> Seq<Sched<InternalV
 }
 
 /// How many times `item` is owed by the nodes from slot `i` on.
-pub(crate) open spec fn owed(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, i: int) -> nat
+pub(crate) open spec fn owed(fleet: ConcreteConfig, world: State<CModel>, item: Sched<InternalV>, i: int) -> nat
     decreases fleet.nodes - i,
 {
     if i < 0 || i >= fleet.nodes {
@@ -1654,7 +1654,7 @@ pub(crate) open spec fn owed(fleet: Fleet, world: State<CModel>, item: Sched<Int
 
 /// Every occurrence a node owes is queued at the service. The service may
 /// hold more: an occurrence a node dropped stays queued there.
-pub(crate) open spec fn pending_covered(fleet: Fleet, world: State<CModel>, state: AProc) -> bool {
+pub(crate) open spec fn pending_covered(fleet: ConcreteConfig, world: State<CModel>, state: AProc) -> bool {
     forall|item: Sched<InternalV>|
         #[trigger] owed(fleet, world, item, 0) <= state.pending.to_multiset().count(item)
 }
@@ -1886,7 +1886,7 @@ pub(crate) open spec fn outcome_of(flight: FlightV) -> StoreOutcome {
 /// Every store request on the network is from a node, under an op that
 /// node has issued. One the store has not answered is the node's open
 /// flight's call. One under the open flight's op is that flight's call.
-pub(crate) open spec fn requests_ok(fleet: Fleet, world: State<CModel>) -> bool {
+pub(crate) open spec fn requests_ok(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
             CMessage::StoreReq { op, call } => {
@@ -1910,7 +1910,7 @@ pub(crate) open spec fn requests_ok(fleet: Fleet, world: State<CModel>) -> bool 
 /// Every store reply on the network answers a node under an op the store
 /// has executed. One under the node's open flight's op is the reply
 /// [`outcome_of`] says.
-pub(crate) open spec fn replies_ok(fleet: Fleet, world: State<CModel>) -> bool {
+pub(crate) open spec fn replies_ok(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
             CMessage::StoreReply { op, outcome } => {
@@ -1941,13 +1941,13 @@ pub(crate) open spec fn requested(world: State<CModel>, sender: CPid, op: u64) -
 }
 
 /// Every op the store has executed was requested.
-pub(crate) open spec fn seen_ok(fleet: Fleet, world: State<CModel>) -> bool {
+pub(crate) open spec fn seen_ok(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     forall|pair: (CPid, u64)|
         #[trigger] store_at(fleet, world).seen.contains(pair) ==> requested(world, pair.0, pair.1)
 }
 
 /// The facts of the concrete world alone.
-pub(crate) open spec fn inv(fleet: Fleet, world: State<CModel>) -> bool {
+pub(crate) open spec fn inv(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     &&& shaped(fleet, world)
     &&& entries_distinct(store_at(fleet, world))
     &&& forall|i: int|
@@ -2026,7 +2026,7 @@ pub(crate) open spec fn coupled(concrete: State<CModel>, abstract_world: State<A
 }
 
 /// The relation.
-pub(crate) open spec fn related(fleet: Fleet, concrete: State<CModel>, abstract_world: State<AModel>) -> bool {
+pub(crate) open spec fn related(fleet: ConcreteConfig, concrete: State<CModel>, abstract_world: State<AModel>) -> bool {
     &&& coupled(concrete, abstract_world)
     &&& single(abstract_world)
     &&& inv(fleet, concrete)
@@ -2045,7 +2045,7 @@ pub(crate) open spec fn related(fleet: Fleet, concrete: State<CModel>, abstract_
 // ---------------------------------------------------------------------------
 
 /// Every request on the document it names, by `interpretation::request_agrees`.
-pub(crate) open spec fn requests_agree(config: ServerConfig) -> bool {
+pub(crate) open spec fn requests_agree(config: AbstractConfig) -> bool {
     forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) ==> #[trigger] request_agrees(
             config,
@@ -2065,7 +2065,7 @@ pub(crate) open spec fn note_sends(notes: Seq<NoteV>) -> Seq<(APid, AMessage)> {
 /// result does the same, sends the same dispatches, queues the same
 /// occurrences, and keeps the store finite.
 pub(crate) open spec fn due_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     doc: DocV,
     state: AProc,
@@ -2086,7 +2086,7 @@ pub(crate) open spec fn due_agrees(
         }
 }
 
-pub(crate) open spec fn dues_agree(config: ServerConfig) -> bool {
+pub(crate) open spec fn dues_agree(config: AbstractConfig) -> bool {
     forall|key: Seq<char>, doc: DocV, state: AProc, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) ==> #[trigger] due_agrees(
             config,
@@ -2129,14 +2129,14 @@ pub(crate) open spec fn occurrences_agree() -> bool {
 }
 
 /// Lean's `refinement_handlers`, as one statement.
-pub(crate) open spec fn agreement(config: ServerConfig) -> bool {
+pub(crate) open spec fn agreement(config: AbstractConfig) -> bool {
     requests_agree(config) && dues_agree(config) && occurrences_agree()
 }
 
 /// The abstract server's configuration a fleet implements: the service it
 /// refines retries as the nodes do.
-pub(crate) open spec fn abstract_config(concrete_config: Fleet) -> ServerConfig {
-    ServerConfig { retry_timeout: concrete_config.retry_timeout }
+pub(crate) open spec fn abstract_config(concrete_config: ConcreteConfig) -> AbstractConfig {
+    AbstractConfig { retry_timeout: concrete_config.retry_timeout }
 }
 
 } // verus!
@@ -2205,7 +2205,7 @@ use echod_abstract_spec::view::{
     all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::ServerConfig;
+use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
@@ -2378,7 +2378,7 @@ pub(crate) proof fn lemma_finite_at(s: AStore, next: AStore, id: Seq<char>)
 // ---------------------------------------------------------------------------
 
 pub(crate) proof fn lemma_register_callback_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: PromiseRegisterCallbackReq,
     doc: DocV,
     s: AStore,
@@ -2485,7 +2485,7 @@ pub(crate) proof fn lemma_register_callback_agrees(
 }
 
 pub(crate) proof fn lemma_register_listener_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::PromiseRegisterListenerReq,
     doc: DocV,
     s: AStore,
@@ -2612,7 +2612,7 @@ pub(crate) proof fn lemma_acquire_rel(ct: TkV, at: TaskV, pid: Seq<char>, ttl: u
     lemma_sat_add(now, ttl);
 }
 
-pub(crate) proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_get_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -2666,7 +2666,7 @@ pub(crate) proof fn lemma_task_get_agrees(config: ServerConfig, id: String, doc:
 }
 
 pub(crate) proof fn lemma_task_create_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskCreateReq,
     doc: DocV,
     s: AStore,
@@ -2872,7 +2872,7 @@ pub(crate) proof fn lemma_task_create_agrees(
 }
 
 pub(crate) proof fn lemma_task_acquire_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskAcquireReq,
     doc: DocV,
     s: AStore,
@@ -2998,7 +2998,7 @@ pub(crate) proof fn lemma_held_update(
 }
 
 pub(crate) proof fn lemma_task_release_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskReleaseReq,
     doc: DocV,
     s: AStore,
@@ -3052,7 +3052,7 @@ pub(crate) proof fn lemma_task_release_agrees(
 }
 
 pub(crate) proof fn lemma_task_fulfill_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskFulfillReq,
     doc: DocV,
     s: AStore,
@@ -3118,7 +3118,7 @@ pub(crate) proof fn lemma_task_fulfill_agrees(
     }
 }
 
-pub(crate) proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -3194,7 +3194,7 @@ pub(crate) proof fn lemma_task_halt_agrees(config: ServerConfig, id: String, doc
     }
 }
 
-pub(crate) proof fn lemma_task_continue_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_continue_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -3459,7 +3459,7 @@ pub(crate) proof fn lemma_extend(
 }
 
 pub(crate) proof fn lemma_heartbeat_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskHeartbeatReq,
     doc: DocV,
     s: AStore,
@@ -3714,7 +3714,7 @@ pub(crate) proof fn lemma_add_callbacks(
 }
 
 pub(crate) proof fn lemma_suspend_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskSuspendReq,
     doc: DocV,
     s: AStore,
@@ -3946,7 +3946,7 @@ pub(crate) proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, no
 }
 
 pub(crate) proof fn lemma_fence_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskFenceReq,
     doc: DocV,
     s: AStore,
@@ -4029,7 +4029,7 @@ pub(crate) proof fn lemma_fence_agrees(
 }
 
 pub(crate) proof fn lemma_fence_check_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: echod_types::TaskFenceCheckReq,
     doc: DocV,
     s: AStore,
@@ -4072,7 +4072,7 @@ pub(crate) proof fn lemma_schedule_value(c: Schedule, a: ScheduleV)
     lemma_string_of(c.promise_id);
 }
 
-pub(crate) proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_schedule_get_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -4110,7 +4110,7 @@ pub(crate) proof fn lemma_schedule_get_agrees(config: ServerConfig, id: String, 
 }
 
 pub(crate) proof fn lemma_schedule_create_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     req: ScheduleCreateReq,
     doc: DocV,
     s: AStore,
@@ -4183,7 +4183,7 @@ pub(crate) proof fn lemma_schedule_create_agrees(
     }
 }
 
-pub(crate) proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_schedule_delete_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -4233,7 +4233,7 @@ pub(crate) proof fn lemma_schedule_delete_agrees(config: ServerConfig, id: Strin
 
 /// One request with a key agrees on the document under that key.
 pub(crate) proof fn lemma_request_agrees(
-    config: ServerConfig,
+    config: AbstractConfig,
     request: Request,
     key: Seq<char>,
     doc: DocV,
@@ -4274,7 +4274,7 @@ pub(crate) proof fn lemma_request_agrees(
 }
 
 /// Lean's `refinement_handlers`, for the requests.
-pub(crate) proof fn lemma_requests_agree(config: ServerConfig)
+pub(crate) proof fn lemma_requests_agree(config: AbstractConfig)
     ensures
         super::relation::requests_agree(config),
 {
@@ -4365,7 +4365,7 @@ use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::trusted::{pset_seq, spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::{Dispatch, Output, ServerConfig};
+use echod_abstract_spec::{Config as AbstractConfig, Dispatch, Output};
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::StepResultV;
 #[cfg(verus_keep_ghost)]
@@ -4519,7 +4519,7 @@ pub(crate) proof fn lemma_due_id(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>
 
 /// The outcome of `work`, when due, is among `results`.
 pub(crate) open spec fn offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     work: InternalV,
@@ -4550,7 +4550,7 @@ pub(crate) proof fn lemma_contains_right<T>(a: Seq<T>, b: Seq<T>, x: T)
 }
 
 pub(crate) proof fn lemma_offered_left(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     work: InternalV,
@@ -4569,7 +4569,7 @@ pub(crate) proof fn lemma_offered_left(
 }
 
 pub(crate) proof fn lemma_offered_right(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     work: InternalV,
@@ -4587,7 +4587,7 @@ pub(crate) proof fn lemma_offered_right(
     }
 }
 
-pub(crate) proof fn lemma_keep_offered(config: ServerConfig, state: Proc, now: Time, work: InternalV)
+pub(crate) proof fn lemma_keep_offered(config: AbstractConfig, state: Proc, now: Time, work: InternalV)
     ensures
         offered(config, state, now, work, spec_keep(config, state, now, work, Seq::empty())),
 {
@@ -4601,7 +4601,7 @@ pub(crate) proof fn lemma_keep_offered(config: ServerConfig, state: Proc, now: T
 }
 
 pub(crate) proof fn lemma_over_callbacks_offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     awaited: Seq<char>,
@@ -4642,7 +4642,7 @@ pub(crate) proof fn lemma_over_callbacks_offered(
 }
 
 pub(crate) proof fn lemma_over_listeners_offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     awaited: Seq<char>,
@@ -4685,7 +4685,7 @@ pub(crate) proof fn lemma_over_listeners_offered(
 /// What the promises offer: every promise's timeout, every callback, every
 /// listener.
 pub(crate) open spec fn promise_offers(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     id: Seq<char>,
@@ -4712,7 +4712,7 @@ pub(crate) open spec fn promise_offers(
 }
 
 pub(crate) proof fn lemma_promise_offers_left(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     id: Seq<char>,
@@ -4747,7 +4747,7 @@ pub(crate) proof fn lemma_promise_offers_left(
 }
 
 pub(crate) proof fn lemma_promise_offers_right(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     id: Seq<char>,
@@ -4782,7 +4782,7 @@ pub(crate) proof fn lemma_promise_offers_right(
 }
 
 pub(crate) proof fn lemma_over_promises_offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
@@ -4851,7 +4851,7 @@ pub(crate) proof fn lemma_over_promises_offered(
 /// What the tasks offer: every lease, and the retry of every task that has
 /// one.
 pub(crate) open spec fn task_offers(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     id: Seq<char>,
@@ -4868,7 +4868,7 @@ pub(crate) open spec fn task_offers(
 }
 
 pub(crate) proof fn lemma_over_tasks_offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
@@ -4916,7 +4916,7 @@ pub(crate) open spec fn schedule_work(s: AStore, id: Seq<char>) -> InternalV {
 }
 
 pub(crate) proof fn lemma_over_schedules_offered(
-    config: ServerConfig,
+    config: AbstractConfig,
     state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
@@ -4950,7 +4950,7 @@ pub(crate) proof fn lemma_over_schedules_offered(
 }
 
 /// Everything the abstract timeout step offers, by object.
-pub(crate) proof fn lemma_timeout_offered(config: ServerConfig, state: Proc, now: Time)
+pub(crate) proof fn lemma_timeout_offered(config: AbstractConfig, state: Proc, now: Time)
     requires
         finite_store(state.store),
     ensures
@@ -5054,7 +5054,7 @@ pub(crate) open spec fn work_known(s: AStore, work: InternalV) -> bool {
 
 /// One offer, read off [`lemma_timeout_offered`]. The universal facts stay
 /// inside this lemma.
-pub(crate) proof fn lemma_work_offered(config: ServerConfig, state: Proc, now: Time, work: InternalV)
+pub(crate) proof fn lemma_work_offered(config: AbstractConfig, state: Proc, now: Time, work: InternalV)
     requires
         finite_store(state.store),
         work_known(state.store, work),
@@ -5185,7 +5185,7 @@ pub(crate) proof fn lemma_sends_unblock(address: Seq<char>, promise: PromiseReco
 
 /// `r` is an abstract timeout result that does what the due step did.
 pub(crate) open spec fn due_matched(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     doc: DocV,
     state: Proc,
@@ -5202,7 +5202,7 @@ pub(crate) open spec fn due_matched(
 }
 
 pub(crate) proof fn lemma_matched(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     doc: DocV,
     state: Proc,
@@ -5221,7 +5221,7 @@ pub(crate) proof fn lemma_matched(
 
 /// An origin document whose due step changed the store within its origin.
 pub(crate) proof fn lemma_origin_matched(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5358,7 +5358,7 @@ pub(crate) open spec fn due_context(
 
 /// A pending promise past its timeout: both sides project it.
 pub(crate) proof fn lemma_promise_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5420,7 +5420,7 @@ pub(crate) proof fn lemma_promise_due(
 
 /// An acquired task whose lease ran out: both sides release it.
 pub(crate) proof fn lemma_lease_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5481,7 +5481,7 @@ pub(crate) proof fn lemma_lease_due(
 /// A pending task whose offer is due: both sides offer it again and tell
 /// the outside to execute it.
 pub(crate) proof fn lemma_retry_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5543,7 +5543,7 @@ pub(crate) proof fn lemma_retry_due(
 /// A settled promise with a callback: both sides drop the callback and
 /// resume the awaiter.
 pub(crate) proof fn lemma_callback_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5755,7 +5755,7 @@ pub(crate) proof fn lemma_callback_due(
 /// A settled promise with a listener: both sides drop the listener and tell
 /// the address.
 pub(crate) proof fn lemma_listener_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5829,7 +5829,7 @@ pub(crate) proof fn lemma_listener_due(
 
 /// The due step of an origin document.
 pub(crate) proof fn lemma_origin_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
@@ -5901,7 +5901,7 @@ pub(crate) proof fn lemma_origin_due(
 /// A schedule whose run is due: both sides advance it and queue the
 /// occurrence.
 pub(crate) proof fn lemma_schedule_due(
-    config: ServerConfig,
+    config: AbstractConfig,
     key: Seq<char>,
     id: Seq<char>,
     sch: Schedule,
@@ -5980,7 +5980,7 @@ pub(crate) proof fn lemma_schedule_due(
 // Every due step
 // ---------------------------------------------------------------------------
 
-pub(crate) proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, state: Proc, now: Time)
+pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc: DocV, state: Proc, now: Time)
     requires
         doc_rel(key, doc, state.store),
         finite_store(state.store),
@@ -6029,7 +6029,7 @@ pub(crate) proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: 
     }
 }
 
-pub(crate) proof fn lemma_dues_agree(config: ServerConfig)
+pub(crate) proof fn lemma_dues_agree(config: AbstractConfig)
     ensures
         dues_agree(config),
 {
@@ -6219,7 +6219,7 @@ pub(crate) proof fn lemma_occurrences_agree()
 
 /// Lean's `refinement_handlers`: at every configuration, every handler,
 /// the due step, and the occurrence agree.
-pub(crate) proof fn lemma_agreement(config: ServerConfig)
+pub(crate) proof fn lemma_agreement(config: AbstractConfig)
     ensures
         agreement(config),
 {
@@ -6258,9 +6258,11 @@ use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use super::interpretation::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
+use echod_concrete_spec::{Config as ConcreteConfig, Proc as CProc, Spec as CModel};
+#[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{
-    EntryV, Fleet, Proc as CProc, Message as CMessage, Spec as CModel, NodeV,
-    Pid as CPid, spec_bytes, spec_get, spec_initial_node as initial_node,
+    EntryV, Message as CMessage, NodeV, Pid as CPid, spec_bytes, spec_get,
+    spec_initial_node as initial_node,
     spec_node as spec_node_step, spec_nodes, spec_notes, spec_notify, spec_one, spec_reply,
     spec_store, spec_string, spec_world, StoreV as CStore,
 };
@@ -6286,7 +6288,7 @@ use echod_abstract_spec::machine::{
 use echod_abstract_spec::model::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
     spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
-    spec_send, spec_service, spec_shed, Proc as AProc,
+    spec_send, spec_service, spec_shed,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::model::Pid as APid;
@@ -6298,7 +6300,7 @@ use echod_abstract_spec::trusted::axiom_string_ext;
 use echod_abstract_spec::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
-    BoundaryEvent, Call, Spec as AModel, Output, ServerConfig,
+    BoundaryEvent, Call, Config as AbstractConfig, Output, Proc as AProc, Spec as AModel,
 };
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::refinement::{
@@ -6336,11 +6338,11 @@ pub(crate) open spec fn abstract_model() -> AModel {
 }
 
 /// `related`, packaged as the function the generic theorem takes.
-pub(crate) open spec fn link(fleet: Fleet) -> spec_fn(State<CModel>, State<AModel>) -> bool {
+pub(crate) open spec fn link(fleet: ConcreteConfig) -> spec_fn(State<CModel>, State<AModel>) -> bool {
     |concrete: State<CModel>, abstract_world: State<AModel>| related(fleet, concrete, abstract_world)
 }
 
-pub(crate) proof fn lemma_link(fleet: Fleet, concrete: State<CModel>, abstract_world: State<AModel>)
+pub(crate) proof fn lemma_link(fleet: ConcreteConfig, concrete: State<CModel>, abstract_world: State<AModel>)
     ensures
         link(fleet)(concrete, abstract_world) == related(fleet, concrete, abstract_world),
 {
@@ -6691,7 +6693,7 @@ pub(crate) proof fn lemma_sent_outputs(
 // One abstract step, and the empty execution
 // ---------------------------------------------------------------------------
 
-pub(crate) proof fn lemma_empty_matches(config: ServerConfig, before: State<AModel>)
+pub(crate) proof fn lemma_empty_matches(config: AbstractConfig, before: State<AModel>)
     ensures
         matches(abstract_model(), config, before, Seq::<BoundaryEvent>::empty(), before),
 {
@@ -6711,7 +6713,7 @@ pub(crate) proof fn lemma_empty_matches(config: ServerConfig, before: State<AMod
 }
 
 pub(crate) proof fn lemma_matched_step(
-    config: ServerConfig,
+    config: AbstractConfig,
     before: State<AModel>,
     label: Label<APid, AMessage>,
     after: State<AModel>,
@@ -6748,7 +6750,7 @@ pub(crate) proof fn lemma_matched_step(
 }
 
 pub(crate) proof fn lemma_matches_same_visible(
-    config: ServerConfig,
+    config: AbstractConfig,
     before: State<AModel>,
     visible: Seq<BoundaryEvent>,
     same: Seq<BoundaryEvent>,
@@ -6803,7 +6805,7 @@ pub(crate) proof fn lemma_process_step<M: Spec>(
 /// The world it lands in: the one slot holds the outcome's state, the
 /// network grew by the outcome's sends, the clock is `at`.
 pub(crate) proof fn lemma_service_step(
-    config: ServerConfig,
+    config: AbstractConfig,
     before_a: State<AModel>,
     at: Time,
     event: ProcessEvent<APid, AMessage>,
@@ -7405,7 +7407,7 @@ pub(crate) open spec fn owed_by(node: NodeV, item: Sched<InternalV>) -> nat {
 /// `owed` from `k` is the sum over the nodes from `k`; replacing one node's
 /// state moves the sum by that node's difference.
 pub(crate) proof fn lemma_owed_update(
-    fleet: Fleet,
+    fleet: ConcreteConfig,
     before_w: State<CModel>,
     after_w: State<CModel>,
     i: int,
@@ -7435,7 +7437,7 @@ pub(crate) proof fn lemma_owed_update(
 }
 
 pub(crate) proof fn lemma_owed_same(
-    fleet: Fleet,
+    fleet: ConcreteConfig,
     before_w: State<CModel>,
     after_w: State<CModel>,
     item: Sched<InternalV>,
@@ -7453,7 +7455,7 @@ pub(crate) proof fn lemma_owed_same(
     }
 }
 
-pub(crate) proof fn lemma_owed_nonneg(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, i: int, k: int)
+pub(crate) proof fn lemma_owed_nonneg(fleet: ConcreteConfig, world: State<CModel>, item: Sched<InternalV>, i: int, k: int)
     requires
         0 <= i < fleet.nodes,
         0 <= k <= i,
@@ -7539,7 +7541,7 @@ pub(crate) proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abst
 }
 
 /// The owner of a key is the node that owns it.
-pub(crate) proof fn lemma_owner(fleet: Fleet, world: State<CModel>, i: int, key: Seq<char>)
+pub(crate) proof fn lemma_owner(fleet: ConcreteConfig, world: State<CModel>, i: int, key: Seq<char>)
     requires
         shaped(fleet, world),
         0 <= i < fleet.nodes,
@@ -7712,7 +7714,7 @@ pub(crate) proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
 }
 
 /// The node slots of the initial world.
-pub(crate) proof fn lemma_spec_nodes(fleet: Fleet, id: u64)
+pub(crate) proof fn lemma_spec_nodes(fleet: ConcreteConfig, id: u64)
     requires
         id <= fleet.nodes,
     ensures
@@ -7744,7 +7746,7 @@ pub(crate) proof fn lemma_spec_nodes(fleet: Fleet, id: u64)
 }
 
 /// `spec_queue` from `m` offers the ready item at `k >= m`.
-pub(crate) proof fn lemma_queue_from(config: ServerConfig, state: AProc, now: Time, m: int, k: int)
+pub(crate) proof fn lemma_queue_from(config: AbstractConfig, state: AProc, now: Time, m: int, k: int)
     requires
         0 <= m <= k < state.pending.len(),
         spec_ready(spec_body(state.pending[k]), now),
@@ -7780,7 +7782,7 @@ pub(crate) proof fn lemma_queue_from(config: ServerConfig, state: AProc, now: Ti
 
 /// The service's timeout step offers the ready item at `k`: an index into
 /// its outcomes whose state removed that item and sends nothing.
-pub(crate) proof fn lemma_queue_offers(config: ServerConfig, state: AProc, now: Time, k: int) -> (j: int)
+pub(crate) proof fn lemma_queue_offers(config: AbstractConfig, state: AProc, now: Time, k: int) -> (j: int)
     requires
         0 <= k < state.pending.len(),
         spec_ready(spec_body(state.pending[k]), now),
@@ -7807,12 +7809,12 @@ pub(crate) proof fn lemma_queue_offers(config: ServerConfig, state: AProc, now: 
 }
 
 /// The second half of `spec_run_timeout`, named so the sum above reads.
-pub(crate) open spec fn derived(config: ServerConfig, state: AProc, now: Time) -> Seq<StepResultV<AProc, APid, AMessage>> {
+pub(crate) open spec fn derived(config: AbstractConfig, state: AProc, now: Time) -> Seq<StepResultV<AProc, APid, AMessage>> {
     echod_abstract_spec::model::spec_derived(config, state, now)
 }
 
 /// A timeout result at `j` is an outcome of the service's timeout step.
-pub(crate) proof fn lemma_timeout_offers(config: ServerConfig, state: AProc, now: Time, j: int)
+pub(crate) proof fn lemma_timeout_offers(config: AbstractConfig, state: AProc, now: Time, j: int)
     requires
         0 <= j < spec_run_timeout(config, state, now).len(),
     ensures
@@ -7888,7 +7890,7 @@ pub(crate) proof fn lemma_earliest_cached(node: NodeV, now: Time, key: Seq<char>
 }
 
 /// An item a node owes is queued at the service.
-pub(crate) proof fn lemma_owed_present(fleet: Fleet, world: State<AModel>, concrete: State<CModel>, i: int, p: PendingV)
+pub(crate) proof fn lemma_owed_present(fleet: ConcreteConfig, world: State<AModel>, concrete: State<CModel>, i: int, p: PendingV)
     requires
         0 <= i < fleet.nodes,
         pending_covered(fleet, concrete, astate(world)),
@@ -7935,7 +7937,7 @@ pub(crate) proof fn lemma_pending_head(pending: Seq<PendingV>, item: Sched<Inter
 // ---------------------------------------------------------------------------
 
 /// What `land` does for a node step.
-pub(crate) proof fn lemma_land_node(fleet: Fleet, cb: State<CModel>, i: int, at: Time, node2: NodeV, send: Seq<(CPid, CMessage)>)
+pub(crate) proof fn lemma_land_node(fleet: ConcreteConfig, cb: State<CModel>, i: int, at: Time, node2: NodeV, send: Seq<(CPid, CMessage)>)
     requires
         shaped(fleet, cb),
         0 <= i < fleet.nodes,
@@ -7966,7 +7968,7 @@ pub(crate) proof fn lemma_land_node(fleet: Fleet, cb: State<CModel>, i: int, at:
 }
 
 /// What `land` does for a store step.
-pub(crate) proof fn lemma_land_store(fleet: Fleet, cb: State<CModel>, at: Time, store2: CStore, send: Seq<(CPid, CMessage)>)
+pub(crate) proof fn lemma_land_store(fleet: ConcreteConfig, cb: State<CModel>, at: Time, store2: CStore, send: Seq<(CPid, CMessage)>)
     requires
         shaped(fleet, cb),
     ensures
@@ -8012,7 +8014,7 @@ pub(crate) proof fn lemma_requested_grows(
 
 /// The invariant survives a step that touched no process and added only
 /// envelopes that are not store traffic.
-pub(crate) proof fn lemma_invariant_grow(fleet: Fleet, cb: State<CModel>, ca: State<CModel>)
+pub(crate) proof fn lemma_invariant_grow(fleet: ConcreteConfig, cb: State<CModel>, ca: State<CModel>)
     requires
         inv(fleet, cb),
         ca.process == cb.process,
@@ -8112,7 +8114,7 @@ pub(crate) proof fn lemma_flight_outputs_monotone(
 }
 
 /// The relation carries to worlds whose processes did not change.
-pub(crate) proof fn lemma_carry(fleet: Fleet, cb: State<CModel>, ab: State<AModel>, ca: State<CModel>, aa: State<AModel>)
+pub(crate) proof fn lemma_carry(fleet: ConcreteConfig, cb: State<CModel>, ab: State<AModel>, ca: State<CModel>, aa: State<AModel>)
     requires
         related(fleet, cb, ab),
         ca.process == cb.process,
@@ -8142,7 +8144,7 @@ pub(crate) proof fn lemma_carry(fleet: Fleet, cb: State<CModel>, ab: State<AMode
 }
 
 /// What `related` says of node `i`, instantiated.
-pub(crate) proof fn lemma_node_facts(fleet: Fleet, cb: State<CModel>, ab: State<AModel>, i: int)
+pub(crate) proof fn lemma_node_facts(fleet: ConcreteConfig, cb: State<CModel>, ab: State<AModel>, i: int)
     requires
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
@@ -8260,8 +8262,8 @@ pub(crate) proof fn lemma_cache_ok_keep(
 /// A node step that sent nothing and changed only its pending list, owing
 /// no more than before, is an empty abstract execution.
 pub(crate) proof fn lemma_silent(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -8395,8 +8397,8 @@ pub(crate) proof fn lemma_silent(
 
 /// A node step that changed nothing of the work and sent nothing.
 pub(crate) proof fn lemma_same_work(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -8425,8 +8427,8 @@ pub(crate) proof fn lemma_same_work(
 /// related one in the `logic`, `wake`, `next_request` of one node is related
 /// to the same abstract world.
 pub(crate) proof fn lemma_shell(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     ca: State<CModel>,
     aa: State<AModel>,
     i: int,
@@ -8453,8 +8455,8 @@ pub(crate) proof fn lemma_shell(
 /// work under a new shell: the landed worlds are related to the same
 /// abstract world.
 pub(crate) proof fn lemma_reshell(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     aa: State<AModel>,
     i: int,
@@ -8482,8 +8484,8 @@ pub(crate) proof fn lemma_reshell(
 
 /// A node step that dropped the head of its pending list and sent nothing.
 pub(crate) proof fn lemma_pop_silent(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -8532,7 +8534,7 @@ pub(crate) open spec fn begin_keyed(key: Seq<char>, job: JobV, caller: Option<(S
 }
 
 /// No op the node has not issued is one the store has seen.
-pub(crate) proof fn lemma_fresh_op(fleet: Fleet, world: State<CModel>, i: int, op: u64)
+pub(crate) proof fn lemma_fresh_op(fleet: ConcreteConfig, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -8557,7 +8559,7 @@ pub(crate) proof fn lemma_fresh_op(fleet: Fleet, world: State<CModel>, i: int, o
 }
 
 /// Every op a node without a flight has issued, the store has seen.
-pub(crate) proof fn lemma_idle_answered(fleet: Fleet, world: State<CModel>, i: int, op: u64)
+pub(crate) proof fn lemma_idle_answered(fleet: ConcreteConfig, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -8576,7 +8578,7 @@ pub(crate) proof fn lemma_idle_answered(fleet: Fleet, world: State<CModel>, i: i
 
 /// Every op a node with a flight has issued, other than the flight's, the
 /// store has seen.
-pub(crate) proof fn lemma_busy_answered(fleet: Fleet, world: State<CModel>, i: int, op: u64)
+pub(crate) proof fn lemma_busy_answered(fleet: ConcreteConfig, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -8594,7 +8596,7 @@ pub(crate) proof fn lemma_busy_answered(fleet: Fleet, world: State<CModel>, i: i
 }
 
 /// A seen op of a node is below its next op.
-pub(crate) proof fn lemma_seen_issued(fleet: Fleet, world: State<CModel>, i: int, op: u64)
+pub(crate) proof fn lemma_seen_issued(fleet: ConcreteConfig, world: State<CModel>, i: int, op: u64)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -8615,7 +8617,7 @@ pub(crate) proof fn lemma_seen_issued(fleet: Fleet, world: State<CModel>, i: int
 /// least the old one, its flight, if any, is on a fresh op, and the
 /// envelopes added are that flight's request or no store traffic.
 pub(crate) proof fn lemma_traffic_ok(
-    fleet: Fleet,
+    fleet: ConcreteConfig,
     cb: State<CModel>,
     ca: State<CModel>,
     i: int,
@@ -8743,7 +8745,7 @@ pub(crate) proof fn lemma_traffic_ok(
 /// The store, read through the nodes, after node `i` changed what it stands
 /// for under `key` and nothing else.
 pub(crate) proof fn lemma_interpreted_update(
-    fleet: Fleet,
+    fleet: ConcreteConfig,
     cb: State<CModel>,
     ca: State<CModel>,
     i: int,
@@ -8786,7 +8788,7 @@ pub(crate) proof fn lemma_interpreted_update(
 /// After a flight began at node `i`, the two worlds are related: the
 /// abstract world took the step the begin stands for.
 pub(crate) proof fn lemma_begin_related(
-    fleet: Fleet,
+    fleet: ConcreteConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     ca: State<CModel>,
@@ -9141,8 +9143,8 @@ pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, 
 /// A node that answered a call without a flight, against an abstract world
 /// whose state stayed and whose network carries that reply.
 pub(crate) proof fn lemma_answered_idle(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     ca: State<CModel>,
@@ -9194,8 +9196,8 @@ pub(crate) proof fn lemma_answered_idle(
 /// A call whose handler the node runs: the service serves it, with the
 /// first outcome, at the same time, on the store the node's document reads as.
 pub(crate) proof fn lemma_request_served(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9283,8 +9285,8 @@ pub(crate) proof fn lemma_request_served(
 
 /// A client request at an idle node.
 pub(crate) proof fn lemma_request(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9397,8 +9399,8 @@ pub(crate) proof fn lemma_removed_count(pending: Seq<Sched<InternalV>>, k: int, 
 
 /// A queued occurrence at an idle node that owns its origin.
 pub(crate) proof fn lemma_occurrence_begin(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9535,8 +9537,8 @@ pub(crate) proof fn lemma_note_sends(network: Seq<Envelope<APid, AMessage>>, not
 
 /// The due step of the earliest cached key at an idle node.
 pub(crate) proof fn lemma_due_begin(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9632,7 +9634,7 @@ pub(crate) proof fn lemma_due_begin(
 // ---------------------------------------------------------------------------
 
 /// Every op a busy node issued, the store has seen, once its flight's op is.
-pub(crate) proof fn lemma_all_answered(fleet: Fleet, world: State<CModel>, i: int)
+pub(crate) proof fn lemma_all_answered(fleet: ConcreteConfig, world: State<CModel>, i: int)
     requires
         inv(fleet, world),
         0 <= i < fleet.nodes,
@@ -9699,8 +9701,8 @@ pub(crate) proof fn lemma_closing_sends(
 /// A flight closes: the node holds what the flight decided, owes what it
 /// bore, and sends what the service already sent. An empty abstract execution.
 pub(crate) proof fn lemma_flight_closed(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9832,8 +9834,8 @@ pub(crate) proof fn lemma_flight_closed(
 /// A read came back empty and the flight decided to write: the node opens
 /// the write of the same decision. An empty abstract execution.
 pub(crate) proof fn lemma_write_after_read(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -9981,8 +9983,8 @@ pub(crate) proof fn lemma_write_after_read(
 
 /// A store reply at a busy node.
 pub(crate) proof fn lemma_store_reply(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -10123,7 +10125,7 @@ pub(crate) proof fn lemma_push_contains<A>(s: Seq<A>, x: A, y: A)
 
 /// The store's answer to the live flight's call: a read of an absent key,
 /// or a write that lands.
-pub(crate) proof fn lemma_store_answers(fleet: Fleet, world: State<CModel>, n: int)
+pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CModel>, n: int)
     requires
         inv(fleet, world),
         0 <= n < fleet.nodes,
@@ -10209,8 +10211,8 @@ pub(crate) proof fn lemma_store_answers(fleet: Fleet, world: State<CModel>, n: i
 
 /// A store step.
 pub(crate) proof fn lemma_store(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     at: Time,
@@ -10425,8 +10427,8 @@ pub(crate) proof fn lemma_store(
 // ---------------------------------------------------------------------------
 
 pub(crate) proof fn lemma_node(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -10558,8 +10560,8 @@ pub(crate) proof fn lemma_node(
 // ---------------------------------------------------------------------------
 
 pub(crate) proof fn lemma_input(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     recipient: CPid,
@@ -10627,8 +10629,8 @@ pub(crate) proof fn lemma_input(
 }
 
 pub(crate) proof fn lemma_outside(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     sender: CPid,
@@ -10691,8 +10693,8 @@ pub(crate) proof fn lemma_outside(
 }
 
 pub(crate) proof fn lemma_process(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     process: CPid,
@@ -10765,8 +10767,8 @@ pub(crate) proof fn lemma_process(
 
 /// One concrete step, matched.
 pub(crate) proof fn lemma_step(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     label: Label<CPid, CMessage>,
     ca: State<CModel>,
@@ -10821,7 +10823,7 @@ pub(crate) proof fn lemma_step(
 // The initial worlds
 // ---------------------------------------------------------------------------
 
-pub(crate) proof fn lemma_owed_zero(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>, k: int)
+pub(crate) proof fn lemma_owed_zero(fleet: ConcreteConfig, world: State<CModel>, item: Sched<InternalV>, k: int)
     requires
         forall|i: int| 0 <= i < fleet.nodes ==> #[trigger] occurrences(node_at(world, i)).len() == 0,
     ensures
@@ -10869,7 +10871,7 @@ pub(crate) proof fn lemma_empty_reads(key: Seq<char>)
     }
 }
 
-pub(crate) proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
+pub(crate) proof fn lemma_initial(fleet: ConcreteConfig, config: AbstractConfig)
     ensures
         related(
             fleet,
@@ -10964,8 +10966,8 @@ pub(crate) proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
 
 /// A timeout at an idle node.
 pub(crate) proof fn lemma_timeout(
-    fleet: Fleet,
-    config: ServerConfig,
+    fleet: ConcreteConfig,
+    config: AbstractConfig,
     cb: State<CModel>,
     ab: State<AModel>,
     i: int,
@@ -11019,7 +11021,7 @@ pub(crate) proof fn lemma_timeout(
 // ---------------------------------------------------------------------------
 
 /// Every concrete step is matched: the forward simulation.
-pub(crate) proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
+pub(crate) proof fn lemma_simulation(fleet: ConcreteConfig, config: AbstractConfig)
     requires
         config == abstract_config(fleet),
         agreement(config),
@@ -11042,7 +11044,7 @@ pub(crate) proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 /// the abstract world, at the abstract configuration the fleet implements:
 /// the same retry timeout. The handlers, the due step, and the occurrence
 /// agree by `work::lemma_agreement`.
-pub(crate) proof fn prove_refinement(concrete_config: Fleet)
+pub(crate) proof fn prove_refinement(concrete_config: ConcreteConfig)
     ensures
         crate::refinement_claim(concrete_config),
 {
@@ -11066,7 +11068,7 @@ pub(crate) proof fn prove_refinement(concrete_config: Fleet)
 verus! {
 
 /// Proves the complete concrete-to-abstract trace-refinement claim.
-pub proof fn refinement_proof(concrete_config: Fleet)
+pub proof fn refinement_proof(concrete_config: ConcreteConfig)
     ensures
         crate::refinement_claim(concrete_config),
 {

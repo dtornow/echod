@@ -5,7 +5,8 @@
 
 use vstd::prelude::*;
 
-pub use echod_concrete_spec::model::{Fleet, Message, Pid};
+pub use echod_concrete_spec::Config;
+pub use echod_concrete_spec::model::{Message, Pid};
 use echod_concrete_spec::model::LogicV;
 use echod_concrete_spec::Proc as SpecProc;
 #[cfg(verus_keep_ghost)]
@@ -139,7 +140,7 @@ impl Store {
 impl RoverExec::Proc for Proc {
     type Spec = SpecProc;
 
-    fn on_event(&self, _config: &Fleet, now: Time, event: &ProcessEvent<Pid, Message>) -> Vec<ProcResult<Self>> {
+    fn on_event(&self, _config: &Config, now: Time, event: &ProcessEvent<Pid, Message>) -> Vec<ProcResult<Self>> {
         let mut results = Vec::new();
         match self {
             Proc::Node(node) => {
@@ -163,7 +164,7 @@ impl RoverExec::Spec for Spec {
     open spec fn spec(&self) -> SpecModel { SpecModel }
     fn outside(&self) -> Pid { Pid::Outside }
 
-    fn initial(&self, config: &Fleet) -> Vec<(Pid, Proc)> {
+    fn initial(&self, config: &Config) -> Vec<(Pid, Proc)> {
         let mut process = Vec::new();
         let mut id = 0u64;
         while id < config.nodes {
@@ -174,7 +175,7 @@ impl RoverExec::Spec for Spec {
         process
     }
 
-    fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
+    fn injectable(&self, _config: &Config, message: &Message) -> bool {
         matches!(message, Message::Request(_) | Message::Stop)
     }
 }

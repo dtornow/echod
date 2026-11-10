@@ -39,7 +39,7 @@ use super::{
 use super::{
     claim_res, contains, copy_store, echo, fence_res, has_target, is_timer, marked, mk, new_object,
     next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out,
-    Machine, Promise, ServerConfig, Store, Task, Time,
+    Machine, Promise, Config, Store, Task, Time,
 };
 
 #[cfg(verus_keep_ghost)]

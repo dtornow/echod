@@ -26,7 +26,8 @@ pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
+pub use machine::Config;
 pub use model::{Proc, Spec};
 pub use echod_types as types;
-pub use machine::{Dispatch, ServerConfig};
+pub use machine::Dispatch;
 pub use protocol::{BoundaryEvent, Call, Message, Output};

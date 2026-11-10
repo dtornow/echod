@@ -482,7 +482,7 @@ pub open spec fn spec_task_continue(id: String, s: StoreV, now: Time) -> Seq<Out
     }
 }
 
-pub open spec fn spec_handler(_config: ServerConfig, op: Request, s: StoreV, now: Time) -> Seq<OutV> {
+pub open spec fn spec_handler(_config: Config, op: Request, s: StoreV, now: Time) -> Seq<OutV> {
     match op {
         Request::PromiseCreate(c) => spec_promise_create(c, s, now),
         Request::PromiseGet(q) => {

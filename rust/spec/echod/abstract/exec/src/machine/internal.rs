@@ -26,7 +26,7 @@ use super::{
     spec_string, spec_unlease,
 };
 use super::{
-    contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, Dispatch, Id, InOut, Promise, ServerConfig, Store, Task, Time, Work,
+    contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, Dispatch, Id, InOut, Promise, Config, Store, Task, Time, Work,
     Machine,
 };
 

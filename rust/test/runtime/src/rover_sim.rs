@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use echod_logic::concrete::document::Node;
-use echod_logic::concrete::rover::{Fleet, Message as ConcreteMessage, Pid as ConcretePid};
+use echod_logic::concrete::rover::{Message as ConcreteMessage, Pid as ConcretePid};
 use echod_logic::concrete::store::Store;
 use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
 use rover_exec::{
@@ -23,10 +23,11 @@ use rover_exec::{
 use echod_types::{Request, Response};
 use echod_abstract_exec::{history_rank, Spec as AbstractExec};
 use echod_abstract_spec::model::Pid as AbstractPid;
-use echod_abstract_spec::{Call, Message as AbstractMessage, Output, ServerConfig};
+use echod_abstract_spec::{Call, Config as AbstractConfig, Message as AbstractMessage, Output};
 use echod_concrete_spec::model::RETRY_TIMEOUT;
 use echod_concrete_spec::{
-    Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreCall, StoreError, StoreOutcome,
+    Config as ConcreteConfig, Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreCall,
+    StoreError, StoreOutcome,
 };
 use vstd::prelude::View;
 
@@ -55,7 +56,7 @@ impl RoverProc for AdapterProc {
 
     fn on_event(
         &self,
-        _config: &Fleet,
+        _config: &ConcreteConfig,
         now: u64,
         event: &ProcessEvent<ConcretePid, ConcreteMessage>,
     ) -> Vec<ProcResult<Self>> {
@@ -93,7 +94,7 @@ impl RoverExecSpec for AdapterSpec {
         ConcretePid::Outside
     }
 
-    fn initial(&self, config: &Fleet) -> Vec<(ConcretePid, AdapterProc)> {
+    fn initial(&self, config: &ConcreteConfig) -> Vec<(ConcretePid, AdapterProc)> {
         let mut process = (0..config.nodes)
             .map(|id| {
                 (
@@ -114,7 +115,7 @@ impl RoverExecSpec for AdapterSpec {
         process
     }
 
-    fn injectable(&self, _config: &Fleet, message: &ConcreteMessage) -> bool {
+    fn injectable(&self, _config: &ConcreteConfig, message: &ConcreteMessage) -> bool {
         matches!(message, ConcreteMessage::Request(_) | ConcreteMessage::Stop)
     }
 }
@@ -863,8 +864,8 @@ fn flow(certificate: &[ConcreteAction], options: &Options) -> FlowStats {
     stats
 }
 
-fn fleet(options: &Options) -> Fleet {
-    Fleet {
+fn fleet(options: &Options) -> ConcreteConfig {
+    ConcreteConfig {
         nodes: options.nodes,
         loops: options.loops,
         appendable: options.appendable,
@@ -934,7 +935,7 @@ pub fn run_with_options(options: Options) -> Result<Report, RunError> {
     };
     let abstract_certificate = check(
         &AbstractExec,
-        &ServerConfig {
+        &AbstractConfig {
             retry_timeout: RETRY_TIMEOUT,
         },
         &abstract_trace,

@@ -37,7 +37,7 @@ pub enum Pid {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Fleet {
+pub struct Config {
     /// Node ids are `0 .. nodes`.
     pub nodes: u64,
     /// Whether each node keeps its heartbeat and timers after it starts.
@@ -45,7 +45,7 @@ pub struct Fleet {
     /// Whether the store accepts an append.
     pub appendable: bool,
     /// How long a pending task waits before it is offered again. The
-    /// abstract server's `ServerConfig.retry_timeout`, Lean's `retryTimeout`.
+    /// abstract model's `Config.retry_timeout`, Lean's `retryTimeout`.
     pub retry_timeout: u64,
 }
 
@@ -88,13 +88,13 @@ pub enum Proc {
 }
 
 impl RoverSpec::Proc for Proc {
-    type Config = Fleet;
+    type Config = Config;
     type Pid = Pid;
     type Message = Message;
 
     open spec fn on_event(
         self,
-        _config: Fleet,
+        _config: Config,
         now: Time,
         event: ProcessEvent<Pid, Message>,
     ) -> Seq<StepResultV<Proc, Pid, Message>> {
@@ -106,7 +106,7 @@ impl RoverSpec::Proc for Proc {
 }
 
 /// The nodes a fleet starts, then the store.
-pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, Proc)>
+pub open spec fn spec_nodes(config: Config, id: u64) -> Seq<(Pid, Proc)>
     decreases (config.nodes - id) as int
 {
     if id >= config.nodes {
@@ -117,7 +117,7 @@ pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, Proc)>
     }
 }
 
-pub open spec fn spec_initial_node(config: Fleet, id: u64) -> NodeV {
+pub open spec fn spec_initial_node(config: Config, id: u64) -> NodeV {
     NodeV {
         logic: LogicV {
             clock: 0,
@@ -138,7 +138,7 @@ pub open spec fn spec_initial_node(config: Fleet, id: u64) -> NodeV {
     }
 }
 
-pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, Proc)> {
+pub open spec fn spec_world(config: Config) -> Seq<(Pid, Proc)> {
     spec_nodes(config, 0) + seq![(
         Pid::Store,
         Proc::Store(StoreV {
@@ -302,7 +302,7 @@ pub open spec fn spec_notes(notes: Seq<NoteV>) -> Seq<(Pid, Message)>
 
 pub const RETRY_TIMEOUT: u64 = 5_000;
 
-impl Fleet {
+impl Config {
     pub fn new(nodes: u64, loops: bool) -> Self {
         Self {
             nodes,
@@ -317,7 +317,7 @@ verus! {
 
 
 impl RoverSpec::Spec for Spec {
-    type Config = Fleet;
+    type Config = Config;
     type Pid = Pid;
     type Proc = Proc;
     type Message = Message;
@@ -327,11 +327,11 @@ impl RoverSpec::Spec for Spec {
         Pid::Outside
     }
 
-    open spec fn processes(&self, config: Fleet) -> Seq<(Pid, Proc)> {
+    open spec fn processes(&self, config: Config) -> Seq<(Pid, Proc)> {
         spec_world(config)
     }
 
-    open spec fn injectable(&self, _config: Fleet, message: Message) -> bool {
+    open spec fn injectable(&self, _config: Config, message: Message) -> bool {
         match message {
             Message::Request(_) | Message::Stop => true,
             Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,

@@ -19,7 +19,7 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use echod_abstract_spec::ServerConfig;
+use echod_abstract_spec::Config;
 use echod_abstract_exec::{
     history_rank, history_responses, rover_trace, HistoryEvent, Spec as AbstractExec,
 };
@@ -118,7 +118,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     limits.max_nodes = budget as usize;
     match check_trace(
         &AbstractExec,
-        &ServerConfig { retry_timeout },
+        &Config { retry_timeout },
         &events,
         limits,
         |event, action, sent| history_rank(event, action, sent, &expected),

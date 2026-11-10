@@ -49,7 +49,7 @@ use echod_concrete_spec::model::{
     spec_bytes, spec_clock, spec_get, spec_initial_node, spec_node, spec_notes, spec_notify,
     spec_one, spec_reply, spec_string, Proc, LogicV,
 };
-use crate::concrete::rover::{Fleet, Logic, Message, Pid};
+use crate::concrete::rover::{Config, Logic, Message, Pid};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{spec_before, spec_fnv, spec_sat_add, spec_starts};
 use crate::concrete::store::{Read, StoreError};
@@ -4174,7 +4174,7 @@ impl Node {
     /// A node of the fleet, before its first event: `spec_initial_node`.
     pub fn new(address: u64, nodes: u64, loops: bool, retry_timeout: u64) -> (r: Node)
         ensures
-            r@ == spec_initial_node(Fleet { nodes, loops, appendable: false, retry_timeout }, address),
+            r@ == spec_initial_node(Config { nodes, loops, appendable: false, retry_timeout }, address),
     {
         let r = Node {
             logic: Logic { clock: 0, loops, stopping: false, stopped: false, last_wake: None },

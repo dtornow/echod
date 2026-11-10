@@ -8,7 +8,7 @@ use echod_abstract_spec::model::{
     self as abstract_model, Pid as SpecPid, Proc as SpecProc,
 };
 use echod_abstract_spec::protocol::Message as SpecMessage;
-use echod_abstract_spec::ServerConfig as Config;
+use echod_abstract_spec::Config;
 use rover_spec::rover::comm::{ProcessEvent, Time as RoverTime};
 use rover_exec as RoverExec;
 

@@ -33,7 +33,7 @@ use super::model::{Pid, Proc};
 #[cfg(verus_keep_ghost)]
 use super::trusted::origin;
 use echod_types::{PromiseState, TaskState};
-use super::machine::ServerConfig;
+use super::machine::Config;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
 use super::view::distinct;
@@ -519,7 +519,7 @@ pub open spec fn step_catalogue(
 // ---------------------------------------------------------------------------
 
 /// The exact obligation every allowed `on_event` outcome must discharge.
-pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
+pub open spec fn on_event_preserves_catalogue(config: Config) -> bool {
     forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|
         #![trigger before.on_event(config, now, event)[i]]
         state_catalogue(now, before)

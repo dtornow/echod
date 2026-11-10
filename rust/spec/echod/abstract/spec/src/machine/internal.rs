@@ -32,7 +32,7 @@ pub open spec fn spec_body(item: Sched<InternalV>) -> InternalV {
     }
 }
 
-pub open spec fn spec_process_work(config: ServerConfig, step: InternalV, s: StoreV, now: Time) -> InOutV {
+pub open spec fn spec_process_work(config: Config, step: InternalV, s: StoreV, now: Time) -> InOutV {
     match step {
         InternalV::PromiseTimeout(id) => {
             if !s.promises.contains_key(id) {
@@ -163,7 +163,7 @@ pub open spec fn spec_lease(s: StoreV, id: Seq<char>, now: Time) -> InOutV {
     }
 }
 
-pub open spec fn spec_retry(config: ServerConfig, s: StoreV, id: Seq<char>, now: Time) -> InOutV {
+pub open spec fn spec_retry(config: Config, s: StoreV, id: Seq<char>, now: Time) -> InOutV {
     let live = s.promises.contains_key(id)
         && spec_project_promise(s.promises[id], now).state == PromiseState::Pending;
     if !s.tasks.contains_key(id) {

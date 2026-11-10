@@ -29,7 +29,7 @@ fn settle(id: &str, data: &str) -> PromiseSettleReq {
 /// Build one concrete execution using the standalone handler, then ask Rover
 /// to rediscover and certify it from boundary events alone.
 fn trace_for(requests: Vec<Request>) -> Vec<Event> {
-    let logic = ServerConfig::default();
+    let logic = Config::default();
     let mut state = AbstractExec.initial(&logic).remove(0).1;
     let mut trace = Vec::new();
 
@@ -118,7 +118,7 @@ fn every_request_family_runs_through_rover() {
     for request in requests {
         let trace = trace_for(vec![request.clone()]);
         assert!(
-            check_unranked(&AbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
+            check_unranked(&AbstractExec, &Config::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
             "Rover rejected {request:?}",
         );
     }
@@ -136,12 +136,12 @@ fn an_unpredicted_response_is_rejected() {
         response: Response::Status(StatusRes { status: 200 }),
     });
 
-    assert!(check_unranked(&AbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&AbstractExec, &Config::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
 }
 
 #[test]
 fn timeout_runs_the_internal_work_started_by_a_request() {
-    let config = ServerConfig::default();
+    let config = Config::default();
     let mut initial = AbstractExec.initial(&config);
     let state = initial.remove(0).1;
     let call = Call {

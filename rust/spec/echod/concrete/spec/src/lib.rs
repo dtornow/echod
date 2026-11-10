@@ -29,5 +29,5 @@ pub mod node;
 pub mod store;
 pub mod model;
 
-pub use model::{Proc, Spec};
+pub use model::{Config, Proc, Spec};
 pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};

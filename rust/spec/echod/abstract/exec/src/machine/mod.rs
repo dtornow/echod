@@ -5,11 +5,11 @@ use echod_types::*;
 use crate::trusted::*;
 use crate::view::*;
 pub use echod_abstract_spec::machine::*;
-pub use echod_abstract_spec::{Dispatch, ServerConfig};
+pub use echod_abstract_spec::Dispatch;
 
 verus! {
 /// Executable handlers bound to a passive specification configuration.
-pub(crate) struct Machine<'a>(pub(crate) &'a ServerConfig);
+pub(crate) struct Machine<'a>(pub(crate) &'a Config);
 
 /// The first value of `key`, which is how a tag list is read: `spec_first`.
 fn first_of(tags: &Tags, key: &str) -> (r: Option<String>)

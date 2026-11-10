@@ -45,7 +45,7 @@ use std::time::Duration;
 use clap::Parser;
 use rover_exec::{check as check_trace, marks, CheckConfig};
 use echod_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
-use echod_abstract_spec::{Dispatch, ServerConfig};
+use echod_abstract_spec::{Dispatch, Config};
 use echod_abstract_exec::{
     arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
     Action, HistoryEvent, Spec as AbstractExec, Store as AbstractStore, MARKS,
@@ -96,7 +96,7 @@ struct Driver {
     echod: Server,
     sink: Arc<Sink>,
     worker: String,
-    model: ServerConfig,
+    model: Config,
     quiet_ms: u64,
     corr: u64,
 }
@@ -260,8 +260,8 @@ impl std::fmt::Display for Violation {
     }
 }
 
-fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
-    let config = ServerConfig { retry_timeout: model.retry_timeout };
+fn check(model: &Config, trace: &Trace) -> Outcome {
+    let config = Config { retry_timeout: model.retry_timeout };
     let events = rover_trace(trace);
     let expected = history_responses(trace);
     match check_trace(
@@ -304,7 +304,7 @@ async fn main() {
     client.wait_ready(&echod).await;
     eprintln!("[model] echod at {}, worker at {worker}", echod.url);
     // `debug.tick` lets every due step land before the next request: fires are exact.
-    let model = ServerConfig { retry_timeout: cli.retry_timeout };
+    let model = Config { retry_timeout: cli.retry_timeout };
     let mut d = Driver { client, echod, sink, worker, model, quiet_ms: cli.quiet_ms, corr: 0 };
 
     let mut table: BTreeMap<&str, [usize; 2]> = MARKS.iter().map(|m| (*m, [0, 0])).collect();
