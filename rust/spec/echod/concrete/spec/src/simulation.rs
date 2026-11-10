@@ -24,7 +24,7 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    EntryV, Fleet, LocalV, Message as CMessage, EchodConcreteSpec as CModel, NodeV,
+    EntryV, Fleet, Proc as CProc, Message as CMessage, Spec as CModel, NodeV,
     Pid as CPid, spec_bytes, spec_get, spec_initial_node as initial_node,
     spec_node as spec_node_step, spec_nodes, spec_notes, spec_notify, spec_one, spec_reply,
     spec_store, spec_string, spec_world, StoreV as CStore,
@@ -51,7 +51,7 @@ use echod_abstract_spec::machine::{
 use echod_abstract_spec::model::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
     spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
-    spec_send, spec_service, spec_shed, StateV,
+    spec_send, spec_service, spec_shed, Proc as AProc,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::model::Pid as APid;
@@ -63,7 +63,7 @@ use echod_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised};
 use echod_abstract_spec::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
-    BoundaryEvent, Call, EchodAbstractSpec as AModel, Output, ServerConfig,
+    BoundaryEvent, Call, Spec as AModel, Output, ServerConfig,
 };
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::refinement::{
@@ -72,7 +72,7 @@ use rover_spec::rover::RoverSpec::refinement::{
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::{
     before, envelopes, event_valid, Execution, inject, is_process, Label, land, legal,
-    observe_outside, Proc, Spec, State, StepResultV,
+    observe_outside, Proc as _, Spec, State, StepResultV,
 };
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::{Envelope, ProcessEvent};
@@ -162,12 +162,12 @@ pub open spec fn written(node: NodeV, flight: FlightV, doc: DocV) -> FlightV {
     }
 }
 
-pub open spec fn node_result(node: NodeV, send: Seq<(CPid, CMessage)>) -> StepResultV<LocalV, CPid, CMessage> {
-    StepResultV { state: LocalV::Node(node), send }
+pub open spec fn node_result(node: NodeV, send: Seq<(CPid, CMessage)>) -> StepResultV<CProc, CPid, CMessage> {
+    StepResultV { state: CProc::Node(node), send }
 }
 
-pub open spec fn store_result(store: CStore, send: Seq<(CPid, CMessage)>) -> StepResultV<LocalV, CPid, CMessage> {
-    StepResultV { state: LocalV::Store(store), send }
+pub open spec fn store_result(store: CStore, send: Seq<(CPid, CMessage)>) -> StepResultV<CProc, CPid, CMessage> {
+    StepResultV { state: CProc::Store(store), send }
 }
 
 pub open spec fn node_pid(i: int) -> CPid {
@@ -1480,19 +1480,19 @@ pub proof fn lemma_spec_nodes(fleet: Fleet, id: u64)
         forall|k: int|
             0 <= k < fleet.nodes - id ==> #[trigger] spec_nodes(fleet, id)[k] == (
                 CPid::Node((id + k) as u64),
-                LocalV::Node(initial_node(fleet, (id + k) as u64)),
+                CProc::Node(initial_node(fleet, (id + k) as u64)),
             ),
     decreases fleet.nodes - id,
 {
     if id >= fleet.nodes {
     } else {
         lemma_spec_nodes(fleet, (id + 1) as u64);
-        let head = seq![(CPid::Node(id), LocalV::Node(initial_node(fleet, id)))];
+        let head = seq![(CPid::Node(id), CProc::Node(initial_node(fleet, id)))];
         let tail = spec_nodes(fleet, (id + 1) as u64);
         assert(spec_nodes(fleet, id) == head + tail);
         assert forall|k: int| 0 <= k < fleet.nodes - id implies #[trigger] spec_nodes(fleet, id)[k] == (
             CPid::Node((id + k) as u64),
-            LocalV::Node(initial_node(fleet, (id + k) as u64)),
+            CProc::Node(initial_node(fleet, (id + k) as u64)),
         ) by {
             if k == 0 {
                 assert((head + tail)[0] == head[0]);
@@ -1504,7 +1504,7 @@ pub proof fn lemma_spec_nodes(fleet: Fleet, id: u64)
 }
 
 /// `spec_queue` from `m` offers the ready item at `k >= m`.
-pub proof fn lemma_queue_from(config: ServerConfig, state: StateV, now: Time, m: int, k: int)
+pub proof fn lemma_queue_from(config: ServerConfig, state: AProc, now: Time, m: int, k: int)
     requires
         0 <= m <= k < state.pending.len(),
         spec_ready(spec_body(state.pending[k]), now),
@@ -1540,7 +1540,7 @@ pub proof fn lemma_queue_from(config: ServerConfig, state: StateV, now: Time, m:
 
 /// The service's timeout step offers the ready item at `k`: an index into
 /// its outcomes whose state removed that item and sends nothing.
-pub proof fn lemma_queue_offers(config: ServerConfig, state: StateV, now: Time, k: int) -> (j: int)
+pub proof fn lemma_queue_offers(config: ServerConfig, state: AProc, now: Time, k: int) -> (j: int)
     requires
         0 <= k < state.pending.len(),
         spec_ready(spec_body(state.pending[k]), now),
@@ -1567,12 +1567,12 @@ pub proof fn lemma_queue_offers(config: ServerConfig, state: StateV, now: Time, 
 }
 
 /// The second half of `spec_run_timeout`, named so the sum above reads.
-pub open spec fn derived(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, APid, AMessage>> {
+pub open spec fn derived(config: ServerConfig, state: AProc, now: Time) -> Seq<StepResultV<AProc, APid, AMessage>> {
     echod_abstract_spec::model::spec_derived(config, state, now)
 }
 
 /// A timeout result at `j` is an outcome of the service's timeout step.
-pub proof fn lemma_timeout_offers(config: ServerConfig, state: StateV, now: Time, j: int)
+pub proof fn lemma_timeout_offers(config: ServerConfig, state: AProc, now: Time, j: int)
     requires
         0 <= j < spec_run_timeout(config, state, now).len(),
     ensures
@@ -1715,9 +1715,9 @@ pub proof fn lemma_land_node(fleet: Fleet, cb: State<CModel>, i: int, at: Time, 
         }),
 {
     let ca = land(cb, i, node_pid(i), at, node_result(node2, send));
-    assert(ca.process == cb.process.update(i, (node_pid(i), LocalV::Node(node2))));
+    assert(ca.process == cb.process.update(i, (node_pid(i), CProc::Node(node2))));
     assert(ca.process.len() == cb.process.len());
-    assert(ca.process[i] == (node_pid(i), LocalV::Node(node2)));
+    assert(ca.process[i] == (node_pid(i), CProc::Node(node2)));
     assert forall|k: int| 0 <= k < fleet.nodes && k != i implies #[trigger] node_at(ca, k) == node_at(cb, k) by {
         assert(ca.process[k] == cb.process[k]);
     };
@@ -1742,8 +1742,8 @@ pub proof fn lemma_land_store(fleet: Fleet, cb: State<CModel>, at: Time, store2:
 {
     let slot = fleet.nodes as int;
     let ca = land(cb, slot, CPid::Store, at, store_result(store2, send));
-    assert(ca.process == cb.process.update(slot, (CPid::Store, LocalV::Store(store2))));
-    assert(ca.process[slot] == (CPid::Store, LocalV::Store(store2)));
+    assert(ca.process == cb.process.update(slot, (CPid::Store, CProc::Store(store2))));
+    assert(ca.process[slot] == (CPid::Store, CProc::Store(store2)));
     assert forall|k: int| 0 <= k < fleet.nodes implies #[trigger] node_at(ca, k) == node_at(cb, k) by {
         assert(ca.process[k] == cb.process[k]);
     };
@@ -2197,7 +2197,7 @@ pub proof fn lemma_shell(
         related(fleet, ca, aa),
         0 <= i < fleet.nodes,
         same_work(node2, node_at(ca, i)),
-        cs.process == ca.process.update(i, (node_pid(i), LocalV::Node(node2))),
+        cs.process == ca.process.update(i, (node_pid(i), CProc::Node(node2))),
         cs.network == ca.network,
         cs.now == ca.now,
     ensures
@@ -2234,9 +2234,9 @@ pub proof fn lemma_reshell(
 {
     let cw = land(cb, i, node_pid(i), at, node_result(next, send));
     assert(shaped(fleet, cw));
-    assert(cw.process[i] == (node_pid(i), LocalV::Node(next)));
+    assert(cw.process[i] == (node_pid(i), CProc::Node(next)));
     assert(node_at(cw, i) == next);
-    assert(ca.process =~= cw.process.update(i, (node_pid(i), LocalV::Node(node2))));
+    assert(ca.process =~= cw.process.update(i, (node_pid(i), CProc::Node(node2))));
     lemma_shell(fleet, config, cw, aa, i, node2, ca);
 }
 
@@ -4002,11 +4002,11 @@ pub proof fn lemma_store(
             assert(sender == node_pid(n));
             let node = node_at(cb, n);
             if store.seen.contains((sender, op)) {
-                assert(spec_store(store, event) == spec_one(LocalV::Store(store), Seq::empty()));
+                assert(spec_store(store, event) == spec_one(CProc::Store(store), Seq::empty()));
                 assert(j == 0);
                 assert(ca == land(cb, slot, CPid::Store, at, store_result(store, Seq::empty())));
                 lemma_land_store(fleet, cb, at, store, Seq::empty());
-                assert(cb.process[slot] == (CPid::Store, LocalV::Store(store)));
+                assert(cb.process[slot] == (CPid::Store, CProc::Store(store)));
                 assert(ca.process =~= cb.process);
                 assert(envelopes(CPid::Store, Seq::<(CPid, CMessage)>::empty()) =~= Seq::<Envelope<CPid, CMessage>>::empty());
                 assert(ca.network =~= cb.network);
@@ -4024,7 +4024,7 @@ pub proof fn lemma_store(
                 let (next, outcome) = spec_apply(store, call);
                 let store2 = CStore { seen: store.seen.push((sender, op)), ..next };
                 let send = seq![(sender, CMessage::StoreReply { op, outcome })];
-                assert(spec_store(store, event) == spec_one(LocalV::Store(store2), send));
+                assert(spec_store(store, event) == spec_one(CProc::Store(store2), send));
                 assert(j == 0);
                 assert(ca == land(cb, slot, CPid::Store, at, store_result(store2, send)));
                 lemma_land_store(fleet, cb, at, store2, send);
@@ -4221,7 +4221,7 @@ pub proof fn lemma_node(
                             wake: crate::node::spec_wake(next),
                             ..next
                         };
-                        assert(results == spec_one(LocalV::Node(node2), send));
+                        assert(results == spec_one(CProc::Node(node2), send));
                         assert(j == 0);
                         assert(results[0] == node_result(node2, send));
                         let cw = land(cb, i, node_pid(i), at, node_result(next, send));
@@ -4229,7 +4229,7 @@ pub proof fn lemma_node(
                         lemma_reshell(fleet, config, cb, aa, i, at, next, node2, send, ca);
                         aa
                     } else if w <= at as nat {
-                        assert(results == spec_one(LocalV::Node(node), Seq::empty()));
+                        assert(results == spec_one(CProc::Node(node), Seq::empty()));
                         assert(j == 0);
                         assert(results[0] == node_result(node, Seq::empty()));
                         lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
@@ -4249,7 +4249,7 @@ pub proof fn lemma_node(
         },
         ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(call) } => {
             if node.flight is Some || node.next_op == u64::MAX {
-                assert(results == spec_one(LocalV::Node(node), Seq::empty()));
+                assert(results == spec_one(CProc::Node(node), Seq::empty()));
                 assert(j == 0);
                 assert(results[0] == node_result(node, Seq::empty()));
                 lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
@@ -4262,7 +4262,7 @@ pub proof fn lemma_node(
                     wake: crate::node::spec_wake(next),
                     ..next
                 };
-                assert(results == spec_one(LocalV::Node(node2), send));
+                assert(results == spec_one(CProc::Node(node2), send));
                 assert(j == 0);
                 assert(results[0] == node_result(node2, send));
                 let cw = land(cb, i, node_pid(i), at, node_result(next, send));
@@ -4273,7 +4273,7 @@ pub proof fn lemma_node(
         },
         ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } } => {
             if node.flight is None || node.next_op == u64::MAX {
-                assert(results == spec_one(LocalV::Node(node), Seq::empty()));
+                assert(results == spec_one(CProc::Node(node), Seq::empty()));
                 assert(j == 0);
                 assert(results[0] == node_result(node, Seq::empty()));
                 lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
@@ -4285,7 +4285,7 @@ pub proof fn lemma_node(
                     wake: crate::node::spec_wake(next),
                     ..next
                 };
-                assert(results == spec_one(LocalV::Node(node2), send));
+                assert(results == spec_one(CProc::Node(node2), send));
                 assert(j == 0);
                 assert(results[0] == node_result(node2, send));
                 let cw = land(cb, i, node_pid(i), at, node_result(next, send));
@@ -4299,7 +4299,7 @@ pub proof fn lemma_node(
                 logic: crate::model::LogicV { clock: at as nat, loops: false, stopping: true, ..node.logic },
                 ..node
             };
-            assert(results == spec_one(LocalV::Node(node2), Seq::empty()));
+            assert(results == spec_one(CProc::Node(node2), Seq::empty()));
             assert(j == 0);
             assert(results[0] == node_result(node2, Seq::empty()));
             lemma_same_work(fleet, config, cb, ab, i, at, node2, ca);
@@ -4506,7 +4506,7 @@ pub proof fn lemma_process(
     if i < fleet.nodes {
         assert(process == node_pid(i));
         let node = node_at(cb, i);
-        assert(cb.process[i].1 == LocalV::Node(node));
+        assert(cb.process[i].1 == CProc::Node(node));
         assert(outcomes == spec_node_step(node, at, event));
         let aa = lemma_node(fleet, config, cb, ab, i, at, event, j, ca);
         lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), aa);
@@ -4515,7 +4515,7 @@ pub proof fn lemma_process(
         assert(i == fleet.nodes);
         assert(process == CPid::Store);
         let store = store_at(fleet, cb);
-        assert(cb.process[i].1 == LocalV::Store(store));
+        assert(cb.process[i].1 == CProc::Store(store));
         assert(outcomes == spec_store(store, event));
         lemma_store(fleet, config, cb, ab, at, event, j, ca);
         lemma_matches_same_visible(config, ab, Seq::<BoundaryEvent>::empty(), concrete_model().observe(label), ab);
@@ -4642,10 +4642,10 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
     assert(cw.process == spec_world(fleet));
     assert(cw.network =~= Seq::<Envelope<CPid, CMessage>>::empty());
     assert(cw.now == 0);
-    assert(aw.process == seq![(APid::Service, StateV { store: empty_store(), pending: Seq::empty() })]);
+    assert(aw.process == seq![(APid::Service, AProc { store: empty_store(), pending: Seq::empty() })]);
     assert(aw.network =~= Seq::<Envelope<APid, AMessage>>::empty());
     assert(single(aw));
-    assert(astate(aw) == StateV { store: empty_store(), pending: Seq::empty() });
+    assert(astate(aw) == AProc { store: empty_store(), pending: Seq::empty() });
     assert(empty_store().promises.dom() =~= Set::<Seq<char>>::empty());
     assert(empty_store().tasks.dom() =~= Set::<Seq<char>>::empty());
     assert(empty_store().schedules.dom() =~= Set::<Seq<char>>::empty());
@@ -4654,12 +4654,12 @@ pub proof fn lemma_initial(fleet: Fleet, config: ServerConfig)
     lemma_spec_nodes(fleet, 0);
     let nodes = spec_nodes(fleet, 0);
     let store = CStore { entries: Seq::empty(), appendable: fleet.appendable, seen: Seq::empty() };
-    let tail = seq![(CPid::Store, LocalV::Store(store))];
+    let tail = seq![(CPid::Store, CProc::Store(store))];
     assert(cw.process == nodes + tail);
     assert(cw.process.len() == fleet.nodes + 1);
     assert forall|i: int| 0 <= i < fleet.nodes implies #[trigger] cw.process[i] == (
         node_pid(i),
-        LocalV::Node(initial_node(fleet, i as u64)),
+        CProc::Node(initial_node(fleet, i as u64)),
     ) by {
         assert(cw.process[i] == nodes[i]);
     };

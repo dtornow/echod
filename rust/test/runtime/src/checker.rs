@@ -21,7 +21,7 @@
 
 use echod_abstract_spec::ServerConfig;
 use echod_abstract_exec::{
-    history_rank, history_responses, rover_trace, HistoryEvent, EchodAbstractExec,
+    history_rank, history_responses, rover_trace, HistoryEvent, Spec as AbstractExec,
 };
 use rover_exec::{check as check_trace, CheckConfig};
 
@@ -117,7 +117,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let mut limits = CheckConfig::for_trace_len(events.len());
     limits.max_nodes = budget as usize;
     match check_trace(
-        &EchodAbstractExec,
+        &AbstractExec,
         &ServerConfig { retry_timeout },
         &events,
         limits,

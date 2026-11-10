@@ -26,10 +26,10 @@
 use vstd::prelude::*;
 
 use rover_spec::rover::comm::ProcessEvent;
-use rover_spec::rover::RoverSpec::{Proc, StepResultV};
+use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 use rover_spec::rover::comm::Time;
 
-use super::model::{Pid, StateV};
+use super::model::{Pid, Proc};
 #[cfg(verus_keep_ghost)]
 use super::trusted::origin;
 use echod_types::{PromiseState, TaskState};
@@ -53,7 +53,7 @@ pub open spec fn well_formed_promise_created_at_lte_timeout_at_at(
 
 pub open spec fn well_formed_promise_created_at_lte_timeout_at(
     _now: Time,
-    state: StateV,
+    state: Proc,
 ) -> bool {
     forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_created_at_lte_timeout_at_at(
@@ -72,7 +72,7 @@ pub open spec fn well_formed_promise_settled_at_lte_timeout_at_at(
 
 pub open spec fn well_formed_promise_settled_at_lte_timeout_at(
     _now: Time,
-    state: StateV,
+    state: Proc,
 ) -> bool {
     forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_settled_at_lte_timeout_at_at(
@@ -91,7 +91,7 @@ pub open spec fn well_formed_promise_created_at_lte_settled_at_at(
 
 pub open spec fn well_formed_promise_created_at_lte_settled_at(
     _now: Time,
-    state: StateV,
+    state: Proc,
 ) -> bool {
     forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_created_at_lte_settled_at_at(
@@ -107,7 +107,7 @@ pub open spec fn well_formed_promise_settled_at_iff_not_pending_at(
 
 pub open spec fn well_formed_promise_settled_at_iff_not_pending(
     _now: Time,
-    state: StateV,
+    state: Proc,
 ) -> bool {
     forall|id: Chars| state.store.promises.contains_key(id) ==>
         well_formed_promise_settled_at_iff_not_pending_at(
@@ -258,16 +258,16 @@ pub open spec fn well_formed_schedule_last_run_at_lt_next_run_at_at(
 }
 
 /// Object ids are map keys in Rover, so duplicate rows are unrepresentable.
-pub open spec fn well_formed_store_object_ids_unique(_state: StateV) -> bool {
+pub open spec fn well_formed_store_object_ids_unique(_state: Proc) -> bool {
     true
 }
 
 /// Schedule ids are map keys for the same reason.
-pub open spec fn well_formed_store_schedule_ids_unique(_state: StateV) -> bool {
+pub open spec fn well_formed_store_schedule_ids_unique(_state: Proc) -> bool {
     true
 }
 
-pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
+pub open spec fn state_catalogue(now: Time, state: Proc) -> bool {
     &&& well_formed_promise_created_at_lte_timeout_at(now, state)
     &&& well_formed_promise_settled_at_lte_timeout_at(now, state)
     &&& well_formed_promise_created_at_lte_settled_at(now, state)
@@ -354,8 +354,8 @@ pub open spec fn state_catalogue(now: Time, state: StateV) -> bool {
 
 pub open spec fn monotone_promise_set_grows(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars| before.store.promises.contains_key(id) ==>
         after.store.promises.contains_key(id)
@@ -363,8 +363,8 @@ pub open spec fn monotone_promise_set_grows(
 
 pub open spec fn monotone_task_set_grows(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars| before.store.tasks.contains_key(id) ==>
         after.store.tasks.contains_key(id)
@@ -372,8 +372,8 @@ pub open spec fn monotone_task_set_grows(
 
 pub open spec fn preserved_promise_birth_fields_immutable(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.promises.contains_key(id)
@@ -390,8 +390,8 @@ pub open spec fn preserved_promise_birth_fields_immutable(
 
 pub open spec fn preserved_schedule_birth_fields_immutable(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.schedules.contains_key(id)
@@ -410,8 +410,8 @@ pub open spec fn preserved_schedule_birth_fields_immutable(
 
 pub open spec fn preserved_promise_settlement_is_one_way(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.promises.contains_key(id)
@@ -423,8 +423,8 @@ pub open spec fn preserved_promise_settlement_is_one_way(
 
 pub open spec fn preserved_promise_state_frozen_once_settled(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.promises.contains_key(id)
@@ -436,8 +436,8 @@ pub open spec fn preserved_promise_state_frozen_once_settled(
 
 pub open spec fn preserved_promise_value_until_settlement(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.promises.contains_key(id)
@@ -450,8 +450,8 @@ pub open spec fn preserved_promise_value_until_settlement(
 
 pub open spec fn monotone_task_version(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars|
         before.store.tasks.contains_key(id)
@@ -461,8 +461,8 @@ pub open spec fn monotone_task_version(
 
 pub open spec fn monotone_promise_callbacks_while_pending(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars, callback: Chars|
         before.store.promises.contains_key(id)
@@ -475,8 +475,8 @@ pub open spec fn monotone_promise_callbacks_while_pending(
 
 pub open spec fn monotone_promise_listeners_while_pending(
     _now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     forall|id: Chars, listener: Chars|
         before.store.promises.contains_key(id)
@@ -489,8 +489,8 @@ pub open spec fn monotone_promise_listeners_while_pending(
 
 pub open spec fn transition_catalogue(
     now: Time,
-    before: StateV,
-    after: StateV,
+    before: Proc,
+    after: Proc,
 ) -> bool {
     &&& monotone_promise_set_grows(now, before, after)
     &&& monotone_task_set_grows(now, before, after)
@@ -506,9 +506,9 @@ pub open spec fn transition_catalogue(
 
 pub open spec fn step_catalogue(
     now: Time,
-    before: StateV,
+    before: Proc,
     event: ProcessEvent<Pid, Message>,
-    outcome: StepResultV<StateV, Pid, Message>,
+    outcome: StepResultV<Proc, Pid, Message>,
 ) -> bool {
     &&& state_catalogue(now, outcome.state)
     &&& transition_catalogue(now, before, outcome.state)
@@ -520,7 +520,7 @@ pub open spec fn step_catalogue(
 
 /// The exact obligation every allowed `on_event` outcome must discharge.
 pub open spec fn on_event_preserves_catalogue(config: ServerConfig) -> bool {
-    forall|before: StateV, now: Time, event: ProcessEvent<Pid, Message>, i: int|
+    forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|
         #![trigger before.on_event(config, now, event)[i]]
         state_catalogue(now, before)
         && 0 <= i

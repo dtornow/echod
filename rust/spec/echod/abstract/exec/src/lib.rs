@@ -5,7 +5,7 @@
 use vstd::prelude::*;
 
 use echod_abstract_spec::model::{
-    self as abstract_model, Pid as SpecPid, StateV as SpecState,
+    self as abstract_model, Pid as SpecPid, Proc as SpecProc,
 };
 use echod_abstract_spec::protocol::Message as SpecMessage;
 use echod_abstract_spec::ServerConfig as Config;
@@ -19,9 +19,8 @@ pub mod trusted;
 pub mod view;
 pub mod history;
 
-pub use echod_abstract_spec::*;
 pub use machine::{Promise, Store, Task};
-pub use model::State;
+pub use model::Proc;
 pub use trusted::{PMap, PSet};
 pub use history::{
     arbitrary, finish, history_rank, history_responses, next_cron, plain,
@@ -31,10 +30,10 @@ pub use history::{
 verus! {
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct EchodAbstractExec;
+pub struct Spec;
 
-impl RoverExec::Proc for State {
-    type Spec = SpecState;
+impl RoverExec::Proc for Proc {
+    type Spec = SpecProc;
 
     fn on_event(
         &self,
@@ -42,9 +41,9 @@ impl RoverExec::Proc for State {
         now: RoverTime,
         event: &ProcessEvent<SpecPid, SpecMessage>,
     ) -> (results: Vec<RoverExec::ProcResult<Self>>) {
-        let mut inner = model::State::on_event(self, config, now, event);
+        let mut inner = model::Proc::on_event(self, config, now, event);
         let ghost all = inner@;
-        let mut results: Vec<RoverExec::ProcResult<State>> = Vec::new();
+        let mut results: Vec<RoverExec::ProcResult<Proc>> = Vec::new();
         while !inner.is_empty()
             invariant
                 results@.len() + inner@.len() == all.len(),
@@ -72,19 +71,19 @@ impl RoverExec::Proc for State {
     }
 }
 
-impl RoverExec::Spec for EchodAbstractExec {
-    type Spec = abstract_model::EchodAbstractSpec;
-    type Proc = State;
+impl RoverExec::Spec for Spec {
+    type Spec = abstract_model::Spec;
+    type Proc = Proc;
 
-    open spec fn spec(&self) -> abstract_model::EchodAbstractSpec {
-        abstract_model::EchodAbstractSpec
+    open spec fn spec(&self) -> abstract_model::Spec {
+        abstract_model::Spec
     }
 
     fn outside(&self) -> SpecPid {
         SpecPid::Outside
     }
 
-    fn initial(&self, config: &Config) -> (states: Vec<(SpecPid, State)>) {
+    fn initial(&self, config: &Config) -> (states: Vec<(SpecPid, Proc)>) {
         model::initial(config)
     }
 

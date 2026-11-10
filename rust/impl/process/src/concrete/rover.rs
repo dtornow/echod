@@ -6,11 +6,12 @@
 use vstd::prelude::*;
 
 pub use echod_concrete_spec::model::{Fleet, Message, Pid};
-use echod_concrete_spec::model::{LocalV, LogicV};
+use echod_concrete_spec::model::LogicV;
+use echod_concrete_spec::Proc as SpecProc;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{spec_store, spec_world};
 #[cfg(test)]
-use echod_concrete_spec::model::EchodConcreteSpec;
+use echod_concrete_spec::Spec as SpecModel;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::NodeV;
 #[cfg(verus_keep_ghost)]
@@ -42,7 +43,7 @@ pub struct Logic {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub enum Local {
+pub enum Proc {
     Node(Node),
     Store(Store),
 }
@@ -58,24 +59,24 @@ impl View for Logic {
     }
 }
 
-impl View for Local {
-    type V = LocalV;
-    open spec fn view(&self) -> LocalV {
+impl View for Proc {
+    type V = SpecProc;
+    open spec fn view(&self) -> SpecProc {
         match self {
-            Local::Node(node) => LocalV::Node(node@),
-            Local::Store(store) => LocalV::Store(store@),
+            Proc::Node(node) => SpecProc::Node(node@),
+            Proc::Store(store) => SpecProc::Store(store@),
         }
     }
 }
 
-pub struct EchodConcreteExec;
+pub struct Spec;
 
-pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
-    v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
+pub open spec fn world_v(v: Seq<(Pid, Proc)>) -> Seq<(Pid, SpecProc)> {
+    v.map_values(|entry: (Pid, Proc)| (entry.0, entry.1@))
 }
 
-pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<rover_spec::rover::RoverSpec::StepResultV<LocalV, Pid, Message>> {
-    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| rover_spec::rover::RoverSpec::StepResultV { state: LocalV::Store(pair.0@), send: pair.1@ })
+pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<rover_spec::rover::RoverSpec::StepResultV<SpecProc, Pid, Message>> {
+    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| rover_spec::rover::RoverSpec::StepResultV { state: SpecProc::Store(pair.0@), send: pair.1@ })
 }
 
 fn same_pid(a: Pid, b: Pid) -> (r: bool)
@@ -127,7 +128,7 @@ impl Store {
                 r
             },
             _ => {
-                proof { assert(store_results_v(r@) =~~= Seq::<rover_spec::rover::RoverSpec::StepResultV<LocalV, Pid, Message>>::empty()); }
+                proof { assert(store_results_v(r@) =~~= Seq::<rover_spec::rover::RoverSpec::StepResultV<SpecProc, Pid, Message>>::empty()); }
                 r
             },
         }
@@ -135,19 +136,19 @@ impl Store {
 }
 
 #[cfg(test)]
-impl RoverExec::Proc for Local {
-    type Spec = LocalV;
+impl RoverExec::Proc for Proc {
+    type Spec = SpecProc;
 
     fn on_event(&self, _config: &Fleet, now: Time, event: &ProcessEvent<Pid, Message>) -> Vec<ProcResult<Self>> {
         let mut results = Vec::new();
         match self {
-            Local::Node(node) => {
+            Proc::Node(node) => {
                 let pairs = node.step(now, event);
-                for (node, send) in pairs { results.push(ProcResult { state: Local::Node(node), send, marks: Vec::new() }); }
+                for (node, send) in pairs { results.push(ProcResult { state: Proc::Node(node), send, marks: Vec::new() }); }
             },
-            Local::Store(store) => {
+            Proc::Store(store) => {
                 let pairs = store.step(event);
-                for (store, send) in pairs { results.push(ProcResult { state: Local::Store(store), send, marks: Vec::new() }); }
+                for (store, send) in pairs { results.push(ProcResult { state: Proc::Store(store), send, marks: Vec::new() }); }
             },
         }
         results
@@ -155,21 +156,21 @@ impl RoverExec::Proc for Local {
 }
 
 #[cfg(test)]
-impl RoverExec::Spec for EchodConcreteExec {
-    type Spec = EchodConcreteSpec;
-    type Proc = Local;
+impl RoverExec::Spec for Spec {
+    type Spec = SpecModel;
+    type Proc = Proc;
 
-    open spec fn spec(&self) -> EchodConcreteSpec { EchodConcreteSpec }
+    open spec fn spec(&self) -> SpecModel { SpecModel }
     fn outside(&self) -> Pid { Pid::Outside }
 
-    fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
+    fn initial(&self, config: &Fleet) -> Vec<(Pid, Proc)> {
         let mut process = Vec::new();
         let mut id = 0u64;
         while id < config.nodes {
-            process.push((Pid::Node(id), Local::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout))));
+            process.push((Pid::Node(id), Proc::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout))));
             id += 1;
         }
-        process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
+        process.push((Pid::Store, Proc::Store(Store::empty(config.appendable))));
         process
     }
 

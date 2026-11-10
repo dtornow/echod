@@ -133,7 +133,7 @@ shows the panels with data.
   kernel's (both read before the first `:`), and the simulator's worker
   address is a URL. The model's side is now checked code: every handler
   in the abstract model's `exec.rs` is verified to compute its twin in `spec.rs`,
-  and the model's `EchodAbstractExec` impl is verified, so the checker's
+  and `echod_abstract_exec::Spec` is verified, so the checker's
   verdicts and this theorem speak about the same functions, under the
   model's own axioms (a value is its view; a set's elements come out in one
   order, `pset_seq`). What the proof moved: the kernel refuses an acquire

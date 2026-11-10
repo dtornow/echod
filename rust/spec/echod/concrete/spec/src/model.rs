@@ -49,7 +49,7 @@ pub struct Fleet {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// The mathematical Echod concrete model, with no executable local state.
-pub struct EchodConcreteSpec;
+pub struct Spec;
 
 // What crosses the boundary
 // ---------------------------------------------------------------------------
@@ -80,12 +80,12 @@ pub struct LogicV {
     pub last_wake: Option<nat>,
 }
 
-pub enum LocalV {
+pub enum Proc {
     Node(NodeV),
     Store(StoreV),
 }
 
-impl RoverSpec::Proc for LocalV {
+impl RoverSpec::Proc for Proc {
     type Config = Fleet;
     type Pid = Pid;
     type Message = Message;
@@ -95,22 +95,22 @@ impl RoverSpec::Proc for LocalV {
         _config: Fleet,
         now: Time,
         event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<LocalV, Pid, Message>> {
+    ) -> Seq<StepResultV<Proc, Pid, Message>> {
         match self {
-            LocalV::Node(node) => spec_node(node, now, event),
-            LocalV::Store(store) => spec_store(store, event),
+            Proc::Node(node) => spec_node(node, now, event),
+            Proc::Store(store) => spec_store(store, event),
         }
     }
 }
 
 /// The nodes a fleet starts, then the store.
-pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
+pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, Proc)>
     decreases (config.nodes - id) as int
 {
     if id >= config.nodes {
         Seq::empty()
     } else {
-        seq![(Pid::Node(id), LocalV::Node(spec_initial_node(config, id)))]
+        seq![(Pid::Node(id), Proc::Node(spec_initial_node(config, id)))]
             + spec_nodes(config, (id + 1) as u64)
     }
 }
@@ -136,10 +136,10 @@ pub open spec fn spec_initial_node(config: Fleet, id: u64) -> NodeV {
     }
 }
 
-pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, LocalV)> {
+pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, Proc)> {
     spec_nodes(config, 0) + seq![(
         Pid::Store,
-        LocalV::Store(StoreV {
+        Proc::Store(StoreV {
             entries: Seq::empty(),
             appendable: config.appendable,
             seen: Seq::empty(),
@@ -147,7 +147,7 @@ pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, LocalV)> {
     )]
 }
 
-// The process steps as specifications. `LocalV::on_event` dispatches on the
+// The process steps as specifications. `Proc::on_event` dispatches on the
 // model-specific process enum: a node runs one flight, the store applies one
 // call. `RoverExec::Proc::on_event` proves the executable process returns these
 // results: `Node::step` computes `spec_node` and `Store::step` computes
@@ -166,7 +166,7 @@ pub open spec fn spec_bytes(body: Seq<u8>) -> Vec<u8> {
     choose|v: Vec<u8>| v@ == body
 }
 
-pub open spec fn spec_one(state: LocalV, send: Seq<(Pid, Message)>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+pub open spec fn spec_one(state: Proc, send: Seq<(Pid, Message)>) -> Seq<StepResultV<Proc, Pid, Message>> {
     seq![StepResultV { state, send }]
 }
 
@@ -178,26 +178,26 @@ pub open spec fn spec_clock(logic: LogicV, now: Time) -> LogicV {
 /// is spent takes no step that could issue an op: it stutters. The
 /// executable node adds one there and would overflow; the model stops one
 /// short of that.
-pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<Proc, Pid, Message>> {
     match event {
         ProcessEvent::Timeout => match node.wake {
             Some(at) if at <= now as nat && node.flight is None && node.next_op < u64::MAX => {
                 let (next, send) = spec_timeout(node, now);
-                spec_one(LocalV::Node(NodeV {
+                spec_one(Proc::Node(NodeV {
                     logic: LogicV { clock: now as nat, last_wake: None, ..node.logic },
                     wake: spec_wake(next),
                     ..next
                 }), send)
             },
-            Some(at) if at <= now as nat => spec_one(LocalV::Node(node), Seq::empty()),
+            Some(at) if at <= now as nat => spec_one(Proc::Node(node), Seq::empty()),
             _ => Seq::empty(),
         },
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
             if node.flight is Some || node.next_op == u64::MAX {
-                spec_one(LocalV::Node(node), Seq::empty())
+                spec_one(Proc::Node(node), Seq::empty())
             } else {
                 let (next, send) = spec_request(node, now, call);
-                spec_one(LocalV::Node(NodeV {
+                spec_one(Proc::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     next_request: (node.next_request + 1) as u64,
                     wake: spec_wake(next),
@@ -207,10 +207,10 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
         },
         ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
             if node.flight is None || node.next_op == u64::MAX {
-                spec_one(LocalV::Node(node), Seq::empty())
+                spec_one(Proc::Node(node), Seq::empty())
             } else {
                 let (next, send) = spec_store_reply(node, op, outcome);
-                spec_one(LocalV::Node(NodeV {
+                spec_one(Proc::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     wake: spec_wake(next),
                     ..next
@@ -218,7 +218,7 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
             }
         },
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Stop } => {
-            spec_one(LocalV::Node(NodeV {
+            spec_one(Proc::Node(NodeV {
                 logic: LogicV { clock: now as nat, loops: false, stopping: true, ..node.logic },
                 ..node
             }), Seq::empty())
@@ -229,15 +229,15 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
 
 /// The store answers each `(sender, op)` once. A delivery it has answered
 /// is a stutter, the same arm as `Store::on_event`.
-pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<LocalV, Pid, Message>> {
+pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<Proc, Pid, Message>> {
     match event {
         ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
             if store.seen.contains((sender, op)) {
-                spec_one(LocalV::Store(store), Seq::empty())
+                spec_one(Proc::Store(store), Seq::empty())
             } else {
                 let (next, outcome) = spec_apply(store, call);
                 spec_one(
-                    LocalV::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
+                    Proc::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
                     seq![(sender, Message::StoreReply { op, outcome })],
                 )
             }
@@ -287,10 +287,10 @@ impl Fleet {
 verus! {
 
 
-impl RoverSpec::Spec for EchodConcreteSpec {
+impl RoverSpec::Spec for Spec {
     type Config = Fleet;
     type Pid = Pid;
-    type Proc = LocalV;
+    type Proc = Proc;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
@@ -298,7 +298,7 @@ impl RoverSpec::Spec for EchodConcreteSpec {
         Pid::Outside
     }
 
-    open spec fn processes(&self, config: Fleet) -> Seq<(Pid, LocalV)> {
+    open spec fn processes(&self, config: Fleet) -> Seq<(Pid, Proc)> {
         spec_world(config)
     }
 

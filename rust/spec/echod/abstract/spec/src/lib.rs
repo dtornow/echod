@@ -5,8 +5,8 @@
 //! `catalogue` states conformance properties; `trusted` contains the explicit
 //! axiomatic boundary. Executable realizations live in
 //! `echod-abstract-exec`.
-//! `model::EchodAbstractSpec` implements `RoverSpec::Spec`;
-//! `RoverSpec::State<model::EchodAbstractSpec>` is the complete mathematical
+//! [`Spec`] implements `RoverSpec::Spec`;
+//! `RoverSpec::State<Spec>` is the complete mathematical
 //! state.
 
 #![allow(
@@ -26,7 +26,7 @@ pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
-pub use model::EchodAbstractSpec;
+pub use model::{Proc, Spec};
 pub use echod_types as types;
 pub use machine::{Dispatch, ServerConfig};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

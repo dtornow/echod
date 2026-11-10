@@ -12,19 +12,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use echod_logic::concrete::document::Node;
-use echod_logic::concrete::model::{Fleet, Message as ConcreteMessage, Pid as ConcretePid};
+use echod_logic::concrete::rover::{Fleet, Message as ConcreteMessage, Pid as ConcretePid};
 use echod_logic::concrete::store::Store;
 use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
 use rover_exec::{
-    check, exec, Action, Certificate, CheckConfig, Driver, ExecError, Proc, ProcResult, Spec,
+    check, exec, Action, Certificate, CheckConfig, Driver, ExecError,
+    Proc as RoverProc, ProcResult, Spec as RoverExecSpec,
     Strategy,
 };
 use echod_types::{Request, Response};
-use echod_abstract_exec::{history_rank, EchodAbstractExec};
+use echod_abstract_exec::{history_rank, Spec as AbstractExec};
 use echod_abstract_spec::model::Pid as AbstractPid;
 use echod_abstract_spec::{Call, Message as AbstractMessage, Output, ServerConfig};
-use echod_concrete_spec::model::{LocalV as ConcreteLocalV, EchodConcreteSpec, RETRY_TIMEOUT};
-use echod_concrete_spec::{StoreCall, StoreError, StoreOutcome};
+use echod_concrete_spec::model::RETRY_TIMEOUT;
+use echod_concrete_spec::{
+    Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreCall, StoreError, StoreOutcome,
+};
 use vstd::prelude::View;
 
 use crate::rng::Rng;
@@ -38,17 +41,17 @@ pub type AbstractCertificate = Certificate<AbstractPid, AbstractMessage>;
 /// Production node/store state wrapped locally so the external executable
 /// trait can name the concrete mathematical state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ConcreteProcess {
+enum AdapterProc {
     Node(Node),
     Store(Store),
 }
 
-impl View for ConcreteProcess {
-    type V = ConcreteLocalV;
+impl View for AdapterProc {
+    type V = ConcreteSpecProc;
 }
 
-impl Proc for ConcreteProcess {
-    type Spec = ConcreteLocalV;
+impl RoverProc for AdapterProc {
+    type Spec = ConcreteSpecProc;
 
     fn on_event(
         &self,
@@ -79,23 +82,23 @@ impl Proc for ConcreteProcess {
     }
 }
 
-/// Executable realization of `EchodConcreteSpec`, backed by production state.
-struct EchodConcreteExecAdapter;
+/// Executable realization of `echod_concrete_spec::Spec`, backed by production state.
+struct AdapterSpec;
 
-impl Spec for EchodConcreteExecAdapter {
-    type Spec = EchodConcreteSpec;
-    type Proc = ConcreteProcess;
+impl RoverExecSpec for AdapterSpec {
+    type Spec = ConcreteSpec;
+    type Proc = AdapterProc;
 
     fn outside(&self) -> ConcretePid {
         ConcretePid::Outside
     }
 
-    fn initial(&self, config: &Fleet) -> Vec<(ConcretePid, ConcreteProcess)> {
+    fn initial(&self, config: &Fleet) -> Vec<(ConcretePid, AdapterProc)> {
         let mut process = (0..config.nodes)
             .map(|id| {
                 (
                     ConcretePid::Node(id),
-                    ConcreteProcess::Node(Node::new(
+                    AdapterProc::Node(Node::new(
                         id,
                         config.nodes,
                         config.loops,
@@ -106,7 +109,7 @@ impl Spec for EchodConcreteExecAdapter {
             .collect::<Vec<_>>();
         process.push((
             ConcretePid::Store,
-            ConcreteProcess::Store(Store::empty(config.appendable)),
+            AdapterProc::Store(Store::empty(config.appendable)),
         ));
         process
     }
@@ -174,7 +177,7 @@ pub enum CheckOutcome {
 
 /// Scope of the executable concrete model used by this experiment.
 ///
-/// The fleet is created once by `EchodConcreteSpec::processes`; the store
+/// The fleet is created once by `echod_concrete_spec::Spec::processes`; the store
 /// computes its normal in-memory outcomes.  In particular this driver does
 /// not synthesize lifecycle events or fault responses that the concrete
 /// model cannot produce.
@@ -525,8 +528,8 @@ impl SeededStrategy {
     }
 }
 
-impl Strategy<EchodConcreteExecAdapter> for SeededStrategy {
-    fn next(&mut self, driver: Driver<'_, EchodConcreteExecAdapter>) -> Option<ConcreteAction> {
+impl Strategy<AdapterSpec> for SeededStrategy {
+    fn next(&mut self, driver: Driver<'_, AdapterSpec>) -> Option<ConcreteAction> {
         self.fill_window(driver.now);
         if self.issued == self.operations && self.outstanding() == 0 {
             if self.clock_advances == 0 {
@@ -900,7 +903,7 @@ pub fn run_with_options(options: Options) -> Result<Report, RunError> {
     let config = fleet(&options);
     let max_steps = options.operations.saturating_mul(24).saturating_add(64);
     let execution = exec(
-        &EchodConcreteExecAdapter,
+        &AdapterSpec,
         &config,
         max_steps,
         SeededStrategy::new(&options),
@@ -930,7 +933,7 @@ pub fn run_with_options(options: Options) -> Result<Report, RunError> {
         max_nodes: 50_000,
     };
     let abstract_certificate = check(
-        &EchodAbstractExec,
+        &AbstractExec,
         &ServerConfig {
             retry_timeout: RETRY_TIMEOUT,
         },
@@ -1044,7 +1047,7 @@ mod tests {
         assert_eq!(first, replayed);
         assert_eq!(
             rover_exec::replay(
-                &EchodConcreteExecAdapter,
+                &AdapterSpec,
                 &fleet(&options),
                 &first.trace,
                 &first.certificate,

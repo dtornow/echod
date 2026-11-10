@@ -48,7 +48,7 @@ use echod_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceA
 use echod_abstract_spec::{Dispatch, ServerConfig};
 use echod_abstract_exec::{
     arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
-    Action, HistoryEvent, EchodAbstractExec, Store as AbstractStore, MARKS,
+    Action, HistoryEvent, Spec as AbstractExec, Store as AbstractStore, MARKS,
 };
 use serde_json::{json, Value};
 
@@ -265,14 +265,14 @@ fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
     let events = rover_trace(trace);
     let expected = history_responses(trace);
     match check_trace(
-        &EchodAbstractExec,
+        &AbstractExec,
         &config,
         &events,
         CheckConfig::for_trace_len(events.len()),
         |event, action, sent| history_rank(event, action, sent, &expected),
     ) {
         Some(certificate) => Outcome::Ok(
-            marks(&EchodAbstractExec, &config, &certificate).expect("the certificate replays"),
+            marks(&AbstractExec, &config, &certificate).expect("the certificate replays"),
         ),
         None => Outcome::Unknown(Violation {
             reason: "bounded Rover search found no certificate".into(),

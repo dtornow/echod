@@ -24,7 +24,7 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    Fleet, LocalV, Message as CMessage, EchodConcreteSpec as CModel, NodeV, Pid as CPid,
+    Fleet, Message as CMessage, Spec as CModel, NodeV, Pid as CPid,
     spec_string,
     StoreV as CStore,
 };
@@ -39,7 +39,7 @@ use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreC
 use echod_abstract_spec::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::model::{
-    EchodAbstractSpec as AModel, Pid as APid, spec_run_timeout, StateV,
+    Spec as AModel, Pid as APid, spec_run_timeout, Proc as AProc,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
@@ -93,7 +93,7 @@ pub open spec fn single(world: State<AModel>) -> bool {
     world.process.len() == 1 && world.process[0].0 == APid::Service
 }
 
-pub open spec fn astate(world: State<AModel>) -> StateV {
+pub open spec fn astate(world: State<AModel>) -> AProc {
     world.process[0].1
 }
 
@@ -227,7 +227,7 @@ pub open spec fn owed(fleet: Fleet, world: State<CModel>, item: Sched<InternalV>
 
 /// Every occurrence a node owes is queued at the service. The service may
 /// hold more: an occurrence a node dropped stays queued there.
-pub open spec fn pending_covered(fleet: Fleet, world: State<CModel>, state: StateV) -> bool {
+pub open spec fn pending_covered(fleet: Fleet, world: State<CModel>, state: AProc) -> bool {
     forall|item: Sched<InternalV>|
         #[trigger] owed(fleet, world, item, 0) <= state.pending.to_multiset().count(item)
 }
@@ -641,7 +641,7 @@ pub open spec fn due_agrees(
     config: ServerConfig,
     key: Seq<char>,
     doc: DocV,
-    state: StateV,
+    state: AProc,
     now: u64,
 ) -> bool {
     let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
@@ -660,7 +660,7 @@ pub open spec fn due_agrees(
 }
 
 pub open spec fn dues_agree(config: ServerConfig) -> bool {
-    forall|key: Seq<char>, doc: DocV, state: StateV, now: u64|
+    forall|key: Seq<char>, doc: DocV, state: AProc, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) ==> #[trigger] due_agrees(
             config,
             key,

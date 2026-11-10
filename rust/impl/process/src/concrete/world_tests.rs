@@ -2,7 +2,7 @@
 //! flight, and the store's conditional write.
 
 use echod_abstract_spec::{Call, Dispatch, Output};
-use crate::concrete::model::{Fleet, Local, Message, Pid, EchodConcreteExec};
+use crate::concrete::rover::{Fleet, Proc, Message, Pid, Spec};
 use crate::concrete::store::Store;
 use crate::concrete::{Etag, StoreCall, StoreError, StoreOutcome};
 use echod_types::{
@@ -14,27 +14,27 @@ use rover_exec::{
     check, exec, replay, Action, CheckConfig, Driver, Proc as _, ProcResult, Spec as _,
 };
 
-fn node(local: &Local) -> &crate::concrete::document::Node {
+fn node(local: &Proc) -> &crate::concrete::document::Node {
     match local {
-        Local::Node(node) => node,
-        Local::Store(_) => panic!("expected a node"),
+        Proc::Node(node) => node,
+        Proc::Store(_) => panic!("expected a node"),
     }
 }
 
-fn store(local: &Local) -> &Store {
+fn store(local: &Proc) -> &Store {
     match local {
-        Local::Store(store) => store,
-        Local::Node(_) => panic!("expected the store"),
+        Proc::Store(store) => store,
+        Proc::Node(_) => panic!("expected the store"),
     }
 }
 
 /// One local step; the fleet does not enter it.
 fn step(
     _pid: &Pid,
-    state: &Local,
+    state: &Proc,
     now: u64,
     event: &ProcessEvent<Pid, Message>,
-) -> Vec<ProcResult<Local>> {
+) -> Vec<ProcResult<Proc>> {
     state.on_event(&Fleet::new(1, true), now, event)
 }
 
@@ -49,10 +49,10 @@ fn echod_concrete_exec_is_deterministic_and_certified() {
     );
     let run = || {
         exec(
-            &EchodConcreteExec,
+            &Spec,
             &config,
             5,
-            |driver: Driver<'_, EchodConcreteExec>| match driver.step {
+            |driver: Driver<'_, Spec>| match driver.step {
                 0 => Some(Action::Inject {
                     recipient: Pid::Node(0),
                     at: 3,
@@ -124,7 +124,7 @@ fn echod_concrete_exec_is_deterministic_and_certified() {
     ));
     assert_eq!(
         replay(
-            &EchodConcreteExec,
+            &Spec,
             &config,
             &first.trace,
             &first.certificate,
@@ -135,7 +135,7 @@ fn echod_concrete_exec_is_deterministic_and_certified() {
     // The abstract model has distinct boundary types; relating those traces
     // belongs to the concrete refinement rather than this execution harness.
     assert!(check(
-        &EchodConcreteExec,
+        &Spec,
         &config,
         &first.trace,
         CheckConfig::for_trace_len(first.trace.len()),
@@ -146,7 +146,7 @@ fn echod_concrete_exec_is_deterministic_and_certified() {
 
 #[test]
 fn the_world_is_the_nodes_then_the_store() {
-    let world = EchodConcreteExec.initial(&Fleet::new(2, true));
+    let world = Spec.initial(&Fleet::new(2, true));
     assert_eq!(world.len(), 3);
     assert_eq!(world[0].0, Pid::Node(0));
     assert_eq!(world[1].0, Pid::Node(1));
@@ -162,16 +162,16 @@ fn the_world_is_the_nodes_then_the_store() {
     assert_eq!(first.wake, None);
     assert!(store(&world[2].1).entries.is_empty());
 
-    let quiet = EchodConcreteExec.initial(&Fleet::new(1, false));
+    let quiet = Spec.initial(&Fleet::new(1, false));
     assert!(!node(&quiet[0].1).logic.loops);
 }
 
 #[test]
 fn the_outside_injects_requests_and_stop() {
     let config = Fleet::new(2, true);
-    assert_eq!(EchodConcreteExec.outside(), Pid::Outside);
-    assert!(EchodConcreteExec.injectable(&config, &Message::Stop));
-    assert!(!EchodConcreteExec.injectable(
+    assert_eq!(Spec.outside(), Pid::Outside);
+    assert!(Spec.injectable(&config, &Message::Stop));
+    assert!(!Spec.injectable(
         &config,
         &Message::StoreReq {
             op: 1,
@@ -182,16 +182,16 @@ fn the_outside_injects_requests_and_stop() {
 
 #[test]
 fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, state) = &world[0];
     assert!(step(pid, state, 5, &ProcessEvent::Timeout).is_empty());
 
     let mut armed = node(state).clone();
     armed.wake = Some(10);
-    let early = step(pid, &Local::Node(armed.clone()), 9, &ProcessEvent::Timeout);
+    let early = step(pid, &Proc::Node(armed.clone()), 9, &ProcessEvent::Timeout);
     assert!(early.is_empty());
 
-    let due = step(pid, &Local::Node(armed), 10, &ProcessEvent::Timeout);
+    let due = step(pid, &Proc::Node(armed), 10, &ProcessEvent::Timeout);
     assert_eq!(due.len(), 1);
     let stepped = node(&due[0].state);
     assert_eq!(stepped.logic.clock, 10);
@@ -210,11 +210,11 @@ fn call(id: u64, request: Request) -> Call {
 
 fn deliver(
     node_pid: Pid,
-    node_state: Local,
-    store_state: Local,
+    node_state: Proc,
+    store_state: Proc,
     now: u64,
     event: &ProcessEvent<Pid, Message>,
-) -> (Local, Local, Vec<(Pid, Message)>) {
+) -> (Proc, Proc, Vec<(Pid, Message)>) {
     let stepped = step(&node_pid, &node_state, now, event);
     assert_eq!(stepped.len(), 1);
     let mut node_state = stepped[0].state.clone();
@@ -255,7 +255,7 @@ fn deliver(
 
 #[test]
 fn a_promise_get_loads_the_document_and_a_miss_is_404() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, state) = world[0].clone();
     let mut armed = node(&state).clone();
     armed.wake = Some(40);
@@ -267,7 +267,7 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
     );
     let stepped = step(
         &pid,
-        &Local::Node(armed),
+        &Proc::Node(armed),
         3,
         &ProcessEvent::Receive {
             sender: Pid::Outside,
@@ -322,7 +322,7 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
 
 #[test]
 fn a_promise_create_lands_and_the_next_get_reads_it() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let create = call(
@@ -398,7 +398,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
 
 #[test]
 fn stop_ends_the_loop() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, state) = world[0].clone();
     let stopped = step(
         &pid,
@@ -418,7 +418,7 @@ fn stop_ends_the_loop() {
 
 #[test]
 fn the_store_commits_a_conditional_write_and_answers_the_node() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, false));
+    let world = Spec.initial(&Fleet::new(1, false));
     let store = world[1].1.clone();
     let call = StoreCall::PutIfNoneMatch {
         key: "doc".into(),
@@ -490,7 +490,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         }
     ));
     match (&rejected[0].state, &created[0].state) {
-        (Local::Store(after), Local::Store(before)) => {
+        (Proc::Store(after), Proc::Store(before)) => {
             assert_eq!(after.entries, before.entries);
             assert!(after.seen.contains(&(Pid::Node(0), 10)));
         }
@@ -522,19 +522,19 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
         other => panic!("write {other:?}"),
     }
     match &wrote[0].state {
-        Local::Store(stored) => {
+        Proc::Store(stored) => {
             assert_eq!(stored.entries.len(), 1);
             assert_eq!(stored.entries[0].key, "doc");
             assert_eq!(stored.entries[0].body, b"two");
             assert_eq!(stored.entries[0].version, 2);
         }
-        Local::Node(_) => panic!("store"),
+        Proc::Node(_) => panic!("store"),
     }
 }
 
 #[test]
 fn the_store_executes_each_op_once() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, false));
+    let world = Spec.initial(&Fleet::new(1, false));
     let store = world[1].1.clone();
     let put = ProcessEvent::Receive {
         sender: Pid::Node(0),
@@ -569,7 +569,7 @@ fn the_store_executes_each_op_once() {
 
 #[test]
 fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, false));
+    let world = Spec.initial(&Fleet::new(1, false));
     let (node_pid, node_state) = &world[0];
     let ask = ProcessEvent::Receive {
         sender: Pid::Node(0),
@@ -591,7 +591,7 @@ fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
 
 #[test]
 fn a_due_retry_offers_the_task() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let create = call(
@@ -630,7 +630,7 @@ fn a_due_retry_offers_the_task() {
 
 #[test]
 fn a_settled_listener_is_told() {
-    let world = EchodConcreteExec.initial(&Fleet::new(1, true));
+    let world = Spec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let (node_state, store_state, _) = deliver(

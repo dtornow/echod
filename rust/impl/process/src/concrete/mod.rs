@@ -1,7 +1,7 @@
 //! Executable realization of the mathematical concrete model.
 
 pub mod document;
-pub mod model;
+pub mod rover;
 pub mod runtime;
 pub mod store;
 

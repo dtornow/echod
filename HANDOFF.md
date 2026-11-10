@@ -182,7 +182,7 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Echod concrete model in `model.rs`: one `LocalV` process enum (`Node` or `Store`),
+- the Echod concrete model in `model.rs`: one `Proc` process enum (`Node` or `Store`),
   nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
 - the abstract model, which that step refines
@@ -211,7 +211,7 @@ The production and test runtimes must drive the exact same
 
 `test/runtime/src/rover_sim.rs` is an isolated experiment: generic
 `RoverExec::exec` drives production-backed concrete processes, projects their
-boundary trace, and asks `EchodAbstractExec` to certify it. The existing DST
+boundary trace, and asks `echod_abstract_exec::Spec` to certify it. The existing DST
 remains the primary simulator.
 
 ## Dependency direction
@@ -295,8 +295,8 @@ Rover instantiated with the abstract model
 ```
 
 The statement is `rover_spec::rover::refinement::refines` of
-`echod_concrete_spec::EchodConcreteSpec` against
-`echod_abstract_spec::EchodAbstractSpec`: every
+`echod_concrete_spec::Spec` against
+`echod_abstract_spec::Spec`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

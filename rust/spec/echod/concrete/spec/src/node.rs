@@ -22,7 +22,7 @@ use echod_abstract_spec::Call;
 use rover_spec::rover::comm::{Time, ProcessEvent};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    spec_bytes, spec_get, spec_notes, spec_reply, spec_string, Fleet, LocalV, Message, Pid,
+    spec_bytes, spec_get, spec_notes, spec_reply, spec_string, Fleet, Proc, Message, Pid,
 };
 #[cfg(verus_keep_ghost)]
 use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Etag, Read, StoreCall, StoreError, StoreOutcome};

@@ -5,7 +5,7 @@ use rover_exec::{check_unranked, CheckConfig, Spec as _};
 use echod_abstract_spec::model::Pid;
 use echod_abstract_spec::types::*;
 use echod_abstract_spec::*;
-use echod_abstract_exec::{next_cron, plain, EchodAbstractExec};
+use echod_abstract_exec::{next_cron, plain, Spec as AbstractExec};
 
 type Event = BoundaryEvent<Pid, Message>;
 
@@ -30,7 +30,7 @@ fn settle(id: &str, data: &str) -> PromiseSettleReq {
 /// to rediscover and certify it from boundary events alone.
 fn trace_for(requests: Vec<Request>) -> Vec<Event> {
     let logic = ServerConfig::default();
-    let mut state = EchodAbstractExec.initial(&logic).remove(0).1;
+    let mut state = AbstractExec.initial(&logic).remove(0).1;
     let mut trace = Vec::new();
 
     for (i, request) in requests.into_iter().enumerate() {
@@ -118,7 +118,7 @@ fn every_request_family_runs_through_rover() {
     for request in requests {
         let trace = trace_for(vec![request.clone()]);
         assert!(
-            check_unranked(&EchodAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
+            check_unranked(&AbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
             "Rover rejected {request:?}",
         );
     }
@@ -136,13 +136,13 @@ fn an_unpredicted_response_is_rejected() {
         response: Response::Status(StatusRes { status: 200 }),
     });
 
-    assert!(check_unranked(&EchodAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&AbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
 }
 
 #[test]
 fn timeout_runs_the_internal_work_started_by_a_request() {
     let config = ServerConfig::default();
-    let mut initial = EchodAbstractExec.initial(&config);
+    let mut initial = AbstractExec.initial(&config);
     let state = initial.remove(0).1;
     let call = Call {
         client: "client".into(),

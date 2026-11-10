@@ -34,5 +34,5 @@ pub mod timers;
 pub mod relation;
 pub mod simulation;
 
-pub use model::EchodConcreteSpec;
+pub use model::{Proc, Spec};
 pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};

@@ -1,4 +1,4 @@
-//! Executable process realization of `echod_abstract_spec::model::StateV`.
+//! Executable process realization of `echod_abstract_spec::Proc`.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use rover_spec::rover::comm::{ProcessEvent, Time};
@@ -7,28 +7,36 @@ use echod_types::{Request, Response};
 use crate::machine::*;
 use crate::trusted::*;
 use crate::view::*;
-pub use echod_abstract_spec::model::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::model::{
+    empty_store, lemma_losses_map, remove_at, spec_derived, spec_due_result, spec_idle,
+    spec_internal_result, spec_keep, spec_lose, spec_losses, spec_over_callbacks,
+    spec_over_listeners, spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue,
+    spec_ready, spec_request_outcome, spec_run, spec_run_timeout, spec_send, spec_service,
+    spec_shed,
+};
+use echod_abstract_spec::model::{Pid, Proc as SpecProc, Spec as SpecModel};
 use echod_abstract_spec::protocol::{Call, Message, Output};
 
 verus! {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[verifier::allow(autoderive_clone_without_spec)]
-pub struct State {
+pub struct Proc {
     pub store: Store,
     pub pending: Vec<Work>,
 }
 
 pub struct ProcessResult {
-    pub state: State,
+    pub state: Proc,
     pub send: Vec<(Pid, Message)>,
     pub marks: Vec<&'static str>,
 }
 
-impl View for State {
-    type V = StateV;
+impl View for Proc {
+    type V = SpecProc;
 
-    open spec fn view(&self) -> StateV {
-        StateV {
+    open spec fn view(&self) -> SpecProc {
+        SpecProc {
             store: self.store@,
             pending: self.pending@.map_values(|work: Work| super::view::as_sched(work)),
         }
@@ -54,7 +62,7 @@ fn initial_store() -> (server: Store)
 }
 
 /// The results of a step, as the trait reads them.
-pub open spec fn results_v(results: Seq<ProcessResult>) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn results_v(results: Seq<ProcessResult>) -> Seq<StepResultV<SpecProc, Pid, Message>> {
     results.map_values(|result: ProcessResult| StepResultV {
         state: result.state@,
         send: result.send@,
@@ -185,7 +193,7 @@ fn append_work(
 }
 
 fn request_outcome(
-    before: &State,
+    before: &Proc,
     call: &Call,
     outcome: Out,
 ) -> (result: ProcessResult)
@@ -203,7 +211,7 @@ fn request_outcome(
         marks,
     } = outcome;
     ProcessResult {
-        state: State {
+        state: Proc {
             store: next,
             pending: append_work(&before.pending, work),
         },
@@ -213,7 +221,7 @@ fn request_outcome(
 }
 
 fn lose_outcome(
-    before: &State,
+    before: &Proc,
     call: &Call,
     outcome: Out,
 ) -> (result: ProcessResult)
@@ -231,7 +239,7 @@ fn lose_outcome(
         marks,
     } = outcome;
     ProcessResult {
-        state: State {
+        state: Proc {
             store: next,
             pending: append_work(&before.pending, work),
         },
@@ -240,7 +248,7 @@ fn lose_outcome(
     }
 }
 
-fn shed_outcome(before: &State, call: &Call) -> (result: ProcessResult)
+fn shed_outcome(before: &Proc, call: &Call) -> (result: ProcessResult)
     ensures
         (StepResultV {
             state: result.state@,
@@ -259,14 +267,14 @@ fn shed_outcome(before: &State, call: &Call) -> (result: ProcessResult)
     result
 }
 
-pub open spec fn spec_request_result(state: StateV, call: Call, lost: bool, o: Out) -> StepResultV<StateV, Pid, Message> {
+pub open spec fn spec_request_result(state: SpecProc, call: Call, lost: bool, o: Out) -> StepResultV<SpecProc, Pid, Message> {
     if lost { spec_lose(state, call, o@) } else { spec_request_outcome(state, call, o@) }
 }
 
 /// `outcomes`, one result each: served, or lost. Every request step is the
 /// served outcomes, then the lost ones.
 fn request_results(
-    state: &State,
+    state: &Proc,
     call: &Call,
     mut outcomes: Vec<Out>,
     lost: bool,
@@ -321,7 +329,7 @@ fn request_results(
 
 fn run(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     call: &Call,
     now: Time,
 ) -> (results: Vec<ProcessResult>)
@@ -356,7 +364,7 @@ fn ready(work: &Work, now: Time) -> (is_ready: bool)
 }
 
 fn internal_result(
-    before: &State,
+    before: &Proc,
     i: usize,
     outcome: InOut,
 ) -> (result: ProcessResult)
@@ -417,7 +425,7 @@ fn internal_result(
         )));
     }
     ProcessResult {
-        state: State {
+        state: Proc {
             store: next,
             pending,
         },
@@ -428,7 +436,7 @@ fn internal_result(
 
 fn run_timeout_from(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     i: usize,
 ) -> (results: Vec<ProcessResult>)
@@ -468,7 +476,7 @@ fn run_timeout_from(
     }
 }
 
-fn due_result(before: &State, outcome: InOut) -> (result: ProcessResult)
+fn due_result(before: &Proc, outcome: InOut) -> (result: ProcessResult)
     ensures
         (StepResultV {
             state: result.state@,
@@ -509,11 +517,11 @@ fn due_result(before: &State, outcome: InOut) -> (result: ProcessResult)
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
         )));
     }
-    ProcessResult { state: State { store: next, pending }, send, marks }
+    ProcessResult { state: Proc { store: next, pending }, send, marks }
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
-fn keep(config: &ServerConfig, state: &State, now: Time, work: Work) -> (results: Vec<ProcessResult>)
+fn keep(config: &ServerConfig, state: &Proc, now: Time, work: Work) -> (results: Vec<ProcessResult>)
     ensures
         results_v(results@) == spec_keep(*config, state@, now, work@, Seq::empty()),
 {
@@ -530,7 +538,7 @@ fn keep(config: &ServerConfig, state: &State, now: Time, work: Work) -> (results
 
 fn over_callbacks(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     awaited: &String,
     awaiters: &Vec<String>,
@@ -567,7 +575,7 @@ fn over_callbacks(
 
 fn over_listeners(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     awaited: &String,
     addresses: &Vec<String>,
@@ -604,7 +612,7 @@ fn over_listeners(
 
 fn over_promises(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     keys: &Vec<String>,
     i: usize,
@@ -661,7 +669,7 @@ fn over_promises(
 
 fn over_tasks(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     keys: &Vec<String>,
     i: usize,
@@ -694,7 +702,7 @@ fn over_tasks(
     };
     let mut results = keep(config, state, now, Work::TaskLeaseTimeout(copy(id)));
     let ghost lease = results_v(results@);
-    let ghost retry: Seq<StepResultV<StateV, Pid, Message>>;
+    let ghost retry: Seq<StepResultV<SpecProc, Pid, Message>>;
     match t.retry_timeout_at {
         Some(_) => {
             let mut again = keep(config, state, now, Work::TaskRetryTimeout(copy(id)));
@@ -725,7 +733,7 @@ fn over_tasks(
 
 fn over_schedules(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
     keys: &Vec<String>,
     i: usize,
@@ -773,7 +781,7 @@ fn over_schedules(
 
 /// The steps the three maps offer, in the order the specification walks
 /// them: `spec_derived`.
-fn derived(config: &ServerConfig, state: &State, now: Time) -> (results: Vec<ProcessResult>)
+fn derived(config: &ServerConfig, state: &Proc, now: Time) -> (results: Vec<ProcessResult>)
     ensures
         results_v(results@) == spec_derived(*config, state@, now),
 {
@@ -800,7 +808,7 @@ fn derived(config: &ServerConfig, state: &State, now: Time) -> (results: Vec<Pro
 
 fn run_timeout(
     config: &ServerConfig,
-    state: &State,
+    state: &Proc,
     now: Time,
 ) -> (results: Vec<ProcessResult>)
     ensures
@@ -817,7 +825,7 @@ fn run_timeout(
     results
 }
 
-fn idle(state: &State) -> (results: Vec<ProcessResult>)
+fn idle(state: &Proc) -> (results: Vec<ProcessResult>)
     ensures
         results_v(results@) == spec_idle(state@),
 {
@@ -833,7 +841,7 @@ fn idle(state: &State) -> (results: Vec<ProcessResult>)
     results
 }
 
-impl State {
+impl Proc {
     /// One event at the service: `spec_service`.
     pub fn on_event(
         &self,
@@ -857,23 +865,23 @@ impl State {
     }
 }
 
-pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, State)>)
+pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, Proc)>)
     ensures
-        states@.map_values(|entry: (Pid, State)| (entry.0, entry.1@))
-            == EchodAbstractSpec.processes(*_config),
-        states@.map_values(|entry: (Pid, State)| entry.0).no_duplicates(),
+        states@.map_values(|entry: (Pid, Proc)| (entry.0, entry.1@))
+            == SpecModel.processes(*_config),
+        states@.map_values(|entry: (Pid, Proc)| entry.0).no_duplicates(),
         forall|i: int| 0 <= i < states@.len() ==> states@[i].0 != Pid::Outside,
 {
         let server = initial_store();
         let pending: Vec<Work> = Vec::new();
-        let state = State {
+        let state = Proc {
             store: server,
             pending,
         };
         proof {
             assert(server@ == empty_store());
             assert(pending@.map_values(|work: Work| super::view::as_sched(work)) =~= Seq::empty());
-            assert(state@ == StateV {
+            assert(state@ == SpecProc {
                 store: empty_store(),
                 pending: Seq::empty(),
             });
@@ -881,10 +889,10 @@ pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, State)>)
         let mut states = Vec::new();
         states.push((Pid::Service, state));
         proof {
-            assert(states@.map_values(|entry: (Pid, State)| (entry.0, entry.1@))
+            assert(states@.map_values(|entry: (Pid, Proc)| (entry.0, entry.1@))
                 =~= seq![(
                     Pid::Service,
-                    StateV {
+                    SpecProc {
                         store: empty_store(),
                         pending: Seq::empty(),
                     },
@@ -895,7 +903,7 @@ pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, State)>)
 
 pub fn injectable(_config: &ServerConfig, message: &Message) -> (injectable: bool)
     ensures
-        injectable == EchodAbstractSpec.injectable(*_config, *message),
+        injectable == SpecModel.injectable(*_config, *message),
 {
     match message {
         Message::Request(_) => true,

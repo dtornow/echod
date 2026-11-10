@@ -1,5 +1,5 @@
 //! Mathematical Echod abstract process.
-//! The executable `State::on_event` realization lives in
+//! The executable `echod_abstract_exec::Proc::on_event` realization lives in
 //! `echod-abstract-exec`.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
@@ -21,12 +21,12 @@ pub enum Pid {
     Service,
 }
 
-pub struct StateV {
+pub struct Proc {
     pub store: StoreV,
     pub pending: Seq<Sched<InternalV>>,
 }
 
-impl RoverSpec::Proc for StateV {
+impl RoverSpec::Proc for Proc {
     type Config = ServerConfig;
     type Pid = Pid;
     type Message = Message;
@@ -36,13 +36,13 @@ impl RoverSpec::Proc for StateV {
         config: ServerConfig,
         now: Time,
         event: ProcessEvent<Pid, Message>,
-    ) -> Seq<StepResultV<StateV, Pid, Message>> {
+    ) -> Seq<StepResultV<Proc, Pid, Message>> {
         spec_service(config, self, now, event)
     }
 }
 
 /// The mathematical Echod abstract model, with no executable state.
-pub struct EchodAbstractSpec;
+pub struct Spec;
 
 pub open spec fn empty_store() -> StoreV {
     StoreV {
@@ -73,12 +73,12 @@ pub open spec fn spec_send(
 }
 
 pub open spec fn spec_request_outcome(
-    before: StateV,
+    before: Proc,
     call: Call,
     outcome: OutV,
-) -> StepResultV<StateV, Pid, Message> {
+) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
-        state: StateV {
+        state: Proc {
             store: outcome.next,
             pending: before.pending + outcome.work,
         },
@@ -87,7 +87,7 @@ pub open spec fn spec_request_outcome(
 }
 
 /// Lean's `runShed`: the state stays, and the client is told 503.
-pub open spec fn spec_shed(before: StateV, call: Call) -> StepResultV<StateV, Pid, Message> {
+pub open spec fn spec_shed(before: Proc, call: Call) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
         state: before,
         send: spec_send(call, spec_unavailable(call.request), Seq::empty()),
@@ -97,12 +97,12 @@ pub open spec fn spec_shed(before: StateV, call: Call) -> StepResultV<StateV, Pi
 /// Lean's `runLose`: the handler runs, and the client is told 503. Dispatches
 /// the handler emitted are still sent.
 pub open spec fn spec_lose(
-    before: StateV,
+    before: Proc,
     call: Call,
     outcome: OutV,
-) -> StepResultV<StateV, Pid, Message> {
+) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
-        state: StateV {
+        state: Proc {
             store: outcome.next,
             pending: before.pending + outcome.work,
         },
@@ -111,10 +111,10 @@ pub open spec fn spec_lose(
 }
 
 pub open spec fn spec_losses(
-    before: StateV,
+    before: Proc,
     call: Call,
     outcomes: Seq<OutV>,
-) -> Seq<StepResultV<StateV, Pid, Message>>
+) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases outcomes.len(),
 {
     if outcomes.len() == 0 {
@@ -124,7 +124,7 @@ pub open spec fn spec_losses(
     }
 }
 
-pub proof fn lemma_losses_map(before: StateV, call: Call, outcomes: Seq<OutV>)
+pub proof fn lemma_losses_map(before: Proc, call: Call, outcomes: Seq<OutV>)
     ensures
         spec_losses(before, call, outcomes) == outcomes.map_values(|o: OutV| spec_lose(before, call, o)),
     decreases outcomes.len(),
@@ -140,7 +140,7 @@ pub proof fn lemma_losses_map(before: StateV, call: Call, outcomes: Seq<OutV>)
 /// A request's results end with the shed outcome.
 pub proof fn lemma_shed_is_last(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     call: Call,
 )
@@ -166,12 +166,12 @@ pub proof fn lemma_shed_is_last(
     assert(outcomes == served + lost + shed);
     let prefix = served + lost;
     vstd::seq::lemma_seq_add_len(prefix, shed);
-    vstd::seq::lemma_seq_push_len(Seq::<StepResultV<StateV, Pid, Message>>::empty(), spec_shed(state, call));
+    vstd::seq::lemma_seq_push_len(Seq::<StepResultV<Proc, Pid, Message>>::empty(), spec_shed(state, call));
     assert(shed.len() == 1);
     let j = prefix.len() as int;
     vstd::seq::lemma_seq_add_index2(prefix, shed, j);
     vstd::seq::lemma_seq_push_index_same(
-        Seq::<StepResultV<StateV, Pid, Message>>::empty(),
+        Seq::<StepResultV<Proc, Pid, Message>>::empty(),
         spec_shed(state, call),
         0,
     );
@@ -184,7 +184,7 @@ pub proof fn lemma_shed_is_last(
 /// That result is the first request outcome.
 pub proof fn lemma_empty_heartbeat_is_first(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     call: Call,
 )
@@ -250,12 +250,12 @@ pub open spec fn remove_at<T>(values: Seq<T>, i: int) -> Seq<T> {
 }
 
 pub open spec fn spec_internal_result(
-    before: StateV,
+    before: Proc,
     i: int,
     outcome: InOutV,
-) -> StepResultV<StateV, Pid, Message> {
+) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
-        state: StateV {
+        state: Proc {
             store: outcome.next,
             pending: remove_at(before.pending, i) + outcome.work,
         },
@@ -268,17 +268,17 @@ pub open spec fn spec_internal_result(
     }
 }
 
-pub open spec fn spec_idle(state: StateV) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_idle(state: Proc) -> Seq<StepResultV<Proc, Pid, Message>> {
     seq![StepResultV {
         state,
         send: Seq::empty(),
     }]
 }
 
-impl RoverSpec::Spec for EchodAbstractSpec {
+impl RoverSpec::Spec for Spec {
     type Config = ServerConfig;
     type Pid = Pid;
-    type Proc = StateV;
+    type Proc = Proc;
     type Message = Message;
     type Boundary = BoundaryEvent;
 
@@ -286,10 +286,10 @@ impl RoverSpec::Spec for EchodAbstractSpec {
         Pid::Outside
     }
 
-    open spec fn processes(&self, _config: ServerConfig) -> Seq<(Pid, StateV)> {
+    open spec fn processes(&self, _config: ServerConfig) -> Seq<(Pid, Proc)> {
         seq![(
             Pid::Service,
-            StateV {
+            Proc {
                 store: empty_store(),
                 pending: Seq::empty(),
             },
@@ -323,15 +323,15 @@ impl RoverSpec::Spec for EchodAbstractSpec {
     }
 }
 
-pub open spec fn spec_run(config: ServerConfig, state: StateV, call: Call, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_run(config: ServerConfig, state: Proc, call: Call, now: Time) -> Seq<StepResultV<Proc, Pid, Message>> {
     spec_handler(config, call.request, state.store, now).map_values(|outcome: OutV|
         spec_request_outcome(state, call, outcome)
     )
 }
 
-pub open spec fn spec_due_result(before: StateV, outcome: InOutV) -> StepResultV<StateV, Pid, Message> {
+pub open spec fn spec_due_result(before: Proc, outcome: InOutV) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
-        state: StateV { store: outcome.next, pending: before.pending + outcome.work },
+        state: Proc { store: outcome.next, pending: before.pending + outcome.work },
         send: outcome.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
@@ -339,7 +339,7 @@ pub open spec fn spec_due_result(before: StateV, outcome: InOutV) -> StepResultV
     }
 }
 
-pub open spec fn spec_queue(config: ServerConfig, state: StateV, now: Time, i: int) -> Seq<StepResultV<StateV, Pid, Message>>
+pub open spec fn spec_queue(config: ServerConfig, state: Proc, now: Time, i: int) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases state.pending.len() - i,
 {
     if i < 0 || i >= state.pending.len() {
@@ -356,7 +356,7 @@ pub open spec fn spec_queue(config: ServerConfig, state: StateV, now: Time, i: i
     }
 }
 
-pub open spec fn spec_keep(config: ServerConfig, state: StateV, now: Time, work: InternalV, rest: Seq<StepResultV<StateV, Pid, Message>>) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_keep(config: ServerConfig, state: Proc, now: Time, work: InternalV, rest: Seq<StepResultV<Proc, Pid, Message>>) -> Seq<StepResultV<Proc, Pid, Message>> {
     let outcome = spec_process_work(config, work, state.store, now);
     if outcome.not_due {
         rest
@@ -367,11 +367,11 @@ pub open spec fn spec_keep(config: ServerConfig, state: StateV, now: Time, work:
 
 pub open spec fn spec_over_callbacks(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     awaited: Seq<char>,
     awaiters: Seq<Seq<char>>,
-) -> Seq<StepResultV<StateV, Pid, Message>>
+) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases awaiters.len(),
 {
     if awaiters.len() == 0 {
@@ -389,11 +389,11 @@ pub open spec fn spec_over_callbacks(
 
 pub open spec fn spec_over_listeners(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     awaited: Seq<char>,
     addresses: Seq<Seq<char>>,
-) -> Seq<StepResultV<StateV, Pid, Message>>
+) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases addresses.len(),
 {
     if addresses.len() == 0 {
@@ -409,7 +409,7 @@ pub open spec fn spec_over_listeners(
     }
 }
 
-pub open spec fn spec_over_promises(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+pub open spec fn spec_over_promises(config: ServerConfig, state: Proc, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases keys.len(),
 {
     if keys.len() == 0 {
@@ -424,7 +424,7 @@ pub open spec fn spec_over_promises(config: ServerConfig, state: StateV, now: Ti
     }
 }
 
-pub open spec fn spec_over_tasks(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+pub open spec fn spec_over_tasks(config: ServerConfig, state: Proc, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases keys.len(),
 {
     if keys.len() == 0 {
@@ -441,7 +441,7 @@ pub open spec fn spec_over_tasks(config: ServerConfig, state: StateV, now: Time,
     }
 }
 
-pub open spec fn spec_over_schedules(config: ServerConfig, state: StateV, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<StateV, Pid, Message>>
+pub open spec fn spec_over_schedules(config: ServerConfig, state: Proc, now: Time, keys: Seq<Seq<char>>) -> Seq<StepResultV<Proc, Pid, Message>>
     decreases keys.len(),
 {
     if keys.len() == 0 {
@@ -455,17 +455,17 @@ pub open spec fn spec_over_schedules(config: ServerConfig, state: StateV, now: T
     }
 }
 
-pub open spec fn spec_derived(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_derived(config: ServerConfig, state: Proc, now: Time) -> Seq<StepResultV<Proc, Pid, Message>> {
     spec_over_promises(config, state, now, spec_keys(state.store.promises))
         + spec_over_tasks(config, state, now, spec_keys(state.store.tasks))
         + spec_over_schedules(config, state, now, spec_keys(state.store.schedules))
 }
 
-pub open spec fn spec_run_timeout(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_run_timeout(config: ServerConfig, state: Proc, now: Time) -> Seq<StepResultV<Proc, Pid, Message>> {
     spec_queue(config, state, now, 0) + spec_derived(config, state, now)
 }
 
-pub open spec fn spec_service(config: ServerConfig, state: StateV, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<StateV, Pid, Message>> {
+pub open spec fn spec_service(config: ServerConfig, state: Proc, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<Proc, Pid, Message>> {
     match event {
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
             let outcomes = spec_handler(config, call.request, state.store, now);

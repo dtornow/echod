@@ -54,7 +54,7 @@ use echod_abstract_spec::machine::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::model::{
     Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
-    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, StateV,
+    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, Proc,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::view::{
@@ -85,7 +85,7 @@ broadcast use
 
 /// One abstract step result.
 #[cfg(verus_keep_ghost)]
-pub type AResult = StepResultV<StateV, APid, AMessage>;
+pub type AResult = StepResultV<Proc, APid, AMessage>;
 
 // ---------------------------------------------------------------------------
 // The key order
@@ -244,7 +244,7 @@ pub proof fn lemma_due_id(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, now: 
 /// The outcome of `work`, when due, is among `results`.
 pub open spec fn offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     work: InternalV,
     results: Seq<AResult>,
@@ -275,7 +275,7 @@ pub proof fn lemma_contains_right<T>(a: Seq<T>, b: Seq<T>, x: T)
 
 pub proof fn lemma_offered_left(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     work: InternalV,
     a: Seq<AResult>,
@@ -294,7 +294,7 @@ pub proof fn lemma_offered_left(
 
 pub proof fn lemma_offered_right(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     work: InternalV,
     a: Seq<AResult>,
@@ -311,7 +311,7 @@ pub proof fn lemma_offered_right(
     }
 }
 
-pub proof fn lemma_keep_offered(config: ServerConfig, state: StateV, now: Time, work: InternalV)
+pub proof fn lemma_keep_offered(config: ServerConfig, state: Proc, now: Time, work: InternalV)
     ensures
         offered(config, state, now, work, spec_keep(config, state, now, work, Seq::empty())),
 {
@@ -326,7 +326,7 @@ pub proof fn lemma_keep_offered(config: ServerConfig, state: StateV, now: Time, 
 
 pub proof fn lemma_over_callbacks_offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     awaited: Seq<char>,
     awaiters: Seq<Seq<char>>,
@@ -367,7 +367,7 @@ pub proof fn lemma_over_callbacks_offered(
 
 pub proof fn lemma_over_listeners_offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     awaited: Seq<char>,
     addresses: Seq<Seq<char>>,
@@ -410,7 +410,7 @@ pub proof fn lemma_over_listeners_offered(
 /// listener.
 pub open spec fn promise_offers(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
     results: Seq<AResult>,
@@ -437,7 +437,7 @@ pub open spec fn promise_offers(
 
 pub proof fn lemma_promise_offers_left(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
     a: Seq<AResult>,
@@ -472,7 +472,7 @@ pub proof fn lemma_promise_offers_left(
 
 pub proof fn lemma_promise_offers_right(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
     a: Seq<AResult>,
@@ -507,7 +507,7 @@ pub proof fn lemma_promise_offers_right(
 
 pub proof fn lemma_over_promises_offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
     id: Seq<char>,
@@ -576,7 +576,7 @@ pub proof fn lemma_over_promises_offered(
 /// one.
 pub open spec fn task_offers(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
     results: Seq<AResult>,
@@ -593,7 +593,7 @@ pub open spec fn task_offers(
 
 pub proof fn lemma_over_tasks_offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
     id: Seq<char>,
@@ -641,7 +641,7 @@ pub open spec fn schedule_work(s: AStore, id: Seq<char>) -> InternalV {
 
 pub proof fn lemma_over_schedules_offered(
     config: ServerConfig,
-    state: StateV,
+    state: Proc,
     now: Time,
     keys: Seq<Seq<char>>,
     id: Seq<char>,
@@ -674,7 +674,7 @@ pub proof fn lemma_over_schedules_offered(
 }
 
 /// Everything the abstract timeout step offers, by object.
-pub proof fn lemma_timeout_offered(config: ServerConfig, state: StateV, now: Time)
+pub proof fn lemma_timeout_offered(config: ServerConfig, state: Proc, now: Time)
     requires
         finite_store(state.store),
     ensures
@@ -778,7 +778,7 @@ pub open spec fn work_known(s: AStore, work: InternalV) -> bool {
 
 /// One offer, read off [`lemma_timeout_offered`]. The universal facts stay
 /// inside this lemma.
-pub proof fn lemma_work_offered(config: ServerConfig, state: StateV, now: Time, work: InternalV)
+pub proof fn lemma_work_offered(config: ServerConfig, state: Proc, now: Time, work: InternalV)
     requires
         finite_store(state.store),
         work_known(state.store, work),
@@ -848,7 +848,7 @@ pub open spec fn sends_of(send: Seq<DispatchV>) -> Seq<(APid, AMessage)> {
 }
 
 /// A due result sends the lift of each dispatch.
-pub proof fn lemma_sends_of(state: StateV, outcome: InOutV)
+pub proof fn lemma_sends_of(state: Proc, outcome: InOutV)
     ensures
         spec_due_result(state, outcome).send == sends_of(outcome.send),
 {
@@ -912,7 +912,7 @@ pub open spec fn due_matched(
     config: ServerConfig,
     key: Seq<char>,
     doc: DocV,
-    state: StateV,
+    state: Proc,
     now: Time,
     r: AResult,
 ) -> bool {
@@ -929,7 +929,7 @@ pub proof fn lemma_matched(
     config: ServerConfig,
     key: Seq<char>,
     doc: DocV,
-    state: StateV,
+    state: Proc,
     now: Time,
     r: AResult,
 )
@@ -949,7 +949,7 @@ pub proof fn lemma_origin_matched(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     work: InternalV,
     map2: Map<Seq<char>, ObjV>,
@@ -1086,7 +1086,7 @@ pub proof fn lemma_promise_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
 )
@@ -1148,7 +1148,7 @@ pub proof fn lemma_lease_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
 )
@@ -1209,7 +1209,7 @@ pub proof fn lemma_retry_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
 )
@@ -1271,7 +1271,7 @@ pub proof fn lemma_callback_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
 )
@@ -1483,7 +1483,7 @@ pub proof fn lemma_listener_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
     id: Seq<char>,
 )
@@ -1557,7 +1557,7 @@ pub proof fn lemma_origin_due(
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: StateV,
+    state: Proc,
     now: Time,
 )
     requires
@@ -1629,7 +1629,7 @@ pub proof fn lemma_schedule_due(
     key: Seq<char>,
     id: Seq<char>,
     sch: Schedule,
-    state: StateV,
+    state: Proc,
     now: Time,
 )
     requires
@@ -1704,7 +1704,7 @@ pub proof fn lemma_schedule_due(
 // Every due step
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, state: StateV, now: Time)
+pub proof fn lemma_due_agrees(config: ServerConfig, key: Seq<char>, doc: DocV, state: Proc, now: Time)
     requires
         doc_rel(key, doc, state.store),
         finite_store(state.store),
@@ -1757,7 +1757,7 @@ pub proof fn lemma_dues_agree(config: ServerConfig)
     ensures
         dues_agree(config),
 {
-    assert forall|key: Seq<char>, doc: DocV, state: StateV, now: u64|
+    assert forall|key: Seq<char>, doc: DocV, state: Proc, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) implies #[trigger] due_agrees(
         config,
         key,

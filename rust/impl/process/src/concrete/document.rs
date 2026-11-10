@@ -47,9 +47,9 @@ use echod_types::{origin, same_origin_spec, AValue};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{
     spec_bytes, spec_clock, spec_get, spec_initial_node, spec_node, spec_notes, spec_notify,
-    spec_one, spec_reply, spec_string, LocalV, LogicV,
+    spec_one, spec_reply, spec_string, Proc, LogicV,
 };
-use crate::concrete::model::{Fleet, Logic, Message, Pid};
+use crate::concrete::rover::{Fleet, Logic, Message, Pid};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{spec_before, spec_fnv, spec_sat_add, spec_starts};
 use crate::concrete::store::{Read, StoreError};
@@ -4351,28 +4351,28 @@ impl Node {
 }
 
 /// A node's results, as the specification sees them.
-pub open spec fn node_results_v(pairs: Seq<(Node, Vec<(Pid, Message)>)>) -> Seq<StepResultV<LocalV, Pid, Message>> {
-    pairs.map_values(|pair: (Node, Vec<(Pid, Message)>)| StepResultV { state: LocalV::Node(pair.0@), send: pair.1@ })
+pub open spec fn node_results_v(pairs: Seq<(Node, Vec<(Pid, Message)>)>) -> Seq<StepResultV<Proc, Pid, Message>> {
+    pairs.map_values(|pair: (Node, Vec<(Pid, Message)>)| StepResultV { state: Proc::Node(pair.0@), send: pair.1@ })
 }
 
 proof fn lemma_results_empty()
     ensures
-        node_results_v(Seq::<(Node, Vec<(Pid, Message)>)>::empty()) == Seq::<StepResultV<LocalV, Pid, Message>>::empty(),
+        node_results_v(Seq::<(Node, Vec<(Pid, Message)>)>::empty()) == Seq::<StepResultV<Proc, Pid, Message>>::empty(),
 {
-    assert(node_results_v(Seq::<(Node, Vec<(Pid, Message)>)>::empty()) =~= Seq::<StepResultV<LocalV, Pid, Message>>::empty());
+    assert(node_results_v(Seq::<(Node, Vec<(Pid, Message)>)>::empty()) =~= Seq::<StepResultV<Proc, Pid, Message>>::empty());
 }
 
 /// `spec_one`: the one result of a step.
 fn results_one(node: Node, send: Vec<(Pid, Message)>) -> (r: Vec<(Node, Vec<(Pid, Message)>)>)
     ensures
-        node_results_v(r@) == spec_one(LocalV::Node(node@), send@),
+        node_results_v(r@) == spec_one(Proc::Node(node@), send@),
 {
     let ghost nv = node@;
     let ghost sv = send@;
     let mut r: Vec<(Node, Vec<(Pid, Message)>)> = Vec::new();
     r.push((node, send));
     proof {
-        assert(node_results_v(r@) =~= spec_one(LocalV::Node(nv), sv));
+        assert(node_results_v(r@) =~= spec_one(Proc::Node(nv), sv));
     }
     r
 }
