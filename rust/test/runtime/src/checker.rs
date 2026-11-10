@@ -20,9 +20,8 @@
 //! see a deadline fire early or late.
 
 use echod_abstract_spec::Config;
-use echod_abstract_exec::{
-    history_rank, history_responses, rover_trace, HistoryEvent, Spec as AbstractExec,
-};
+use echod_abstract_exec::Spec as AbstractExec;
+use echod_model_test::{history_rank, history_responses, rover_trace, HistoryEvent};
 use rover_exec::{check as check_trace, CheckConfig};
 
 use crate::history::Entry;

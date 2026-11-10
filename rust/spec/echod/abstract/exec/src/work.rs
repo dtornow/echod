@@ -1,4 +1,4 @@
-//! One handler per internal step. The handler does nothing when the step is
+//! Executable autonomous-work handlers. The handler does nothing when the step is
 //! not due. A deadline writes the projected promise back.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
@@ -6,40 +6,36 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::internal::*;
+use echod_abstract_spec::work::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::*;
+use echod_abstract_spec::protocol::Dispatch;
+use echod_abstract_spec::state::{Config, Id, Time};
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::Sched;
 #[cfg(verus_keep_ghost)]
 use echod_types::origin;
 use echod_types::{PromiseState, TaskState, Value};
 
-use super::super::trusted::*;
+use crate::collections::*;
+use crate::runtime::*;
 #[cfg(verus_keep_ghost)]
-use super::super::view::{
-    group_views, lift_dispatch, sat_add, sends, spec_keys, strs, DispatchV, InOutV, InternalV,
-    PromiseV, ScheduleV, StoreV, TaskV,
-};
-#[cfg(verus_keep_ghost)]
-use super::{
-    lemma_string_of, lemma_tags_ext, lemma_value_ext, spec_has_target, spec_is_timer,
-    spec_lease_at, spec_new_object, spec_project_promise, spec_project_task, spec_promise_record,
-    spec_string, spec_unlease,
-};
-use super::{
-    contains, copy_store, expand, has_target, is_timer, mk, new_object, next_cron, Dispatch, Id, InOut, Promise, Config, Store, Task, Time, Work,
-    Machine,
+use crate::projection::{group_views as group_exec_views, sends};
+use crate::state::{
+    contains, copy_store, has_target, is_timer, mk, new_object, Handlers, InOut, Promise, Store,
+    Task, Work,
 };
 
 verus! {
 
-impl<'cfg> Machine<'cfg> {
+impl<'cfg> Handlers<'cfg> {
     /// Not due. `pending` keeps the checker from treating it as a step that
     /// ran and changed nothing, which a derived item would otherwise repeat.
     fn noop(&self, s: &Store) -> (r: InOut)
         ensures
             r@ == spec_noop(s@),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let r = InOut { next: copy_store(s), work: Vec::new(), send: Vec::new(), marks: Vec::new(), not_due: true };
         proof { assert(r@ =~~= spec_noop(s@)); }
         r
@@ -50,7 +46,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_process_work(*self.0, InternalV::PromiseTimeout(id@), s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let Some(stored) = s.promises.get(id) else { return self.noop(s) };
         let q = stored.project(now);
         if q.state == stored.state && q.settled_at == stored.settled_at {
@@ -74,7 +70,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_callback(s@, awaited@, awaiter@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
         let projected = stored.project(now);
         if projected.state == PromiseState::Pending || !projected.callbacks.contains(awaiter) {
@@ -128,7 +124,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_listener(s@, awaited@, address@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let Some(stored) = s.promises.get(awaited) else { return self.noop(s) };
         let projected = stored.project(now);
         let addr = address.to_owned();
@@ -156,7 +152,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_lease(s@, id@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let Some(t) = s.tasks.get(id) else { return self.noop(s) };
         let pending = match s.promises.get(id) {
             Some(p) => p.project(now).state == PromiseState::Pending,
@@ -178,7 +174,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_retry(*self.0, s@, id@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let live = match s.promises.get(id) {
             Some(p) => p.project(now).state == PromiseState::Pending,
             None => false,
@@ -211,7 +207,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_schedule_step(s@, id@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let Some(c) = s.schedules.get(id) else { return self.noop(s) };
         if c.next_run_at > now {
             return self.noop(s);
@@ -243,7 +239,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             r@ == spec_create_if_absent(s@, promise@, at_, timeout, *param, *tags, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if now < at_ {
             return self.noop(s);
         }

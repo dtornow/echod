@@ -1,4 +1,4 @@
-//! Mathematical Echod abstract process.
+//! Rover adapter and process orchestration for the mathematical model.
 //! The executable `echod_abstract_exec::Proc::on_event` realization lives in
 //! `echod-abstract-exec`.
 
@@ -8,11 +8,12 @@ use rover_spec::rover::comm::{ProcessEvent, Sched, Time};
 use rover_spec::rover::RoverSpec;
 use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
 use echod_types::{Request, Response};
-use super::machine::*;
+use super::state::*;
+use super::requests::*;
+use super::work::*;
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
-use super::trusted::{pset_seq, spec_expand};
-use super::view::*;
+use super::axioms::{pset_seq, spec_expand};
 
 verus! {
 #[derive(Clone, Copy, PartialEq, Eq, Structural, Hash, PartialOrd, Ord, Debug)]
@@ -67,7 +68,7 @@ pub open spec fn spec_send(
     )] + dispatches.map_values(|dispatch: DispatchV| (
         Pid::Outside,
         Message::Output(Output::Dispatch(
-            super::view::lift_dispatch(dispatch),
+            super::state::lift_dispatch(dispatch),
         )),
     ))
 }
@@ -262,7 +263,7 @@ pub open spec fn spec_internal_result(
         send: outcome.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::view::lift_dispatch(dispatch),
+                super::state::lift_dispatch(dispatch),
             )),
         )),
     }

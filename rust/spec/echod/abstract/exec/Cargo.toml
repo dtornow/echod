@@ -1,6 +1,6 @@
 [package]
 name = "echod-abstract-exec"
-description = "Executable realization and history tooling for the Resonate abstract specification."
+description = "Executable realization of the Resonate abstract specification."
 version.workspace = true
 edition.workspace = true
 license = "MIT"

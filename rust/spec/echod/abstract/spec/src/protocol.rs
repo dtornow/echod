@@ -4,11 +4,18 @@ use vstd::prelude::*;
 
 use rover_spec::rover::comm::Time;
 
-use echod_types::{Request, Response};
+use echod_types::{PromiseRecord, Request, Response};
 
-use super::Dispatch;
+use super::state::Id;
 
 verus! {
+
+/// What the service sends on its protocol boundary.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Dispatch {
+    Execute { id: Id, version: u64 },
+    Unblock { address: String, promise: PromiseRecord },
+}
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 #[verifier::allow(autoderive_clone_without_spec)]

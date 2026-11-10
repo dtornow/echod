@@ -33,9 +33,9 @@ use serde::{Deserialize, Serialize};
 use crate::concrete::runtime::{expand, next_cron};
 use crate::verified::runtime::copy;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::{axiom_string_ext, axiom_vec_ext};
+use echod_abstract_spec::axioms::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{lemma_tags_ext, lemma_value_ext};
+use echod_abstract_spec::state::{lemma_tags_ext, lemma_value_ext};
 use echod_abstract_spec::{Call, Dispatch, Output};
 use rover_spec::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]

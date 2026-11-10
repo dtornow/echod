@@ -86,7 +86,7 @@ echod/
 │   └── echod/
 │       ├── abstract/
 │       │   ├── spec/     # independent Resonate model and properties
-│       │   └── exec/     # executable realization and history tooling
+│       │   └── exec/     # executable realization and coverage instrumentation
 │       ├── concrete/
 │       │   └── spec/     # mathematical concrete state and transitions
 │       └── refinement/   # interpretation, relation, simulation proof
@@ -174,8 +174,9 @@ It must not import `impl/process`, `spec/echod/concrete/spec`, or `impl/runtime`
 ### `spec/echod/abstract/exec`
 
 The executable realization of the abstract model: persistent store types,
-verified handler bodies, the executable Echod abstract process, client history
-translation, model-driven request generation, and coverage marks.
+verified handler bodies, the executable Echod abstract process, and coverage
+marks. Client history translation and model-driven workloads live in
+`test/model`.
 
 ### `spec/echod/concrete/spec`
 

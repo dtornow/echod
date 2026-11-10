@@ -1,12 +1,11 @@
-//! Mathematical request transitions.
+//! Mathematical external request transition relation.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use echod_types::*;
 use rover_spec::rover::comm::Time;
-use super::*;
-use super::super::trusted::*;
-use super::super::view::*;
+use super::state::*;
+use super::axioms::*;
 
 verus! {
 // ---------------------------------------------------------------------------

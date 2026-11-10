@@ -29,9 +29,10 @@ rust/impl/cli         the echod binary
 rust/spec/rover/spec  Rover mathematical state, steps, and refinement
 rust/spec/rover/exec  Rover deterministic execution, bounded search, and verified replay
 rust/spec/echod/abstract/spec  the mathematical Resonate protocol model
-rust/spec/echod/abstract/exec  its executable store, handlers, Echod abstract realization, and history tooling
+rust/spec/echod/abstract/exec  its executable store, handlers, and Echod abstract realization
 rust/spec/echod/concrete/spec  mathematical Echod concrete model
 rust/spec/echod/refinement  verified concrete-to-abstract refinement
+rust/test/model       trace and workload support for abstract-model tests
 rust/test/runtime     the synchronous deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/src/Rover        the Rover world, for experiment

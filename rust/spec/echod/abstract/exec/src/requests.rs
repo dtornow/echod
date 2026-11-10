@@ -1,4 +1,4 @@
-//! Request handlers. A promise, a task, or a schedule changes here, and the
+//! Executable external request handlers. A promise, a task, or a schedule changes here, and the
 //! `ensures` on each handler is that transition.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
@@ -6,44 +6,33 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::external::*;
+use echod_abstract_spec::requests::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::*;
+use echod_abstract_spec::state::{Config, Id, Time};
 use echod_types::{
     PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
     Request, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq,
     TaskFenceInnerRes, TaskFenceReq, TaskRecord, TaskRef, TaskState, TaskSuspendReq, Value,
 };
+use echod_types::same_origin;
 
-use super::super::trusted::*;
-use super::super::trusted::copy;
+use crate::collections::*;
+use crate::runtime::*;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec};
 #[cfg(verus_keep_ghost)]
-use super::super::view::{
-    all_in_origin, distinct, group_views, lift_dispatch, outs_v, sat_add, sends, strs, works,
-    DispatchV, InOutV, OutV, PromiseV, ScheduleV,
-};
-use super::super::view::{StoreV, TaskV};
+use crate::projection::{group_views as group_exec_views, outs_v};
 #[cfg(verus_keep_ghost)]
-use super::super::view::spec_keys;
-#[cfg(verus_keep_ghost)]
-use super::{
-    exec_promise_ok, exec_server_ok, lemma_schedule_ext, lemma_schedule_value,
-    lemma_tags_ext, lemma_value_ext,
-    spec_acquire, spec_claim_res, spec_empty_value, spec_has_target, spec_is_timer,
-    spec_external, spec_fence_res, spec_fulfill, spec_is_global, spec_new_object, spec_out,
-    spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res,
-    spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_string,
-    spec_task_get_res, spec_task_record, spec_unlease,
+use crate::state::{
+    exec_promise_ok, exec_server_ok,
 };
 
-use super::{
+use crate::state::{
     claim_res, contains, copy_store, echo, fence_res, has_target, is_timer, marked, mk, new_object,
-    next_cron, one, promise_res, schedule_res, settle, status, status_res, task_get_res, Id, Out,
-    Machine, Promise, Config, Store, Task, Time,
+    one, promise_res, schedule_res, settle, status, status_res, task_get_res, Handlers, Out,
+    Promise, Store, Task,
 };
-
-#[cfg(verus_keep_ghost)]
-use super::response_ok;
 
 verus! {
 
@@ -52,7 +41,7 @@ fn awaited_ids(actions: &Vec<PromiseRegisterCallbackReq>) -> (ids: Vec<Id>)
     ensures
         strs(ids@) == spec_awaited(actions@),
 {
-    broadcast use group_views;
+    broadcast use group_exec_views;
     let mut ids: Vec<Id> = Vec::new();
     let mut i = 0;
     while i < actions.len()
@@ -77,7 +66,7 @@ fn awaited_ids(actions: &Vec<PromiseRegisterCallbackReq>) -> (ids: Vec<Id>)
     ids
 }
 
-impl<'cfg> Machine<'cfg> {
+impl<'cfg> Handlers<'cfg> {
     /// Property 1: every promise `promise_create` creates has it, every
     /// response has it if the state had it, and every promise that had it keeps it.
     ///
@@ -105,7 +94,7 @@ impl<'cfg> Machine<'cfg> {
                 },
             outs_v(outs@) == spec_promise_create(*req, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if is_timer(&req.tags) && has_target(&req.tags) {
             return status(promise_res(400, None), mk("create: timer with target (400)"), s);
         }
@@ -164,7 +153,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_promise_settle(*req, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if !req.state.settable() {
             return status(promise_res(400, None), mk("settle: not a settled state (400)"), s);
         }
@@ -236,7 +225,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_create(*pid, ttl, *req, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if !has_target(&req.tags) || is_timer(&req.tags) {
             return status(claim_res(400, None, None), mk("task.create: not runnable, or a timer (400)"), s);
         }
@@ -314,7 +303,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_suspend(req.id, req.version, req.actions@, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let id = &req.id;
         let version = req.version;
         let ids: Vec<Id> = awaited_ids(&req.actions);
@@ -471,7 +460,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_fence(*req, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let id = &req.id;
         let version = req.version;
         let target = match &req.action {
@@ -510,7 +499,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(r@) == spec_wrap_fence(outs_v(outs@), create),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let mut outs = outs;
         if outs.len() == 1 {
             let ghost before = outs_v(outs@);
@@ -534,7 +523,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_heartbeat(*pid, refs@, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let mut i = 1;
         while i < refs.len()
             invariant
@@ -598,7 +587,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
@@ -662,7 +651,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_register_callback(*awaited, *awaiter, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if *awaited == *awaiter || !same_origin(awaited, awaiter) {
             return status(promise_res(400, None), mk("callback: itself or another origin (400)"), s);
         }
@@ -696,7 +685,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_register_listener(*awaited, *address, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let stored = match s.promises.get(awaited) {
             None => return status(promise_res(404, None), mk("listener: no such promise (404)"), s),
             Some(p) => p,
@@ -722,7 +711,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_acquire(*id, version, *pid, ttl, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(claim_res(404, None, None), mk("acquire: no such task (404)"), s),
@@ -750,7 +739,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_release(*id, version, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         match self.held(s, id, version, now) {
             Err(code) => status(status_res(code), if code == 404 { mk("release: no such task (404)") } else { mk("release: not held (409)") }, s),
             Ok(t) => {
@@ -769,7 +758,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_fulfill(*id, version, *action, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         if !action.state.settable() {
             return status(promise_res(400, None), mk("fulfill: not a settled state (400)"), s);
         }
@@ -792,7 +781,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_halt(*id, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(status_res(404), mk("halt: no such task (404)"), s),
@@ -820,7 +809,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_task_continue(*id, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(status_res(404), mk("continue: no such task (404)"), s),
@@ -850,7 +839,7 @@ impl<'cfg> Machine<'cfg> {
                 spec_out(spec_status_res(200), StoreV { schedules: s@.schedules.remove(id@), ..s@ })
             },
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         match s.schedules.get(id) {
             None => status(status_res(404), mk("delete schedule: none (404)"), s),
             Some(_) => {
@@ -869,7 +858,7 @@ impl<'cfg> Machine<'cfg> {
         ensures
             outs_v(outs@) == spec_handler(*self.0, *op, s@, now),
     {
-        broadcast use group_views;
+        broadcast use group_exec_views;
         match op {
             Request::PromiseCreate(c) => self.promise_create(c, false, s, now),
             Request::PromiseGet(q) => match s.promises.get(&q.id) {

@@ -1,11 +1,13 @@
-//! Views of executable model records.
+//! Projection from executable state into mathematical state.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use rover_spec::rover::comm::Sched;
 use echod_types::Schedule;
-use crate::machine::*;
-use crate::trusted::*;
-pub use echod_abstract_spec::view::*;
+use crate::state::{InOut, Out, Promise, Store, Task, Work};
+use echod_abstract_spec::protocol::Dispatch;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::axioms::axiom_pset_seq;
+use echod_abstract_spec::state::*;
 
 verus! {
 impl View for Promise {

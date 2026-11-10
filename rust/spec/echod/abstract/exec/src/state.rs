@@ -1,15 +1,17 @@
-//! Verified executable realization of the abstract protocol transitions.
+//! Executable state, outcomes, and shared state helpers.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use echod_types::*;
-use crate::trusted::*;
-use crate::view::*;
-pub use echod_abstract_spec::machine::*;
-pub use echod_abstract_spec::Dispatch;
+use crate::collections::*;
+use crate::runtime::*;
+#[cfg(verus_keep_ghost)]
+use crate::projection::{group_views as group_exec_views, outs_v, sends, works};
+use echod_abstract_spec::protocol::Dispatch;
+use echod_abstract_spec::state::*;
 
 verus! {
 /// Executable handlers bound to a passive specification configuration.
-pub(crate) struct Machine<'a>(pub(crate) &'a Config);
+pub(crate) struct Handlers<'a>(pub(crate) &'a Config);
 
 /// The first value of `key`, which is how a tag list is read: `spec_first`.
 fn first_of(tags: &Tags, key: &str) -> (r: Option<String>)
@@ -32,7 +34,7 @@ fn first_of(tags: &Tags, key: &str) -> (r: Option<String>)
     None
 }
 
-fn has_target(tags: &Tags) -> (r: bool)
+pub(crate) fn has_target(tags: &Tags) -> (r: bool)
     ensures
         r == spec_has_target(*tags),
 {
@@ -57,7 +59,7 @@ fn is_true(tags: &Tags, key: &str) -> (r: bool)
     }
 }
 
-fn is_timer(tags: &Tags) -> (r: bool)
+pub(crate) fn is_timer(tags: &Tags) -> (r: bool)
     ensures
         r == spec_is_timer(*tags),
 {
@@ -270,11 +272,11 @@ impl Task {
         self.retry_timeout_at = None;
         self.resumes = Vec::new();
         proof {
-            broadcast use group_views;
+            broadcast use group_exec_views;
         }
     }
 
-    fn acquire(&mut self, version: u64, pid: String, ttl: Time, now: Time)
+    pub(crate) fn acquire(&mut self, version: u64, pid: String, ttl: Time, now: Time)
         ensures
             final(self)@ == spec_acquire(old(self)@, version, pid@, ttl, now),
     {
@@ -286,12 +288,12 @@ impl Task {
         self.retry_timeout_at = None;
         self.resumes = Vec::new();
         proof {
-            broadcast use group_views;
+            broadcast use group_exec_views;
         }
     }
 
     /// Lean's `unlease`: `state`, no lease, next offer at `retry`.
-    fn unlease(&mut self, state: TaskState, retry: Option<Time>)
+    pub(crate) fn unlease(&mut self, state: TaskState, retry: Option<Time>)
         ensures
             final(self)@ == spec_unlease(old(self)@, state, retry),
     {
@@ -335,7 +337,7 @@ impl Task {
         let resumes: u64 = if self.resumes.len() as u64 > u64::MAX { u64::MAX } else { self.resumes.len() as u64 };
         let pid = copy(&self.pid);
         proof {
-            broadcast use group_views;
+            broadcast use group_exec_views;
             if self.pid is Some {
                 lemma_string_of(self.pid->0);
             }
@@ -364,7 +366,7 @@ pub open spec fn exec_server_ok(s: Store) -> bool {
 /// request, the occurrence instant for a schedule. A deadline already past
 /// `now` is born settled. `runnable` adds the task, offered at `at` or at
 /// its delay.
-fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags, runnable: bool) -> (born: (Promise, Option<Task>))
+pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags, runnable: bool) -> (born: (Promise, Option<Task>))
     ensures
         exec_promise_ok(born.0),
         born.0.timeout_at == timeout_at,
@@ -374,7 +376,7 @@ fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags,
             None => spec_new_object(timeout_at, at, now, *param, *tags, runnable).1 is None,
         },
 {
-    broadcast use group_views;
+    broadcast use group_exec_views;
     let live_now = timeout_at > now;
     let live_at = timeout_at > at;
     let state = if live_now {
@@ -423,7 +425,7 @@ fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags,
     (promise, task)
 }
 
-fn copy_store(s: &Store) -> (r: Store)
+pub(crate) fn copy_store(s: &Store) -> (r: Store)
     ensures
         r.promises@ == s.promises@,
         r.tasks@ == s.tasks@,
@@ -447,7 +449,7 @@ pub(crate) fn schedule_res(status: u16, schedule: Option<Schedule>) -> (r: Respo
     Response::Schedule(ScheduleRes { status, schedule })
 }
 
-fn status_res(status: u16) -> (r: Response)
+pub(crate) fn status_res(status: u16) -> (r: Response)
     ensures
         r == spec_status_res(status),
 {
@@ -461,14 +463,14 @@ pub(crate) fn task_get_res(status: u16, task: Option<TaskRecord>) -> (r: Respons
     Response::TaskGet(TaskGetRes { status, task })
 }
 
-fn claim_res(status: u16, task: Option<TaskRecord>, promise: Option<PromiseRecord>) -> (r: Response)
+pub(crate) fn claim_res(status: u16, task: Option<TaskRecord>, promise: Option<PromiseRecord>) -> (r: Response)
     ensures
         r == spec_claim_res(status, task, promise),
 {
     Response::TaskClaim(TaskClaimRes { status, task, promise })
 }
 
-fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> (r: Response)
+pub(crate) fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> (r: Response)
     ensures
         r == spec_fence_res(status, action),
 {
@@ -534,7 +536,7 @@ pub struct InOut {
     pub not_due: bool,
 }
 
-fn one(o: Out) -> (r: Vec<Out>)
+pub(crate) fn one(o: Out) -> (r: Vec<Out>)
     ensures
         r.len() == 1,
         r[0] == o,
@@ -543,7 +545,7 @@ fn one(o: Out) -> (r: Vec<Out>)
     let mut v = Vec::new();
     v.push(o);
     proof {
-        broadcast use group_views;
+        broadcast use group_exec_views;
     }
     v
 }
@@ -554,7 +556,7 @@ pub(crate) fn mk(name: &'static str) -> &'static str {
     name
 }
 
-fn marked(name: &'static str) -> Vec<&'static str> {
+pub(crate) fn marked(name: &'static str) -> Vec<&'static str> {
     let mut v = Vec::new();
     v.push(name);
     v
@@ -570,7 +572,7 @@ pub(crate) fn status(resp: Response, mark: &'static str, s: &Store) -> (r: Vec<O
         r[0].next.schedules@ == s.schedules@,
         outs_v(r@) == spec_out(resp, s@),
 {
-    broadcast use group_views;
+    broadcast use group_exec_views;
     let work: Vec<Work> = Vec::new();
     let send: Vec<Dispatch> = Vec::new();
     let r = one(Out { resp, next: copy_store(s), work, send, marks: marked(mark) });
@@ -595,11 +597,11 @@ pub(crate) fn echo(res: Response, mark: &'static str, s: &Store) -> (r: Vec<Out>
 }
 
 /// Settles `id` and fulfills its task, if any: `spec_settle`.
-fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
+pub(crate) fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
     ensures
         final(s)@ == spec_settle(old(s)@, id@, state, *value, at),
 {
-    broadcast use group_views;
+    broadcast use group_exec_views;
     let ghost s0 = *s;
 
     match s.promises.get(id) {
@@ -644,7 +646,7 @@ fn settle(s: &mut Store, id: &Id, state: PromiseState, value: &Value, at: Time)
     }
 }
 
-fn contains(ids: &Vec<Id>, id: &Id) -> (r: bool)
+pub(crate) fn contains(ids: &Vec<Id>, id: &Id) -> (r: bool)
     ensures
         r == strs(ids@).contains(id@),
 {
@@ -667,7 +669,3 @@ fn contains(ids: &Vec<Id>, id: &Id) -> (r: bool)
 
 } // verus!
 
-pub mod external;
-pub mod internal;
-pub use external::*;
-pub use internal::*;

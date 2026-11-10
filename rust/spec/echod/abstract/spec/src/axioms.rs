@@ -1,4 +1,4 @@
-//! Explicit mathematical declarations and axioms trusted by the specification.
+//! Explicit mathematical declarations and assumptions trusted by the specification.
 //! Runtime realizations live with their callers, outside this crate.
 
 use vstd::prelude::*;

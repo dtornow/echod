@@ -40,19 +40,17 @@ use echod_concrete_spec::node::{
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{
-    spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_handler, spec_has_key,
-    spec_has_target, spec_held as a_held, spec_is_external_tag, spec_is_global, spec_is_timer,
-    spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64,
-    spec_project_promise, spec_project_task, spec_promise_create as a_promise_create,
-    spec_promise_record, spec_promise_res as a_promise_res, spec_promise_settle as a_promise_settle,
-    spec_settle, spec_task_record as a_task_record, SpecHeld, tag_delay, tag_external, tag_global,
-    tag_scope, tag_target, tag_timer, tag_true,
+use echod_abstract_spec::state::{
+    spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_has_key, spec_has_target, spec_is_external_tag, spec_is_global, spec_is_timer, spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_settle, spec_task_record as a_task_record, tag_delay, tag_external, tag_global, tag_scope, tag_target, tag_timer, tag_true,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
+use echod_abstract_spec::requests::{
+    spec_handler, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, SpecHeld,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
+use echod_abstract_spec::axioms::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
@@ -705,20 +703,20 @@ pub(crate) proof fn lemma_others_same(key: Seq<char>, s: AStore)
 pub(crate) proof fn lemma_string_view(chars: Seq<char>)
     ensures
         echod_concrete_spec::model::spec_string(chars)@ == chars,
-        echod_abstract_spec::machine::spec_string(chars)@ == chars,
-        echod_concrete_spec::model::spec_string(chars) == echod_abstract_spec::machine::spec_string(chars),
+        echod_abstract_spec::state::spec_string(chars)@ == chars,
+        echod_concrete_spec::model::spec_string(chars) == echod_abstract_spec::state::spec_string(chars),
 {
     reveal(echod_concrete_spec::model::spec_string);
-    reveal(echod_abstract_spec::machine::spec_string);
+    reveal(echod_abstract_spec::state::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(echod_concrete_spec::model::spec_string(chars), echod_abstract_spec::machine::spec_string(chars));
+    axiom_string_ext(echod_concrete_spec::model::spec_string(chars), echod_abstract_spec::state::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
 pub(crate) proof fn lemma_string_of(s: String)
     ensures
         echod_concrete_spec::model::spec_string(s@) == s,
-        echod_abstract_spec::machine::spec_string(s@) == s,
+        echod_abstract_spec::state::spec_string(s@) == s,
 {
     lemma_string_view(s@);
     axiom_string_ext(echod_concrete_spec::model::spec_string(s@), s);
@@ -1463,13 +1461,19 @@ use echod_concrete_spec::store::{
     Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{spec_create_if_absent, spec_handler};
+use echod_abstract_spec::requests::{
+    spec_handler,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::{Pid as APid, spec_run_timeout};
+use echod_abstract_spec::work::{
+    spec_create_if_absent,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{Pid as APid, spec_run_timeout};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::view::{InternalV, StoreV as AStore};
+use echod_abstract_spec::state::{InternalV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
     Config as AbstractConfig, Dispatch, Output, Proc as AProc, Spec as AModel,
@@ -2183,25 +2187,17 @@ use echod_concrete_spec::node::{
     spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{
-    spec_acquire as a_acquire, spec_any_settled as a_any_settled, spec_awaited,
-    spec_callbacks as a_callbacks, spec_claim_res, spec_extend as a_extend, spec_external,
-    spec_fence as a_fence, spec_fence_res, spec_fulfill, spec_handler, spec_has_target,
-    spec_heartbeat as a_heartbeat, spec_held as a_held, spec_is_timer, spec_out,
-    spec_project_promise, spec_project_task, spec_promise_create as a_promise_create,
-    spec_promise_record, spec_promise_res as a_promise_res, spec_promise_settle as a_promise_settle,
-    spec_refs_one_origin, spec_register_callback as a_register_callback,
-    spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create,
-    spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_suspend as a_suspend,
-    spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue,
-    spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_get_res,
-    spec_task_halt as a_task_halt, spec_task_record as a_task_record,
-    spec_task_release as a_task_release, spec_unlease as a_unlease, spec_wrap_fence, SpecHeld,
+use echod_abstract_spec::state::{
+    spec_acquire as a_acquire, spec_claim_res, spec_external, spec_fence_res, spec_fulfill, spec_has_target, spec_is_timer, spec_out, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_task_get_res, spec_task_record as a_task_record, spec_unlease as a_unlease,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::axiom_string_ext;
+use echod_abstract_spec::requests::{
+    spec_any_settled as a_any_settled, spec_awaited, spec_callbacks as a_callbacks, spec_extend as a_extend, spec_fence as a_fence, spec_handler, spec_heartbeat as a_heartbeat, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, spec_refs_one_origin, spec_register_callback as a_register_callback, spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create, spec_suspend as a_suspend, spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue, spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_halt as a_task_halt, spec_task_release as a_task_release, spec_wrap_fence, SpecHeld,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::view::{
+use echod_abstract_spec::axioms::axiom_string_ext;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::{
     all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
@@ -2794,7 +2790,7 @@ pub(crate) proof fn lemma_task_create_agrees(
             let live = action.timeout_at > now;
             let p_a = PromiseV {
                 state: if live { PromiseState::Pending } else { PromiseState::RejectedTimedout },
-                value: echod_abstract_spec::machine::spec_empty_value(),
+                value: echod_abstract_spec::state::spec_empty_value(),
                 param: action.param,
                 timeout_at: action.timeout_at,
                 created_at: if live { now } else { action.timeout_at },
@@ -4146,7 +4142,7 @@ pub(crate) proof fn lemma_schedule_create_agrees(
             },
             None => {
                 assert(!s.schedules.contains_key(req.id@));
-                let next_run_at = echod_abstract_spec::trusted::spec_next_cron(req.cron@, now);
+                let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
                 let schedule = Schedule {
                     id: req.id,
                     cron: req.cron,
@@ -4343,19 +4339,20 @@ use super::relation::{
     occurrences_agree,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{
-    spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_has_target,
-    spec_is_timer, spec_lease, spec_lease_at, spec_listener, spec_new_object, spec_process_work,
-    spec_project_promise, spec_project_task, spec_promise_record, spec_retry, spec_schedule_step,
-    spec_string as a_string, spec_unlease as a_unlease,
+use echod_abstract_spec::state::{
+    spec_has_target, spec_is_timer, spec_lease_at, spec_new_object, spec_project_promise, spec_project_task, spec_promise_record, spec_string as a_string, spec_unlease as a_unlease,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::{
+use echod_abstract_spec::work::{
+    spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_lease, spec_listener, spec_process_work, spec_retry, spec_schedule_step,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{
     Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
     spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, Proc,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::view::{
+use echod_abstract_spec::state::{
     DispatchV, InOutV, InternalV, lemma_lift_dispatch, lemma_min_key as a_lemma_min_key,
     lift_dispatch, PromiseV, sat_add, ScheduleV, spec_keys, spec_min_key as a_min_key,
     spec_sorted as a_sorted, StoreV as AStore, TaskV,
@@ -4363,7 +4360,7 @@ use echod_abstract_spec::view::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::{pset_seq, spec_expand, spec_next_cron};
+use echod_abstract_spec::axioms::{pset_seq, spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{Config as AbstractConfig, Dispatch, Output};
 #[cfg(verus_keep_ghost)]
@@ -4378,7 +4375,7 @@ verus! {
 broadcast use
     vstd::seq::group_seq_lemmas,
     vstd::set::group_set_lemmas,
-    echod_abstract_spec::view::group_views;
+    echod_abstract_spec::state::group_views;
 
 /// One abstract step result.
 #[cfg(verus_keep_ghost)]
@@ -6281,23 +6278,27 @@ use echod_concrete_spec::store::{
 #[cfg(verus_keep_ghost)]
 use super::relation::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::machine::{
-    spec_body, spec_create_if_absent, spec_handler, spec_process_work,
+use echod_abstract_spec::requests::{
+    spec_handler,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::{
+use echod_abstract_spec::work::{
+    spec_body, spec_create_if_absent, spec_process_work,
+};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
     spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
     spec_send, spec_service, spec_shed,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::Pid as APid;
+use echod_abstract_spec::rover::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::axiom_string_ext;
+use echod_abstract_spec::axioms::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::view::{InOutV, InternalV, OutV, StoreV as AStore};
+use echod_abstract_spec::state::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
     BoundaryEvent, Call, Config as AbstractConfig, Output, Proc as AProc, Spec as AModel,
@@ -7502,7 +7503,7 @@ pub(crate) proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
     requires
         0 <= i < s.len(),
     ensures
-        echod_abstract_spec::model::remove_at(s, i) =~= s.remove(i),
+        echod_abstract_spec::rover::remove_at(s, i) =~= s.remove(i),
 {
 }
 
@@ -7511,7 +7512,7 @@ pub(crate) proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
 // ---------------------------------------------------------------------------
 
 /// An empty document that reads as `s` under `key` is the empty document.
-pub(crate) proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract_spec::view::StoreV)
+pub(crate) proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract_spec::state::StoreV)
     requires
         doc_rel(key, doc, s),
         spec_is_empty(doc),
@@ -7810,7 +7811,7 @@ pub(crate) proof fn lemma_queue_offers(config: AbstractConfig, state: AProc, now
 
 /// The second half of `spec_run_timeout`, named so the sum above reads.
 pub(crate) open spec fn derived(config: AbstractConfig, state: AProc, now: Time) -> Seq<StepResultV<AProc, APid, AMessage>> {
-    echod_abstract_spec::model::spec_derived(config, state, now)
+    echod_abstract_spec::rover::spec_derived(config, state, now)
 }
 
 /// A timeout result at `j` is an outcome of the service's timeout step.
@@ -9128,10 +9129,10 @@ pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, 
 {
     let send = spec_send(call, response, Seq::empty());
     let output = Output::Response { client: call.client, id: call.id, response };
-    assert(Seq::<echod_abstract_spec::view::DispatchV>::empty().map_values(
-        |dispatch: echod_abstract_spec::view::DispatchV| (
+    assert(Seq::<echod_abstract_spec::state::DispatchV>::empty().map_values(
+        |dispatch: echod_abstract_spec::state::DispatchV| (
             APid::Outside,
-            AMessage::Output(Output::Dispatch(echod_abstract_spec::view::lift_dispatch(dispatch))),
+            AMessage::Output(Output::Dispatch(echod_abstract_spec::state::lift_dispatch(dispatch))),
         ),
     ) =~= Seq::<(APid, AMessage)>::empty());
     assert(send =~= seq![(APid::Outside, AMessage::Output(output))]);
@@ -9251,12 +9252,12 @@ pub(crate) proof fn lemma_request_served(
     let served = spec_run(config, state, call, at);
     assert(served.len() == 1);
     assert(served[0] == spec_request_outcome(state, call, outs[0]));
-    assert(outcomes == served + echod_abstract_spec::model::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
+    assert(outcomes == served + echod_abstract_spec::rover::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
     assert(outcomes[0] == served[0]);
     let aa = lemma_service_step(config, ab, at, event, 0);
     let outcome = outcomes[0];
     assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
-    assert(outs[0].send =~= Seq::<echod_abstract_spec::view::DispatchV>::empty());
+    assert(outs[0].send =~= Seq::<echod_abstract_spec::state::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
     assert(finite_store(astate(aa).store));

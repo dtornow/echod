@@ -21,8 +21,9 @@ use rover_exec::{
     Strategy,
 };
 use echod_types::{Request, Response};
-use echod_abstract_exec::{history_rank, Spec as AbstractExec};
-use echod_abstract_spec::model::Pid as AbstractPid;
+use echod_abstract_exec::Spec as AbstractExec;
+use echod_model_test::history_rank;
+use echod_abstract_spec::rover::Pid as AbstractPid;
 use echod_abstract_spec::{Call, Config as AbstractConfig, Message as AbstractMessage, Output};
 use echod_concrete_spec::model::RETRY_TIMEOUT;
 use echod_concrete_spec::{

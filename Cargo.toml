@@ -12,6 +12,7 @@ members = [
   "rust/spec/echod/abstract/exec",
   "rust/spec/echod/concrete/spec",
   "rust/spec/echod/refinement",
+  "rust/test/model",
   "rust/test/runtime",
   "rust/test/cli/sim",
   "rust/test/cli/diff",

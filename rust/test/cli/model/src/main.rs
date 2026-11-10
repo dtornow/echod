@@ -46,9 +46,11 @@ use clap::Parser;
 use rover_exec::{check as check_trace, marks, CheckConfig};
 use echod_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
 use echod_abstract_spec::{Dispatch, Config};
-use echod_abstract_exec::{
-    arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
-    Action, HistoryEvent, Spec as AbstractExec, Store as AbstractStore, MARKS,
+use echod_abstract_exec::coverage::MARKS;
+use echod_abstract_exec::state::Store as AbstractStore;
+use echod_abstract_exec::Spec as AbstractExec;
+use echod_model_test::{
+    arbitrary, finish, history_rank, history_responses, rover_trace, suggest, Action, HistoryEvent,
 };
 use serde_json::{json, Value};
 

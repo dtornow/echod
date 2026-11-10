@@ -1155,12 +1155,25 @@ dependencies = [
  "clap",
  "echod-abstract-exec",
  "echod-abstract-spec",
+ "echod-model-test",
  "reqwest 0.12.28",
  "resonate-core",
  "rover-exec",
  "rover-spec",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "echod-model-test"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract-exec",
+ "echod-abstract-spec",
+ "echod-cron",
+ "echod-types",
+ "rover-exec",
+ "rover-spec",
 ]
 
 [[package]]
@@ -1248,6 +1261,7 @@ dependencies = [
  "echod-abstract-spec",
  "echod-concrete-spec",
  "echod-cron",
+ "echod-model-test",
  "echod-process",
  "echod-types",
  "rover-exec",

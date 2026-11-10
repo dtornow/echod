@@ -2,10 +2,12 @@
 
 use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
 use rover_exec::{check_unranked, CheckConfig, Spec as _};
-use echod_abstract_spec::model::Pid;
+use echod_abstract_spec::rover::Pid;
 use echod_abstract_spec::types::*;
 use echod_abstract_spec::*;
-use echod_abstract_exec::{next_cron, plain, Spec as AbstractExec};
+use echod_abstract_exec::{runtime::next_cron, Spec as AbstractExec};
+
+fn plain() -> Tags { Vec::new() }
 
 type Event = BoundaryEvent<Pid, Message>;
 
@@ -68,7 +70,7 @@ fn trace_for(requests: Vec<Request>) -> Vec<Event> {
 
 #[test]
 fn every_request_family_runs_through_rover() {
-    let cron = "* * * * *";
+    let cron = "* * * * *".to_string();
     let requests = vec![
         Request::PromiseCreate(create("o:p")),
         Request::PromiseGet(PromiseGetReq { id: "o:p".into() }),
@@ -105,12 +107,12 @@ fn every_request_family_runs_through_rover() {
         Request::TaskContinue(TaskContinueReq { id: "o:task".into() }),
         Request::ScheduleCreate(ScheduleCreateReq {
             id: "schedule".into(),
-            cron: cron.into(),
+            cron: cron.clone(),
             promise_id: "o:{{.id}}:{{.timestamp}}".into(),
             promise_timeout: 60_000,
             promise_param: Value::empty(),
             promise_tags: plain(),
-            next_run_at: next_cron(cron, 0),
+            next_run_at: next_cron(&cron, 0),
         }),
         Request::ScheduleGet(ScheduleGetReq { id: "schedule".into() }),
         Request::ScheduleDelete(ScheduleDeleteReq { id: "schedule".into() }),

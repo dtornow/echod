@@ -1,254 +1,29 @@
-//! History traces and model-driven request generation.
-//!
-//! None of this decides protocol behavior.
+//! Model-driven request workload generation.
 
 use rover_spec::rover::comm::Time;
-use rover_spec::rover::comm::{
-    BoundaryEvent as RoverBoundaryEvent, ProcessEvent,
-};
-use rover_exec::Action as ExecAction;
-use std::collections::BTreeMap;
 use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterCallbackReq, PromiseRegisterListenerReq,
-    PromiseSettleReq, PromiseState, Request, Response, ScheduleCreateReq, ScheduleDeleteReq,
+    PromiseSettleReq, PromiseState, Request, ScheduleCreateReq, ScheduleDeleteReq,
     ScheduleGetReq, Tags, TaskAcquireReq, TaskContinueReq, TaskCreateReq, TaskFenceAction,
     TaskFenceReq, TaskFulfillReq, TaskGetReq, TaskHaltReq, TaskHeartbeatReq, TaskRef,
     TaskReleaseReq, TaskState, TaskSuspendReq, Value,
 };
-
-use crate::machine::*;
-use echod_abstract_spec::model::Pid;
-use echod_abstract_spec::protocol::{Call, Message, Output};
+use echod_abstract_exec::state::Store;
+use echod_abstract_spec::state::Id;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action<X> {
     Request(X),
     Clock(Time),
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HistoryEvent {
-    Invoke { call: u64, req: Request },
-    Return { call: u64, res: Response },
-    Receive { msg: Dispatch },
-    Clock { at: Time },
-}
-
-pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
-    echod_cron::next_run_at(cron, after_ms)
-}
 
 fn origin(id: &str) -> &str {
     echod_types::origin_of(id)
 }
 
-pub fn rover_trace(history: &[HistoryEvent]) -> Vec<RoverBoundaryEvent<Pid, Message>> {
-    let mut now = 0;
-    let mut trace = Vec::with_capacity(history.len());
-    for event in history {
-        match event {
-            HistoryEvent::Clock { at } => {
-                now = *at;
-                trace.push(RoverBoundaryEvent::Clock { at: *at });
-            }
-            HistoryEvent::Invoke { call, req } => {
-                trace.push(RoverBoundaryEvent::Input {
-                    recipient: Pid::Service,
-                    at: now,
-                    message: Message::Request(Call {
-                        client: "history".into(),
-                        id: *call,
-                        request: req.clone(),
-                    }),
-                });
-            }
-            HistoryEvent::Return { call, res } => {
-                trace.push(RoverBoundaryEvent::Output {
-                    sender: Pid::Service,
-                    at: now,
-                    message: Message::Output(Output::Response {
-                        client: "history".into(),
-                        id: *call,
-                        response: res.clone(),
-                    }),
-                });
-            }
-            HistoryEvent::Receive { msg } => {
-                trace.push(RoverBoundaryEvent::Output {
-                    sender: Pid::Service,
-                    at: now,
-                    message: Message::Output(Output::Dispatch(msg.clone())),
-                });
-            }
-        }
-    }
-    trace
+pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
+    echod_cron::next_run_at(cron, after_ms)
 }
-
-pub fn history_rank(
-    target: &RoverBoundaryEvent<Pid, Message>,
-    action: &ExecAction<Pid, Message>,
-    sent: &[rover_spec::rover::comm::Envelope<Pid, Message>],
-    expected: &BTreeMap<u64, Response>,
-) -> usize {
-    match (target, action) {
-        (
-            RoverBoundaryEvent::Input {
-                message: Message::Request(target),
-                ..
-            },
-            ExecAction::Process {
-                event: ProcessEvent::Receive {
-                    message: Message::Request(call),
-                    ..
-                },
-                ..
-            },
-        ) if call.id == target.id => {
-            let response = sent.iter().find_map(|envelope| match &envelope.message {
-                Message::Output(Output::Response { id, response, .. })
-                    if *id == target.id =>
-                {
-                    Some(response)
-                }
-                _ => None,
-            });
-            match (expected.get(&target.id), response) {
-                (Some(want), Some(have)) if want == have => 0,
-                (_, Some(_)) => 1,
-                _ => 2,
-            }
-        }
-        (
-            RoverBoundaryEvent::Output {
-                message: Message::Output(Output::Response { id, .. }),
-                ..
-            },
-            ExecAction::Process {
-                event: ProcessEvent::Receive {
-                    message: Message::Request(call),
-                    ..
-                },
-                ..
-            },
-        ) if call.id == *id => 0,
-        (
-            RoverBoundaryEvent::Output {
-                message: Message::Output(Output::Dispatch(_)),
-                ..
-            },
-            ExecAction::Process {
-                event: ProcessEvent::Receive { .. },
-                ..
-            },
-        ) => 0,
-        (_, ExecAction::Process { event: ProcessEvent::Receive { .. }, .. }) => 1,
-        (_, ExecAction::Process { event: ProcessEvent::Timeout, .. }) => 2,
-        _ => 3,
-    }
-}
-
-pub fn history_responses(history: &[HistoryEvent]) -> BTreeMap<u64, Response> {
-    history
-        .iter()
-        .filter_map(|event| match event {
-            HistoryEvent::Return { call, res } => Some((*call, res.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Every mark the spec can put on an outcome, so a coverage report can show
-/// the ones no run reached. `resonate_marks.rs` checks it against `machine`.
-pub const MARKS: &[&str] = &[
-    "acquire: no such task (404)",
-    "acquire: not pending, or stale version (409)",
-    "callback registered",
-    "callback: awaiter not runnable, or awaited not awaitable (422)",
-    "callback: itself or another origin (400)",
-    "callback: no awaited promise (404)",
-    "callback: no awaiter promise (422)",
-    "callback: one of them settled (echo)",
-    "continue: no such task (404)",
-    "continue: not halted (409)",
-    "create: id exists (echo)",
-    "create: timer with target (400)",
-    "delete schedule: none (404)",
-    "fence check",
-    "fence: create in another origin (400)",
-    "fence: no such task (404)",
-    "fence: not held, or stale version (409)",
-    "fence: promise created",
-    "fence: promise created past its deadline",
-    "fence: promise settled",
-    "fence: settle in another origin (400)",
-    "fence: targets its own task (400)",
-    "fulfill: no such task (404)",
-    "fulfill: not a settled state (400)",
-    "fulfill: not held (409)",
-    "get promise",
-    "get promise: none (404)",
-    "get schedule",
-    "get schedule: none (404)",
-    "get task",
-    "get task: none (404)",
-    "halt: already halted (echo)",
-    "halt: no such task (404)",
-    "halt: task done (409)",
-    "heartbeat: nothing held by this worker",
-    "heartbeat: tasks in several origins (400)",
-    "lease expired",
-    "lease extended",
-    "listener registered",
-    "listener: no such promise (404)",
-    "listener: promise not awaitable (422)",
-    "listener: promise settled (echo)",
-    "listeners told",
-    "promise created",
-    "promise created past its deadline",
-    "promise settled",
-    "promise timed out",
-    "release: no such task (404)",
-    "release: not held (409)",
-    "resume noted on a running task",
-    "schedule created",
-    "schedule deleted",
-    "schedule fired",
-    "schedule fired past the occurrence's deadline",
-    "schedule advanced",
-    "schedule: id exists (echo)",
-    "schedule: occurrence exists",
-    "schedule: timer with target (400)",
-    "settle: already settled (echo)",
-    "settle: no such promise (404)",
-    "settle: not a settled state (400)",
-    "settled with callbacks or listeners",
-    "suspend: awaited already settled (300)",
-    "suspend: awaited in another origin (400)",
-    "suspend: awaited missing (422)",
-    "suspend: awaited not awaitable (422)",
-    "suspend: awaited twice (400)",
-    "suspend: no awaited, or itself (400)",
-    "suspend: no such task (404)",
-    "suspend: not held (409)",
-    "task acquired",
-    "task continued",
-    "task created",
-    "task created past its deadline",
-    "task created pending",
-    "task dispatched",
-    "task fulfilled",
-    "task halted",
-    "task released",
-    "task resumed",
-    "task suspended",
-    "task.create: not runnable, or a timer (400)",
-    "task.create: pending task acquired",
-    "task.create: promise exists, not a target (422)",
-    "task.create: target without a task (409)",
-    "task.create: task done (echo)",
-    "task.create: task held, suspended or halted (409)",
-    "timer promise resolved",
-];
 
 /// No tags at all: an internal promise.
 pub fn plain() -> Tags {

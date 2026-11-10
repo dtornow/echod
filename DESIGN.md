@@ -13,9 +13,10 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/spec/rover/spec` | `rover-spec` (library `rover_spec`): mathematical Rover processes, state, steps, and refinement |
 | `rust/spec/rover/exec` | `rover-exec` (library `rover_exec`): deterministic execution, bounded search, and verified certificate replay |
 | `rust/spec/echod/abstract/spec` | `echod-abstract-spec` (library `echod_abstract_spec`): the mathematical Resonate protocol model |
-| `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization, history translation, and model driving |
+| `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization of the mathematical model |
 | `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue and Echod concrete model |
 | `rust/spec/echod/refinement` | `echod-refinement` (library `echod_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
+| `rust/test/model` | `echod-model-test` (library `echod_model_test`): abstract-model trace translation and workload generation |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |

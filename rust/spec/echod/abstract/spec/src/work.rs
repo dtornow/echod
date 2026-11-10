@@ -1,12 +1,12 @@
-//! Mathematical internal-work transitions.
+//! Mathematical autonomous internal-work transition relation.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use rover_spec::rover::comm::Sched;
 use echod_types::{PromiseState, TaskState, Value};
-use super::*;
-use super::super::trusted::*;
-use super::super::view::*;
+use super::state::*;
+use super::axioms::*;
+use super::protocol::Dispatch;
 
 verus! {
 // ---------------------------------------------------------------------------

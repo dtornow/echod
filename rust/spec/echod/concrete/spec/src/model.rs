@@ -8,7 +8,7 @@ use vstd::prelude::*;
 
 use echod_abstract_spec::{BoundaryEvent, Call, Output};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::{axiom_bytes_realised, axiom_string_ext, axiom_string_realised};
+use echod_abstract_spec::axioms::{axiom_bytes_realised, axiom_string_ext, axiom_string_realised};
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec;
 use RoverSpec::Label;

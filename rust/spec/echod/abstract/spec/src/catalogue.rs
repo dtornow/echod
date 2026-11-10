@@ -29,15 +29,15 @@ use rover_spec::rover::comm::ProcessEvent;
 use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 use rover_spec::rover::comm::Time;
 
-use super::model::{Pid, Proc};
+use super::rover::{Pid, Proc};
 #[cfg(verus_keep_ghost)]
-use super::trusted::origin;
+use super::axioms::origin;
 use echod_types::{PromiseState, TaskState};
-use super::machine::Config;
+use super::state::Config;
 use super::protocol::Message;
 #[cfg(verus_keep_ghost)]
-use super::view::distinct;
-use super::view::{Chars, PromiseV, ScheduleV, TaskV};
+use super::state::distinct;
+use super::state::{Chars, PromiseV, ScheduleV, TaskV};
 
 verus! {
 

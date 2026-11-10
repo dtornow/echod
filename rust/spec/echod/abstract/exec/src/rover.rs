@@ -1,22 +1,31 @@
-//! Executable process realization of `echod_abstract_spec::Proc`.
+//! Executable Rover process realization of `echod_abstract_spec::Proc`.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec::{Spec as _, StepResultV};
 use echod_types::{Request, Response};
-use crate::machine::*;
-use crate::trusted::*;
-use crate::view::*;
+use crate::projection::group_views as group_exec_views;
+use crate::runtime::copy;
+use crate::state::{unavailable, Handlers, InOut, Out, Store, Work};
+use echod_abstract_spec::protocol::{Call, Dispatch, Message, Output};
+use echod_abstract_spec::state::Config;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::model::{
+use echod_abstract_spec::axioms::pset_seq;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::requests::spec_handler;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{
     empty_store, lemma_losses_map, remove_at, spec_derived, spec_due_result, spec_idle,
     spec_internal_result, spec_keep, spec_lose, spec_losses, spec_over_callbacks,
     spec_over_listeners, spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue,
     spec_ready, spec_request_outcome, spec_run, spec_run_timeout, spec_send, spec_service,
     spec_shed,
 };
-use echod_abstract_spec::model::{Pid, Proc as SpecProc, Spec as SpecModel};
-use echod_abstract_spec::protocol::{Call, Message, Output};
+use echod_abstract_spec::rover::{Pid, Proc as SpecProc, Spec as SpecModel};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::work::spec_body;
 
 verus! {
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -38,7 +47,7 @@ impl View for Proc {
     open spec fn view(&self) -> SpecProc {
         SpecProc {
             store: self.store@,
-            pending: self.pending@.map_values(|work: Work| super::view::as_sched(work)),
+            pending: self.pending@.map_values(|work: Work| crate::projection::as_sched(work)),
         }
     }
 }
@@ -48,15 +57,15 @@ fn initial_store() -> (server: Store)
         server@ == empty_store(),
 {
     let server = Store {
-        promises: super::trusted::PMap::empty(),
-        tasks: super::trusted::PMap::empty(),
-        schedules: super::trusted::PMap::empty(),
+        promises: crate::collections::PMap::empty(),
+        tasks: crate::collections::PMap::empty(),
+        schedules: crate::collections::PMap::empty(),
     };
     proof {
-        broadcast use group_views;
-        assert(server.promises@.map_values(|p: super::machine::Promise| p@) =~= Map::empty());
-        assert(server.tasks@.map_values(|t: super::machine::Task| t@) =~= Map::empty());
-        assert(server.schedules@.map_values(|s: echod_types::Schedule| super::view::schedule_v(s)) =~= Map::empty());
+        broadcast use group_exec_views;
+        assert(server.promises@.map_values(|p: crate::state::Promise| p@) =~= Map::empty());
+        assert(server.tasks@.map_values(|t: crate::state::Task| t@) =~= Map::empty());
+        assert(server.schedules@.map_values(|s: echod_types::Schedule| schedule_v(s)) =~= Map::empty());
     }
     server
 }
@@ -152,7 +161,7 @@ fn send(
             Message::Output(Output::Dispatch(dispatch)),
         )));
         assert forall|i: int| 0 <= i < all.len() implies
-            super::view::lift_dispatch(all[i]@) == all[i] by {
+            lift_dispatch(all[i]@) == all[i] by {
             lemma_lift_dispatch(all[i]);
         }
         assert(all.map_values(|dispatch: Dispatch| (
@@ -161,7 +170,7 @@ fn send(
         )) =~= all.map_values(|dispatch: Dispatch| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::view::lift_dispatch(dispatch@),
+                lift_dispatch(dispatch@),
             )),
         )));
         assert(first == (
@@ -183,9 +192,9 @@ fn append_work(
     mut work: Vec<Work>,
 ) -> (result: Vec<Work>)
     ensures
-        result@.map_values(|item: Work| super::view::as_sched(item))
-            == pending@.map_values(|item: Work| super::view::as_sched(item))
-                + work@.map_values(|item: Work| super::view::as_sched(item)),
+        result@.map_values(|item: Work| crate::projection::as_sched(item))
+            == pending@.map_values(|item: Work| crate::projection::as_sched(item))
+                + work@.map_values(|item: Work| crate::projection::as_sched(item)),
 {
     let mut result = copy(pending);
     result.append(&mut work);
@@ -338,9 +347,9 @@ fn run(
             + spec_losses(state@, *call, spec_handler(*config, call.request, state@.store, now))
             + seq![spec_shed(state@, *call)],
 {
-    let served = Machine(config).handler(&call.request, &state.store, now);
+    let served = Handlers(config).handler(&call.request, &state.store, now);
     let mut results = request_results(state, call, served, false);
-    let lost = Machine(config).handler(&call.request, &state.store, now);
+    let lost = Handlers(config).handler(&call.request, &state.store, now);
     let mut losses = request_results(state, call, lost, true);
     let ghost served_v = results_v(results@);
     let ghost lost_v = results_v(losses@);
@@ -410,17 +419,17 @@ fn internal_result(
         ));
     }
     proof {
-        assert(pending@.map_values(|item: Work| super::view::as_sched(item))
+        assert(pending@.map_values(|item: Work| crate::projection::as_sched(item))
             =~= remove_at(before@.pending, i as int) + outv.work);
         assert(all.take(all.len() as int) =~= all);
         assert forall|j: int| 0 <= j < outv.send.len() implies
-            super::view::lift_dispatch(outv.send[j]) == all[j] by {
+            lift_dispatch(outv.send[j]) == all[j] by {
             lemma_lift_dispatch(all[j]);
         }
         assert(send@ =~= outv.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(
-                super::view::lift_dispatch(dispatch),
+                lift_dispatch(dispatch),
             )),
         )));
     }
@@ -455,10 +464,10 @@ fn run_timeout_from(
     }
     let work = &state.pending[i];
     proof {
-        assert(state@.pending[i as int] == super::view::as_sched(*work));
-        assert(spec_body(super::view::as_sched(*work)) == work@);
+        assert(state@.pending[i as int] == crate::projection::as_sched(*work));
+        assert(spec_body(crate::projection::as_sched(*work)) == work@);
     }
-    let outcome = Machine(config).process_work(work, &state.store, now);
+    let outcome = Handlers(config).process_work(work, &state.store, now);
     let is_ready = ready(work, now);
     let mut tail = run_timeout_from(config, state, now, i + 1);
     if is_ready && !outcome.not_due {
@@ -507,7 +516,7 @@ fn due_result(before: &Proc, outcome: InOut) -> (result: ProcessResult)
         send.push((Pid::Outside, Message::Output(Output::Dispatch(dispatch))));
     }
     proof {
-        assert(pending@.map_values(|item: Work| super::view::as_sched(item)) =~= before@.pending + outv.work);
+        assert(pending@.map_values(|item: Work| crate::projection::as_sched(item)) =~= before@.pending + outv.work);
         assert(all.take(all.len() as int) =~= all);
         assert forall|j: int| 0 <= j < outv.send.len() implies lift_dispatch(outv.send[j]) == all[j] by {
             lemma_lift_dispatch(all[j]);
@@ -525,7 +534,7 @@ fn keep(config: &Config, state: &Proc, now: Time, work: Work) -> (results: Vec<P
     ensures
         results_v(results@) == spec_keep(*config, state@, now, work@, Seq::empty()),
 {
-    let outcome = Machine(config).process_work(&work, &state.store, now);
+    let outcome = Handlers(config).process_work(&work, &state.store, now);
     let mut results: Vec<ProcessResult> = Vec::new();
     if !outcome.not_due {
         results.push(due_result(state, outcome));
@@ -550,7 +559,7 @@ fn over_callbacks(
         results_v(results@) == spec_over_callbacks(*config, state@, now, awaited@, strs(awaiters@).skip(i as int)),
     decreases awaiters.len() - i,
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     if i == awaiters.len() {
         let results: Vec<ProcessResult> = Vec::new();
         proof {
@@ -587,7 +596,7 @@ fn over_listeners(
         results_v(results@) == spec_over_listeners(*config, state@, now, awaited@, strs(addresses@).skip(i as int)),
     decreases addresses.len() - i,
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     if i == addresses.len() {
         let results: Vec<ProcessResult> = Vec::new();
         proof {
@@ -624,7 +633,7 @@ fn over_promises(
         results_v(results@) == spec_over_promises(*config, state@, now, strs(keys@).skip(i as int)),
     decreases keys.len() - i,
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     if i == keys.len() {
         let results: Vec<ProcessResult> = Vec::new();
         proof {
@@ -681,7 +690,7 @@ fn over_tasks(
         results_v(results@) == spec_over_tasks(*config, state@, now, strs(keys@).skip(i as int)),
     decreases keys.len() - i,
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     if i == keys.len() {
         let results: Vec<ProcessResult> = Vec::new();
         proof {
@@ -745,7 +754,7 @@ fn over_schedules(
         results_v(results@) == spec_over_schedules(*config, state@, now, strs(keys@).skip(i as int)),
     decreases keys.len() - i,
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     if i == keys.len() {
         let results: Vec<ProcessResult> = Vec::new();
         proof {
@@ -764,7 +773,7 @@ fn over_schedules(
             vstd::pervasive::unreached()
         }
     };
-    let promise = super::trusted::expand(&c.promise_id, id, c.next_run_at);
+    let promise = crate::runtime::expand(&c.promise_id, id, c.next_run_at);
     let mut results = keep(config, state, now, Work::ScheduleTimeout { id: copy(id), promise });
     let ghost head = results_v(results@);
     let mut rest = over_schedules(config, state, now, keys, i + 1);
@@ -773,7 +782,7 @@ fn over_schedules(
     proof {
         assert(strs(keys@).skip(i as int).drop_first() =~= strs(keys@).skip(i as int + 1));
         assert(strs(keys@).skip(i as int)[0] == id@);
-        assert(state@.store.schedules[id@] == super::view::schedule_v(*c));
+        assert(state@.store.schedules[id@] == schedule_v(*c));
         assert(results_v(results@) =~= head + tail);
     }
     results
@@ -785,7 +794,7 @@ fn derived(config: &Config, state: &Proc, now: Time) -> (results: Vec<ProcessRes
     ensures
         results_v(results@) == spec_derived(*config, state@, now),
 {
-    broadcast use super::view::group_views;
+    broadcast use group_exec_views;
     let promises = state.store.promises.keys();
     let tasks = state.store.tasks.keys();
     let schedules = state.store.schedules.keys();
@@ -880,7 +889,7 @@ pub fn initial(_config: &Config) -> (states: Vec<(Pid, Proc)>)
         };
         proof {
             assert(server@ == empty_store());
-            assert(pending@.map_values(|work: Work| super::view::as_sched(work)) =~= Seq::empty());
+            assert(pending@.map_values(|work: Work| crate::projection::as_sched(work)) =~= Seq::empty());
             assert(state@ == SpecProc {
                 store: empty_store(),
                 pending: Seq::empty(),
@@ -911,5 +920,76 @@ pub fn injectable(_config: &Config, message: &Message) -> (injectable: bool)
     }
 }
 
+
+} // verus!
+
+
+use echod_abstract_spec::rover as abstract_rover;
+use rover_exec as RoverExec;
+
+verus! {
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Spec;
+
+impl RoverExec::Proc for Proc {
+    type Spec = SpecProc;
+
+    fn on_event(
+        &self,
+        config: &Config,
+        now: Time,
+        event: &ProcessEvent<Pid, Message>,
+    ) -> (results: Vec<RoverExec::ProcResult<Self>>) {
+        let mut inner = Proc::on_event(self, config, now, event);
+        let ghost all = inner@;
+        let mut results: Vec<RoverExec::ProcResult<Proc>> = Vec::new();
+        while !inner.is_empty()
+            invariant
+                results@.len() + inner@.len() == all.len(),
+                inner@ == all.skip(results@.len() as int),
+                forall|i: int| 0 <= i < results@.len() ==> {
+                    let result = #[trigger] results@[i];
+                    let source = all[i];
+                    &&& result.state@ == source.state@
+                    &&& result.send@ == source.send@
+                },
+            decreases inner.len(),
+        {
+            let ghost i = results@.len() as int;
+            let source = inner.remove(0);
+            proof {
+                assert(all.skip(i).remove(0) =~= all.skip(i + 1));
+            }
+            results.push(RoverExec::ProcResult {
+                state: source.state,
+                send: source.send,
+                marks: source.marks,
+            });
+        }
+        results
+    }
+}
+
+impl RoverExec::Spec for Spec {
+    type Spec = abstract_rover::Spec;
+    type Proc = Proc;
+
+    open spec fn spec(&self) -> abstract_rover::Spec {
+        abstract_rover::Spec
+    }
+
+    fn outside(&self) -> Pid {
+        Pid::Outside
+    }
+
+    fn initial(&self, config: &Config) -> (states: Vec<(Pid, Proc)>) {
+        initial(config)
+    }
+
+    fn injectable(&self, config: &Config, message: &Message) -> bool {
+        injectable(config, message)
+    }
+}
 
 } // verus!
