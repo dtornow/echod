@@ -1,4 +1,4 @@
-//! A run as a trace of the Resonate model, checked by `echod-rover`.
+//! A run as a trace of the Resonate model, checked by Rover.
 //!
 //! The history becomes a Rover boundary trace: every request a client made is
 //! an `Invoke` at the instant it was sent (its `head.debug_time`, the
@@ -23,7 +23,7 @@ use echod_abstract_spec::ServerConfig;
 use echod_abstract_exec::{
     history_rank, history_responses, rover_trace, HistoryEvent, EchodAbstractExec,
 };
-use echod_rover_exec::{check as check_trace, CheckConfig};
+use rover_exec::{check as check_trace, CheckConfig};
 
 use crate::history::Entry;
 use crate::sim::Sent;

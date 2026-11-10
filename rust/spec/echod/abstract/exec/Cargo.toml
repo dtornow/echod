@@ -1,0 +1,25 @@
+[package]
+name = "echod-abstract-exec"
+description = "Executable realization and history tooling for the Resonate abstract specification."
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[lib]
+name = "echod_abstract_exec"
+path = "src/lib.rs"
+
+[dependencies]
+echod-abstract-spec = { path = "../spec" }
+echod-cron = { path = "../../../../comm/cron" }
+rover-spec = { path = "../../../rover/spec" }
+rover-exec = { path = "../../../rover/exec" }
+echod-types = { path = "../../../../comm/types" }
+imbl = "7.0.2"
+vstd = "=0.0.0-2026-10-11-0230"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)'] }

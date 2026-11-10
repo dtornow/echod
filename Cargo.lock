@@ -1097,10 +1097,10 @@ version = "0.1.0"
 dependencies = [
  "echod-abstract-spec",
  "echod-cron",
- "echod-rover-exec",
- "echod-rover-spec",
  "echod-types",
  "imbl",
+ "rover-exec",
+ "rover-spec",
  "vstd",
 ]
 
@@ -1108,8 +1108,8 @@ dependencies = [
 name = "echod-abstract-spec"
 version = "0.1.0"
 dependencies = [
- "echod-rover-spec",
  "echod-types",
+ "rover-spec",
  "vstd",
 ]
 
@@ -1118,8 +1118,8 @@ name = "echod-concrete-spec"
 version = "0.1.0"
 dependencies = [
  "echod-abstract-spec",
- "echod-rover-spec",
  "echod-types",
+ "rover-spec",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
@@ -1155,10 +1155,10 @@ dependencies = [
  "clap",
  "echod-abstract-exec",
  "echod-abstract-spec",
- "echod-rover-exec",
- "echod-rover-spec",
  "reqwest 0.12.28",
  "resonate-core",
+ "rover-exec",
+ "rover-spec",
  "serde_json",
  "tokio",
 ]
@@ -1170,30 +1170,13 @@ dependencies = [
  "echod-abstract-spec",
  "echod-concrete-spec",
  "echod-cron",
- "echod-rover-exec",
- "echod-rover-spec",
  "echod-types",
+ "rover-exec",
+ "rover-spec",
  "serde",
  "serde_json",
  "verus_builtin",
  "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
-name = "echod-rover-exec"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
- "echod-rover-spec",
- "vstd",
-]
-
-[[package]]
-name = "echod-rover-spec"
-version = "0.1.0"
-dependencies = [
  "vstd",
 ]
 
@@ -1253,9 +1236,9 @@ dependencies = [
  "echod-concrete-spec",
  "echod-cron",
  "echod-process",
- "echod-rover-exec",
- "echod-rover-spec",
  "echod-types",
+ "rover-exec",
+ "rover-spec",
  "serde",
  "serde_json",
  "vstd",
@@ -2705,6 +2688,23 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rover-exec"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract-exec",
+ "echod-abstract-spec",
+ "rover-spec",
+ "vstd",
+]
+
+[[package]]
+name = "rover-spec"
+version = "0.1.0"
+dependencies = [
+ "vstd",
 ]
 
 [[package]]

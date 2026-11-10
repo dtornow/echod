@@ -9,8 +9,8 @@ use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes, PromiseSettleReq,
     PromiseState, Request, Response, Value,
 };
-use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover_exec::{
+use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
+use rover_exec::{
     check, exec, replay, Action, CheckConfig, Driver, Proc as _, ProcResult, Spec as _,
 };
 

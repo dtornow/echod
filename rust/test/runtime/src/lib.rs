@@ -12,14 +12,14 @@
 //! store.rs     the production concrete in-memory store with seeded faults
 //! history.rs   what each client saw and what the nodes did, with virtual timestamps
 //! workload.rs  the requests a run issues, and how they are generated
-//! checker.rs   the run as a trace of the Resonate model, checked by echod-rover
+//! checker.rs   the run as a trace of the Resonate model, checked by Rover
 //! rover_sim.rs isolated `RoverExec::exec` experiment over production-backed concrete processes
 //! sim.rs       the deterministic event loop, clients, nodes, chaos, and checks
 //! ```
 //!
 //! The specification a run is checked against is the Resonate model,
 //! the whole protocol as the Lean specification has it,
-//! and the checker is echod-rover's: some execution of the model must show
+//! and the checker is Rover's: some execution of the model must show
 //! exactly what the clients saw and the nodes emitted, with the nodes' own
 //! steps (a sweep, a fire) where the nodes report them (`checker.rs`). The
 //! run ends with a read of every id, so the state the bucket holds is what

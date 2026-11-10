@@ -100,7 +100,7 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Echod concrete refinement, open.** `rust/spec/concrete` holds the
+- **Echod concrete refinement, open.** `rust/spec/echod/concrete/spec` holds the
   catalogue and the handler specifications, and the kernel is proved equal
   to them. It depends on the abstract model and not on the process. The
   simulation that `on_event` refines that model is not written yet. The earlier `concrete_refines_abstract` against

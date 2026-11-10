@@ -81,14 +81,14 @@ echod/
 │
 ├── spec/
 │   ├── rover/
-│   │   ├── rust/         # generic world/checker/certificates/refinement
-│   │   └── lean/         # generic Rover world and theorems
-│   ├── abstract/
-│   │   ├── rust/         # independent Resonate model and properties
-│   │   └── lean/         # mirrored abstract model and catalogue
-│   └── concrete/
-│       ├── rust/         # process views/twins, relation, simulation proof
-│       └── lean/         # concrete model/refinement where still useful
+│   │   ├── spec/         # generic Rover world and refinement
+│   │   └── exec/         # checker and certificates
+│   └── echod/
+│       ├── abstract/
+│       │   ├── spec/     # independent Resonate model and properties
+│       │   └── exec/     # executable realization and history tooling
+│       └── concrete/
+│           └── spec/     # process views/twins, relation, simulation proof
 │
 ├── test/
 │   ├── runtime/          # synchronous deterministic Effect interpreter
@@ -142,7 +142,7 @@ Reply Effect -> complete client response
 
 It contains no protocol decisions.
 
-### `spec/rover`
+### `spec/rover/spec`
 
 Domain-independent formal machinery:
 
@@ -152,7 +152,7 @@ Domain-independent formal machinery:
 - clean boundary observation
 - generic forward-simulation-to-trace-refinement theorem
 
-### `spec/rover-exec`
+### `spec/rover/exec`
 
 The executable realization of Rover specifications:
 
@@ -161,21 +161,21 @@ The executable realization of Rover specifications:
 - certificates and verified replay
 - coverage labels from selected executable outcomes
 
-### `spec/abstract`
+### `spec/echod/abstract/spec`
 
 The independent mathematical Resonate model. It owns the protocol transition
 functions, mathematical state, and conformance properties meaningful under
 Rover semantics. It contains no executable store, handlers, or Rover process.
 
-It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
+It must not import `impl/process`, `spec/echod/concrete/spec`, or `impl/runtime`.
 
-### `spec/abstract-exec`
+### `spec/echod/abstract/exec`
 
 The executable realization of the abstract model: persistent store types,
 verified handler bodies, the executable Echod abstract process, client history
 translation, model-driven request generation, and coverage marks.
 
-### `spec/concrete`
+### `spec/echod/concrete/spec`
 
 The specification the kernel is proved against, not another implementation
 and not a dependent of the process:
@@ -217,10 +217,10 @@ remains the primary simulator.
 ## Dependency direction
 
 ```text
-spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process ---> impl/runtime ---> impl/cli
+spec/rover/spec ---> spec/echod/abstract/spec ---> spec/echod/concrete/spec ---> impl/process ---> impl/runtime ---> impl/cli
       |               |
       v               v
-spec/rover-exec --> spec/abstract-exec
+spec/rover/exec --> spec/echod/abstract/exec
 
 impl + spec -----------------> test/*
 ```
@@ -287,14 +287,14 @@ insufficient. Acceptance is sound only after verified certificate replay.
 ```text
 impl/process::State::on_event
     implements
-spec/concrete::spec_logic_on_event
+spec/echod/concrete/spec::spec_logic_on_event
     which is the node step of
 Rover instantiated with the concrete model
     refines
 Rover instantiated with the abstract model
 ```
 
-The statement is `echod_rover::rover::refinement::refines` of
+The statement is `rover_spec::rover::refinement::refines` of
 `echod_concrete_spec::EchodConcreteSpec` against
 `echod_abstract_spec::EchodAbstractSpec`: every
 boundary trace of the concrete world is a boundary trace of the abstract

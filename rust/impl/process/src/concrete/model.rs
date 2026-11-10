@@ -15,11 +15,11 @@ use echod_concrete_spec::model::EchodConcreteSpec;
 use echod_concrete_spec::node::NodeV;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::StoreV;
-use echod_rover::rover::comm::ProcessEvent;
+use rover_spec::rover::comm::ProcessEvent;
 #[cfg(test)]
-use echod_rover::rover::comm::Time;
+use rover_spec::rover::comm::Time;
 #[cfg(test)]
-use echod_rover_exec as RoverExec;
+use rover_exec as RoverExec;
 #[cfg(test)]
 use RoverExec::ProcResult;
 
@@ -74,8 +74,8 @@ pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
     v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
 }
 
-pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<echod_rover::rover::RoverSpec::StepResultV<LocalV, Pid, Message>> {
-    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| echod_rover::rover::RoverSpec::StepResultV { state: LocalV::Store(pair.0@), send: pair.1@ })
+pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<rover_spec::rover::RoverSpec::StepResultV<LocalV, Pid, Message>> {
+    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| rover_spec::rover::RoverSpec::StepResultV { state: LocalV::Store(pair.0@), send: pair.1@ })
 }
 
 fn same_pid(a: Pid, b: Pid) -> (r: bool)
@@ -127,7 +127,7 @@ impl Store {
                 r
             },
             _ => {
-                proof { assert(store_results_v(r@) =~~= Seq::<echod_rover::rover::RoverSpec::StepResultV<LocalV, Pid, Message>>::empty()); }
+                proof { assert(store_results_v(r@) =~~= Seq::<rover_spec::rover::RoverSpec::StepResultV<LocalV, Pid, Message>>::empty()); }
                 r
             },
         }

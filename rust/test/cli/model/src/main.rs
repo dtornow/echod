@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use echod_rover_exec::{check as check_trace, marks, CheckConfig};
+use rover_exec::{check as check_trace, marks, CheckConfig};
 use echod_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
 use echod_abstract_spec::{Dispatch, ServerConfig};
 use echod_abstract_exec::{

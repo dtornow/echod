@@ -25,11 +25,11 @@ whole to the Resonate model under crashes, outages and lost acks.
 rust/impl/process     the pure State::on_event around the concrete document machine, proved to compute spec_on_event
 rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
-rust/spec/rover       Rover mathematical state, steps, and refinement
-rust/spec/rover-exec  Rover deterministic execution, bounded search, and verified replay
-rust/spec/abstract    the mathematical Resonate protocol model
-rust/spec/abstract-exec  its executable store, handlers, Echod abstract realization, and history tooling
-rust/spec/concrete    mathematical Echod concrete model and its refinement
+rust/spec/rover/spec  Rover mathematical state, steps, and refinement
+rust/spec/rover/exec  Rover deterministic execution, bounded search, and verified replay
+rust/spec/echod/abstract/spec  the mathematical Resonate protocol model
+rust/spec/echod/abstract/exec  its executable store, handlers, Echod abstract realization, and history tooling
+rust/spec/echod/concrete/spec  mathematical Echod concrete model and its refinement
 rust/test/runtime     the synchronous deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/src/Rover        the Rover world, for experiment
@@ -40,7 +40,7 @@ scripts               the store and end-to-end tests against a real S3 API
 ```
 
 The process's document steps live under `rust/impl/process/src/concrete`,
-each proved equal to `rust/spec/concrete`'s specification; the process itself is proved to compute `spec_on_event`,
+each proved equal to `rust/spec/echod/concrete/spec`'s specification; the process itself is proved to compute `spec_on_event`,
 its bookkeeping and the sequence of store calls around each step included.
 Concrete depends on the abstract model; it does not depend on the process.
 What the process assumes — the text of keys, the bytes of documents — is
@@ -54,7 +54,7 @@ what is next. Each crate's `lib.rs` opens with a map of its files.
 ```
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
-cargo verus verify -p echod-rover-spec -p echod-rover-exec
+cargo verus verify -p rover-spec -p rover-exec
 cargo verus verify -p echod-abstract-spec -p echod-abstract-exec
 cargo verus verify -p echod-concrete-spec  # the mathematical concrete model and refinement
 cargo verus verify -p echod-process     # State::on_event == spec_on_event, under Verus

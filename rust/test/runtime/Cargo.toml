@@ -13,12 +13,12 @@ path = "src/lib.rs"
 echod-process = { path = "../../impl/process" }
 echod-cron = { path = "../../comm/cron" }
 echod-types = { path = "../../comm/types" }
-echod-rover = { package = "echod-rover-spec", path = "../../spec/rover" }
+rover-spec = { path = "../../spec/rover/spec" }
 serde = { version = "1", features = ["derive"] }
-echod-rover-exec = { path = "../../spec/rover-exec" }
-echod-abstract-spec = { package = "echod-abstract-spec", path = "../../spec/abstract" }
-echod-abstract-exec = { package = "echod-abstract-exec", path = "../../spec/abstract-exec" }
-echod-concrete-spec = { package = "echod-concrete-spec", path = "../../spec/concrete" }
+rover-exec = { path = "../../spec/rover/exec" }
+echod-abstract-spec = { path = "../../spec/echod/abstract/spec" }
+echod-abstract-exec = { path = "../../spec/echod/abstract/exec" }
+echod-concrete-spec = { path = "../../spec/echod/concrete/spec" }
 vstd = "=0.0.0-2026-10-11-0230"
 
 [dev-dependencies]

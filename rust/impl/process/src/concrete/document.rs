@@ -37,10 +37,10 @@ use echod_abstract_spec::trusted::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::machine::{lemma_tags_ext, lemma_value_ext};
 use echod_abstract_spec::{Call, Dispatch, Output};
-use echod_rover::rover::comm::ProcessEvent;
+use rover_spec::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]
-use echod_rover::rover::RoverSpec::StepResultV;
-use echod_rover::rover::comm::Time;
+use rover_spec::rover::RoverSpec::StepResultV;
+use rover_spec::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, AValue};
 

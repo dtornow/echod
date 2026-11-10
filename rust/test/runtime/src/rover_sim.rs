@@ -2,7 +2,7 @@
 //!
 //! This does not participate in the synchronous DST in [`crate::sim`].  It
 //! supplies the small adapter that `echod-process` deliberately keeps behind
-//! its own `cfg(test)`, drives [`echod_rover_exec::exec`], and projects the
+//! its own `cfg(test)`, drives [`rover_exec::exec`], and projects the
 //! concrete boundary onto the public Echod abstract boundary for checking.
 //! It exercises fixed multi-node fleets, concurrent seeded clients, all
 //! request families, schedules, reordered delivery, and virtual time. Dynamic
@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use echod_logic::concrete::document::Node;
 use echod_logic::concrete::model::{Fleet, Message as ConcreteMessage, Pid as ConcretePid};
 use echod_logic::concrete::store::Store;
-use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover_exec::{
+use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
+use rover_exec::{
     check, exec, Action, Certificate, CheckConfig, Driver, ExecError, Proc, ProcResult, Spec,
     Strategy,
 };
@@ -1043,7 +1043,7 @@ mod tests {
         let replayed = run_with_options(options.clone()).expect("replayed certified run");
         assert_eq!(first, replayed);
         assert_eq!(
-            echod_rover_exec::replay(
+            rover_exec::replay(
                 &EchodConcreteExecAdapter,
                 &fleet(&options),
                 &first.trace,
