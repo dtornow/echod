@@ -209,6 +209,11 @@ faults       -> crash, loss, delay, reordering, failed acknowledgement
 The production and test runtimes must drive the exact same
 `impl/process::State::on_event`.
 
+`test/runtime/src/rover_sim.rs` is an isolated experiment: generic
+`RoverExec::exec` drives production-backed concrete processes, projects their
+boundary trace, and asks `RoverAbstractExec` to certify it. The existing DST
+remains the primary simulator.
+
 ## Dependency direction
 
 ```text

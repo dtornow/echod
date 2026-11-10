@@ -378,7 +378,7 @@ model holds.
 
 The check is the Resonate model, the whole protocol
 as the Lean specification has it, through Rover execution
-(`rust/spec/rover/src/rover/exec`): some
+(`rust/spec/rover-exec`): some
 execution of the model must show exactly what the clients saw and the bus
 carried, the model's internal work (a deadline, a lease's end, a resume, a
 retry, an occurrence) placed where the checker likes. The trace is what a
@@ -403,6 +403,10 @@ not landed, whose stamp precedes the read, which one clock cannot show.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
+
+`test/runtime/src/rover_sim.rs` is an isolated experiment using generic
+`RoverExec::exec` to generate a production-backed concrete trace before the
+same abstract check. It does not replace the primary DST.
 
 ### Differential
 

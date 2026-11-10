@@ -1252,10 +1252,13 @@ dependencies = [
  "echod-process",
  "echod-rover-abstract-exec",
  "echod-rover-abstract-spec",
+ "echod-rover-concrete-spec",
  "echod-rover-exec",
+ "echod-rover-spec",
  "echod-types",
  "serde",
  "serde_json",
+ "vstd",
 ]
 
 [[package]]

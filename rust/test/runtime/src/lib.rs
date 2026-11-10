@@ -13,6 +13,7 @@
 //! history.rs   what each client saw and what the nodes did, with virtual timestamps
 //! workload.rs  the requests a run issues, and how they are generated
 //! checker.rs   the run as a trace of the Resonate model, checked by echod-rover
+//! rover_sim.rs isolated `RoverExec::exec` experiment over production-backed concrete processes
 //! sim.rs       the deterministic event loop, clients, nodes, chaos, and checks
 //! ```
 //!
@@ -29,6 +30,7 @@
 pub mod checker;
 pub mod history;
 pub mod rng;
+pub mod rover_sim;
 pub mod sim;
 pub mod store;
 pub mod workload;
