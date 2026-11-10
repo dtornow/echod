@@ -6,7 +6,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::machine::internal::*;
+use echod_abstract_spec::machine::internal::*;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::Sched;
 #[cfg(verus_keep_ghost)]

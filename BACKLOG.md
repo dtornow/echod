@@ -100,7 +100,7 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Rover concrete refinement, open.** `rust/spec/concrete` holds the
+- **Echod concrete refinement, open.** `rust/spec/concrete` holds the
   catalogue and the handler specifications, and the kernel is proved equal
   to them. It depends on the abstract model and not on the process. The
   simulation that `on_event` refines that model is not written yet. The earlier `concrete_refines_abstract` against
@@ -133,7 +133,7 @@ shows the panels with data.
   kernel's (both read before the first `:`), and the simulator's worker
   address is a URL. The model's side is now checked code: every handler
   in the abstract model's `exec.rs` is verified to compute its twin in `spec.rs`,
-  and the model's `RoverAbstractExec` impl is verified, so the checker's
+  and the model's `EchodAbstractExec` impl is verified, so the checker's
   verdicts and this theorem speak about the same functions, under the
   model's own axioms (a value is its view; a set's elements come out in one
   order, `pset_seq`). What the proof moved: the kernel refuses an acquire

@@ -23,7 +23,7 @@ use super::commit_spec::*;
 use super::flight_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::document::{notes_v, pend_v};
-use rover_concrete_spec::node::{NoteV, PendingV};
+use echod_concrete_spec::node::{NoteV, PendingV};
 
 verus! {
 

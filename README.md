@@ -8,7 +8,7 @@ The server speaks the Resonate protocol, one `POST /` and one envelope. Every
 origin is one document in the bucket, committed with a conditional write;
 deadlines are keys; nodes find each other in the bucket. What the server does
 to a document is `echod_logic::concrete`'s document machine, each step proved
-to compute `rover_concrete_spec`'s specification, and that model is proved to refine the
+to compute `echod_concrete_spec`'s specification, and that model is proved to refine the
 abstract Resonate model. The process around it, `echod_logic`, is proved
 whole: `State::on_event`, the one step of the node — a request, a store
 answer, the heartbeat, the wheel — ensures it computes `spec_on_event`, and
@@ -28,8 +28,8 @@ rust/impl/cli         the echod binary
 rust/spec/rover       Rover mathematical state, steps, and refinement
 rust/spec/rover-exec  Rover deterministic execution, bounded search, and verified replay
 rust/spec/abstract    the mathematical Resonate protocol model
-rust/spec/abstract-exec  its executable store, handlers, Rover realization, and history tooling
-rust/spec/concrete    mathematical concrete document/Rover model and its refinement
+rust/spec/abstract-exec  its executable store, handlers, Echod abstract realization, and history tooling
+rust/spec/concrete    mathematical Echod concrete model and its refinement
 rust/test/runtime     the synchronous deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/src/Rover        the Rover world, for experiment
@@ -55,8 +55,8 @@ what is next. Each crate's `lib.rs` opens with a map of its files.
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
 cargo verus verify -p echod-rover-spec -p echod-rover-exec
-cargo verus verify -p echod-rover-abstract-spec -p echod-rover-abstract-exec
-cargo verus verify -p echod-rover-concrete-spec  # the mathematical concrete model and refinement
+cargo verus verify -p echod-abstract-spec -p echod-abstract-exec
+cargo verus verify -p echod-concrete-spec  # the mathematical concrete model and refinement
 cargo verus verify -p echod-process     # State::on_event == spec_on_event, under Verus
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001

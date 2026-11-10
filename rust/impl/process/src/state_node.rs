@@ -48,7 +48,7 @@ use crate::verified::text::copy_string;
 use crate::Config;
 
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::store::{spec_before, EtagSpec, StoreErrorSpec};
+use echod_concrete_spec::store::{spec_before, EtagSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::ANode;
 

@@ -6,7 +6,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::machine::external::*;
+use echod_abstract_spec::machine::external::*;
 use echod_types::{
     PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,
     Request, Response, Schedule, ScheduleCreateReq, TaskFenceAction, TaskFenceCheckReq,

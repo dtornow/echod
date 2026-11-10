@@ -49,9 +49,9 @@ use crate::verified::node_spec::{spec_read_config, ANode};
 #[cfg(verus_keep_ghost)]
 use crate::verified::ScheduleSpec;
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::node::DocV;
+use echod_concrete_spec::node::DocV;
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::store::{StoreCallSpec, StoreErrorSpec};
+use echod_concrete_spec::store::{StoreCallSpec, StoreErrorSpec};
 
 verus! {
 

@@ -16,7 +16,7 @@ use crate::verified::node::str_eq;
 use crate::verified::text::text;
 
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::node::{spec_origin_map, DocV};
+use echod_concrete_spec::node::{spec_origin_map, DocV};
 #[cfg(verus_keep_ghost)]
 use echod_types::AResponse;
 
@@ -134,7 +134,7 @@ pub fn target_of(tags: &Tags) -> (r: Option<String>)
 pub open spec fn spec_object(
     doc: DocV,
     id: Seq<char>,
-) -> Option<rover_concrete_spec::node::ObjV> {
+) -> Option<echod_concrete_spec::node::ObjV> {
     if spec_origin_map(doc).contains_key(id) { Some(spec_origin_map(doc)[id]) } else { None }
 }
 

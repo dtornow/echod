@@ -3,7 +3,7 @@
 //! This does not participate in the synchronous DST in [`crate::sim`].  It
 //! supplies the small adapter that `echod-process` deliberately keeps behind
 //! its own `cfg(test)`, drives [`echod_rover_exec::exec`], and projects the
-//! concrete boundary onto the public abstract Rover boundary for checking.
+//! concrete boundary onto the public Echod abstract boundary for checking.
 //! It exercises fixed multi-node fleets, concurrent seeded clients, all
 //! request families, schedules, reordered delivery, and virtual time. Dynamic
 //! membership, lifecycle changes, clock skew, and synthetic store failures
@@ -20,11 +20,11 @@ use echod_rover_exec::{
     Strategy,
 };
 use echod_types::{Request, Response};
-use rover_abstract_exec::{history_rank, RoverAbstractExec};
-use rover_abstract_spec::model::Pid as AbstractPid;
-use rover_abstract_spec::{Call, Message as AbstractMessage, Output, ServerConfig};
-use rover_concrete_spec::model::{LocalV as ConcreteLocalV, RoverConcreteSpec, RETRY_TIMEOUT};
-use rover_concrete_spec::{StoreCall, StoreError, StoreOutcome};
+use echod_abstract_exec::{history_rank, EchodAbstractExec};
+use echod_abstract_spec::model::Pid as AbstractPid;
+use echod_abstract_spec::{Call, Message as AbstractMessage, Output, ServerConfig};
+use echod_concrete_spec::model::{LocalV as ConcreteLocalV, EchodConcreteSpec, RETRY_TIMEOUT};
+use echod_concrete_spec::{StoreCall, StoreError, StoreOutcome};
 use vstd::prelude::View;
 
 use crate::rng::Rng;
@@ -79,11 +79,11 @@ impl Proc for ConcreteProcess {
     }
 }
 
-/// Executable realization of `RoverConcreteSpec`, backed by production state.
-struct RoverConcreteExecAdapter;
+/// Executable realization of `EchodConcreteSpec`, backed by production state.
+struct EchodConcreteExecAdapter;
 
-impl Spec for RoverConcreteExecAdapter {
-    type Spec = RoverConcreteSpec;
+impl Spec for EchodConcreteExecAdapter {
+    type Spec = EchodConcreteSpec;
     type Proc = ConcreteProcess;
 
     fn outside(&self) -> ConcretePid {
@@ -174,7 +174,7 @@ pub enum CheckOutcome {
 
 /// Scope of the executable concrete model used by this experiment.
 ///
-/// The fleet is created once by `RoverConcreteSpec::processes`; the store
+/// The fleet is created once by `EchodConcreteSpec::processes`; the store
 /// computes its normal in-memory outcomes.  In particular this driver does
 /// not synthesize lifecycle events or fault responses that the concrete
 /// model cannot produce.
@@ -525,8 +525,8 @@ impl SeededStrategy {
     }
 }
 
-impl Strategy<RoverConcreteExecAdapter> for SeededStrategy {
-    fn next(&mut self, driver: Driver<'_, RoverConcreteExecAdapter>) -> Option<ConcreteAction> {
+impl Strategy<EchodConcreteExecAdapter> for SeededStrategy {
+    fn next(&mut self, driver: Driver<'_, EchodConcreteExecAdapter>) -> Option<ConcreteAction> {
         self.fill_window(driver.now);
         if self.issued == self.operations && self.outstanding() == 0 {
             if self.clock_advances == 0 {
@@ -900,7 +900,7 @@ pub fn run_with_options(options: Options) -> Result<Report, RunError> {
     let config = fleet(&options);
     let max_steps = options.operations.saturating_mul(24).saturating_add(64);
     let execution = exec(
-        &RoverConcreteExecAdapter,
+        &EchodConcreteExecAdapter,
         &config,
         max_steps,
         SeededStrategy::new(&options),
@@ -930,7 +930,7 @@ pub fn run_with_options(options: Options) -> Result<Report, RunError> {
         max_nodes: 50_000,
     };
     let abstract_certificate = check(
-        &RoverAbstractExec,
+        &EchodAbstractExec,
         &ServerConfig {
             retry_timeout: RETRY_TIMEOUT,
         },
@@ -1044,7 +1044,7 @@ mod tests {
         assert_eq!(first, replayed);
         assert_eq!(
             echod_rover_exec::replay(
-                &RoverConcreteExecAdapter,
+                &EchodConcreteExecAdapter,
                 &fleet(&options),
                 &first.trace,
                 &first.certificate,

@@ -12,8 +12,8 @@ path = "src/main.rs"
 [dependencies]
 echod-rover = { package = "echod-rover-spec", path = "../../../spec/rover" }
 echod-rover-exec = { path = "../../../spec/rover-exec" }
-rover-abstract-spec = { package = "echod-rover-abstract-spec", path = "../../../spec/abstract" }
-rover-abstract-exec = { package = "echod-rover-abstract-exec", path = "../../../spec/abstract-exec" }
+echod-abstract-spec = { package = "echod-abstract-spec", path = "../../../spec/abstract" }
+echod-abstract-exec = { package = "echod-abstract-exec", path = "../../../spec/abstract-exec" }
 resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
 axum = { version = "0.7", features = ["json"] }
 clap = { version = "4", features = ["derive"] }

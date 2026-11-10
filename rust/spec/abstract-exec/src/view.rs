@@ -5,7 +5,7 @@ use echod_rover::rover::comm::Sched;
 use echod_types::Schedule;
 use crate::machine::*;
 use crate::trusted::*;
-pub use rover_abstract_spec::view::*;
+pub use echod_abstract_spec::view::*;
 
 verus! {
 impl View for Promise {

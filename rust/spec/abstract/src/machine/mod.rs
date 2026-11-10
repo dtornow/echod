@@ -1,6 +1,6 @@
 //! Mathematical state and transitions of the Resonate abstract protocol.
 //! Executable records, stores, and handlers live in
-//! `echod-rover-abstract-exec`.
+//! `echod-abstract-exec`.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 

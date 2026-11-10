@@ -1,4 +1,4 @@
-//! Mathematical concrete Rover model.
+//! Mathematical Echod concrete model.
 //!
 //! This crate contains only the `*V` process state, transitions, passive
 //! protocol algebra, and `RoverSpec::Spec`. Executable realizations live in
@@ -6,7 +6,7 @@
 
 use vstd::prelude::*;
 
-use rover_abstract_spec::{BoundaryEvent, Call, Output};
+use echod_abstract_spec::{BoundaryEvent, Call, Output};
 use echod_rover::rover::comm::{ProcessEvent, Time};
 use echod_rover::rover::RoverSpec;
 use RoverSpec::Label;
@@ -48,8 +48,8 @@ pub struct Fleet {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// The mathematical concrete Rover model, with no executable local state.
-pub struct RoverConcreteSpec;
+/// The mathematical Echod concrete model, with no executable local state.
+pub struct EchodConcreteSpec;
 
 // What crosses the boundary
 // ---------------------------------------------------------------------------
@@ -256,8 +256,8 @@ pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
 
 pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
     let dispatch = match note {
-        NoteV::Execute { id, version } => rover_abstract_spec::Dispatch::Execute { id: spec_string(id), version },
-        NoteV::Unblock { address, promise } => rover_abstract_spec::Dispatch::Unblock { address: spec_string(address), promise },
+        NoteV::Execute { id, version } => echod_abstract_spec::Dispatch::Execute { id: spec_string(id), version },
+        NoteV::Unblock { address, promise } => echod_abstract_spec::Dispatch::Unblock { address: spec_string(address), promise },
     };
     (Pid::Outside, Message::Output(Output::Dispatch(dispatch)))
 }
@@ -287,7 +287,7 @@ impl Fleet {
 verus! {
 
 
-impl RoverSpec::Spec for RoverConcreteSpec {
+impl RoverSpec::Spec for EchodConcreteSpec {
     type Config = Fleet;
     type Pid = Pid;
     type Proc = LocalV;

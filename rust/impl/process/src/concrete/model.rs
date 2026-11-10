@@ -1,20 +1,20 @@
-//! Executable adapter for the concrete Rover world.
+//! Executable adapter for the Echod concrete world.
 //!
 //! Production document execution uses `document`; this adapter keeps the
 //! executable world used by concrete runtime tests beside that implementation.
 
 use vstd::prelude::*;
 
-pub use rover_concrete_spec::model::{Fleet, Message, Pid};
-use rover_concrete_spec::model::{LocalV, LogicV};
+pub use echod_concrete_spec::model::{Fleet, Message, Pid};
+use echod_concrete_spec::model::{LocalV, LogicV};
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::model::{spec_store, spec_world};
+use echod_concrete_spec::model::{spec_store, spec_world};
 #[cfg(test)]
-use rover_concrete_spec::model::RoverConcreteSpec;
+use echod_concrete_spec::model::EchodConcreteSpec;
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::node::NodeV;
+use echod_concrete_spec::node::NodeV;
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::store::StoreV;
+use echod_concrete_spec::store::StoreV;
 use echod_rover::rover::comm::ProcessEvent;
 #[cfg(test)]
 use echod_rover::rover::comm::Time;
@@ -68,7 +68,7 @@ impl View for Local {
     }
 }
 
-pub struct RoverConcreteExec;
+pub struct EchodConcreteExec;
 
 pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
     v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
@@ -155,11 +155,11 @@ impl RoverExec::Proc for Local {
 }
 
 #[cfg(test)]
-impl RoverExec::Spec for RoverConcreteExec {
-    type Spec = RoverConcreteSpec;
+impl RoverExec::Spec for EchodConcreteExec {
+    type Spec = EchodConcreteSpec;
     type Proc = Local;
 
-    open spec fn spec(&self) -> RoverConcreteSpec { RoverConcreteSpec }
+    open spec fn spec(&self) -> EchodConcreteSpec { EchodConcreteSpec }
     fn outside(&self) -> Pid { Pid::Outside }
 
     fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {

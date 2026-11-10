@@ -19,9 +19,9 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use rover_abstract_spec::ServerConfig;
-use rover_abstract_exec::{
-    history_rank, history_responses, rover_trace, HistoryEvent, RoverAbstractExec,
+use echod_abstract_spec::ServerConfig;
+use echod_abstract_exec::{
+    history_rank, history_responses, rover_trace, HistoryEvent, EchodAbstractExec,
 };
 use echod_rover_exec::{check as check_trace, CheckConfig};
 
@@ -109,7 +109,7 @@ pub enum Verdict {
     Unknown(Violation),
 }
 
-/// The trace against the Rover model. `retry_timeout` is the nodes' and the
+/// The trace against the Echod abstract model. `retry_timeout` is the nodes' and the
 /// model's; `budget` caps the certificate depth.
 pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let events = rover_trace(trace);
@@ -117,7 +117,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let mut limits = CheckConfig::for_trace_len(events.len());
     limits.max_nodes = budget as usize;
     match check_trace(
-        &RoverAbstractExec,
+        &EchodAbstractExec,
         &ServerConfig { retry_timeout },
         &events,
         limits,

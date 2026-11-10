@@ -1,7 +1,7 @@
 //! echod-model: echod driven by the Resonate model,
 //! over HTTP, and every trace checked against that model.
 //!
-//! The model (`rover_abstract_spec`, the Rover abstract model) is an executable
+//! The model (`echod_abstract_spec`, the Echod abstract model) is an executable
 //! specification in Verus of the Resonate protocol as the Lean specification
 //! has it: what every request does, what runs on its own (a deadline, a lease,
 //! a resume, a redispatch, a schedule's occurrence), what the server sends.
@@ -44,11 +44,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use echod_rover_exec::{check as check_trace, marks, CheckConfig};
-use rover_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
-use rover_abstract_spec::{Dispatch, ServerConfig};
-use rover_abstract_exec::{
+use echod_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
+use echod_abstract_spec::{Dispatch, ServerConfig};
+use echod_abstract_exec::{
     arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
-    Action, HistoryEvent, RoverAbstractExec, Store as AbstractStore, MARKS,
+    Action, HistoryEvent, EchodAbstractExec, Store as AbstractStore, MARKS,
 };
 use serde_json::{json, Value};
 
@@ -265,14 +265,14 @@ fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
     let events = rover_trace(trace);
     let expected = history_responses(trace);
     match check_trace(
-        &RoverAbstractExec,
+        &EchodAbstractExec,
         &config,
         &events,
         CheckConfig::for_trace_len(events.len()),
         |event, action, sent| history_rank(event, action, sent, &expected),
     ) {
         Some(certificate) => Outcome::Ok(
-            marks(&RoverAbstractExec, &config, &certificate).expect("the certificate replays"),
+            marks(&EchodAbstractExec, &config, &certificate).expect("the certificate replays"),
         ),
         None => Outcome::Unknown(Violation {
             reason: "bounded Rover search found no certificate".into(),

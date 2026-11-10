@@ -1,14 +1,14 @@
-//! Executable realization of `rover_abstract_spec`.
+//! Executable realization of `echod_abstract_spec`.
 
 #![allow(non_shorthand_field_patterns)]
 
 use vstd::prelude::*;
 
-use rover_abstract_spec::model::{
+use echod_abstract_spec::model::{
     self as abstract_model, Pid as SpecPid, StateV as SpecState,
 };
-use rover_abstract_spec::protocol::Message as SpecMessage;
-use rover_abstract_spec::ServerConfig as Config;
+use echod_abstract_spec::protocol::Message as SpecMessage;
+use echod_abstract_spec::ServerConfig as Config;
 use echod_rover::rover::comm::{ProcessEvent, Time as RoverTime};
 use echod_rover_exec as RoverExec;
 
@@ -19,7 +19,7 @@ pub mod trusted;
 pub mod view;
 pub mod history;
 
-pub use rover_abstract_spec::*;
+pub use echod_abstract_spec::*;
 pub use machine::{Promise, Store, Task};
 pub use model::State;
 pub use trusted::{PMap, PSet};
@@ -31,7 +31,7 @@ pub use history::{
 verus! {
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RoverAbstractExec;
+pub struct EchodAbstractExec;
 
 impl RoverExec::Proc for State {
     type Spec = SpecState;
@@ -72,12 +72,12 @@ impl RoverExec::Proc for State {
     }
 }
 
-impl RoverExec::Spec for RoverAbstractExec {
-    type Spec = abstract_model::RoverAbstractSpec;
+impl RoverExec::Spec for EchodAbstractExec {
+    type Spec = abstract_model::EchodAbstractSpec;
     type Proc = State;
 
-    open spec fn spec(&self) -> abstract_model::RoverAbstractSpec {
-        abstract_model::RoverAbstractSpec
+    open spec fn spec(&self) -> abstract_model::EchodAbstractSpec {
+        abstract_model::EchodAbstractSpec
     }
 
     fn outside(&self) -> SpecPid {

@@ -1,16 +1,16 @@
 //! Executable in-memory concrete store.
 //!
 //! The passive call/outcome algebra and mathematical store transition live in
-//! `echod-rover-concrete-spec`; this module realizes that transition.
+//! `echod-concrete-spec`; this module realizes that transition.
 
 use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
-pub use rover_concrete_spec::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
-use rover_concrete_spec::store::*;
-use rover_concrete_spec::model::Pid;
+pub use echod_concrete_spec::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+use echod_concrete_spec::store::*;
+use echod_concrete_spec::model::Pid;
 #[cfg(verus_keep_ghost)]
-use rover_concrete_spec::model::{spec_bytes, spec_string};
+use echod_concrete_spec::model::{spec_bytes, spec_string};
 
 verus! {
 
@@ -159,7 +159,7 @@ fn copy_entry(e: &Entry) -> (r: Entry)
 {
     let r = Entry { key: e.key.clone(), body: copy_bytes(&e.body), version: e.version };
     proof {
-        rover_abstract_spec::trusted::axiom_vec_ext(r.body, e.body);
+        echod_abstract_spec::trusted::axiom_vec_ext(r.body, e.body);
     }
     r
 }
@@ -326,10 +326,10 @@ pub proof fn lemma_bytes_keys(v: Vec<String>)
     assert forall|i: int| 0 <= i < v@.len() implies #[trigger] w@[i] == v@[i] by {
         assert(key_views(w@)[i] == w@[i]@);
         assert(key_views(v@)[i] == v@[i]@);
-        rover_abstract_spec::trusted::axiom_string_ext(w@[i], v@[i]);
+        echod_abstract_spec::trusted::axiom_string_ext(w@[i], v@[i]);
     }
     assert(w@ =~= v@);
-    rover_abstract_spec::trusted::axiom_vec_ext(w, v);
+    echod_abstract_spec::trusted::axiom_vec_ext(w, v);
 }
 
 /// `spec_find`.
@@ -522,8 +522,8 @@ impl Store {
     {
         let r = Store { entries: copy_entries(&self.entries), appendable: self.appendable, seen: copy_seen(&self.seen) };
         proof {
-            rover_abstract_spec::trusted::axiom_vec_ext(r.entries, self.entries);
-            rover_abstract_spec::trusted::axiom_vec_ext(r.seen, self.seen);
+            echod_abstract_spec::trusted::axiom_vec_ext(r.entries, self.entries);
+            echod_abstract_spec::trusted::axiom_vec_ext(r.seen, self.seen);
         }
         r
     }
@@ -541,8 +541,8 @@ impl Store {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
                     proof {
-                        rover_concrete_spec::simulation::lemma_bytes(entry.body@);
-                        rover_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
+                        echod_concrete_spec::simulation::lemma_bytes(entry.body@);
+                        echod_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
                     StoreOutcome::Got(Some((body, etag(&entry.body))))
                 },
@@ -554,14 +554,14 @@ impl Store {
                     let have = etag(&entry.body);
                     if have.0 == want.0 {
                         proof {
-                            rover_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
+                            echod_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
                         }
                         StoreOutcome::Read(Read::NotModified)
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
-                            rover_concrete_spec::simulation::lemma_bytes(entry.body@);
-                            rover_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
+                            echod_concrete_spec::simulation::lemma_bytes(entry.body@);
+                            echod_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
                         StoreOutcome::Read(Read::Body(body, have))
                     }
@@ -580,7 +580,7 @@ impl Store {
                     let have = etag(&self.entries[i].body);
                     if have.0 == want.0 {
                         proof {
-                            rover_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
+                            echod_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
                         }
                         let version = bump(self.entries[i].version);
                         put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
@@ -605,7 +605,7 @@ impl Store {
                             't', 'h', 'i', 's', ' ', 's', 't', 'o', 'r', 'e', ' ', 'd', 'o', 'e', 's', ' ',
                             'n', 'o', 't', ' ', 'a', 'p', 'p', 'e', 'n', 'd',
                         ]);
-                        rover_concrete_spec::interpret::lemma_string_of(text);
+                        echod_concrete_spec::interpret::lemma_string_of(text);
                     }
                     StoreOutcome::Failed(StoreError::Unavailable(text))
                 } else {
@@ -614,7 +614,7 @@ impl Store {
                             let have = etag(&self.entries[i].body);
                             if have.0 == want.0 && self.entries[i].body.len() as u64 == *offset {
                                 proof {
-                                    rover_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
+                                    echod_abstract_spec::trusted::axiom_string_ext(have.0, want.0);
                                 }
                                 let mut joined = copy_bytes(&self.entries[i].body);
                                 let mut more = copy_bytes(body);

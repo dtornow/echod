@@ -1,4 +1,4 @@
-//! The mathematical concrete Rover model.
+//! The mathematical Echod concrete model.
 //!
 //! This crate contains mathematical `*V` state, `spec_*` transitions,
 //! passive protocol/store algebra, and the relation, simulation, and
@@ -34,5 +34,5 @@ pub mod timers;
 pub mod relation;
 pub mod simulation;
 
-pub use model::RoverConcreteSpec;
+pub use model::EchodConcreteSpec;
 pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};

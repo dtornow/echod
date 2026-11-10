@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use rover_abstract_spec::types as rows;
-use rover_abstract_exec::{PMap, PSet, Promise, Store as AbstractStore, Task};
+use echod_abstract_spec::types as rows;
+use echod_abstract_exec::{PMap, PSet, Promise, Store as AbstractStore, Task};
 use serde_json::{json, Value};
 
 fn tags_out(t: &rows::Tags) -> Value {

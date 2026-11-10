@@ -16,9 +16,9 @@ echod-types = { path = "../../comm/types" }
 echod-rover = { package = "echod-rover-spec", path = "../../spec/rover" }
 serde = { version = "1", features = ["derive"] }
 echod-rover-exec = { path = "../../spec/rover-exec" }
-rover-abstract-spec = { package = "echod-rover-abstract-spec", path = "../../spec/abstract" }
-rover-abstract-exec = { package = "echod-rover-abstract-exec", path = "../../spec/abstract-exec" }
-rover-concrete-spec = { package = "echod-rover-concrete-spec", path = "../../spec/concrete" }
+echod-abstract-spec = { package = "echod-abstract-spec", path = "../../spec/abstract" }
+echod-abstract-exec = { package = "echod-abstract-exec", path = "../../spec/abstract-exec" }
+echod-concrete-spec = { package = "echod-concrete-spec", path = "../../spec/concrete" }
 vstd = "=0.0.0-2026-10-11-0230"
 
 [dev-dependencies]

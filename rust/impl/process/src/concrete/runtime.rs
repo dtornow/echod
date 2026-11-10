@@ -7,7 +7,7 @@ verus! {
 #[verifier::external_body]
 pub fn next_cron(cron: &String, after: u64) -> (result: u64)
     ensures
-        result == rover_abstract_spec::trusted::spec_next_cron(cron@, after),
+        result == echod_abstract_spec::trusted::spec_next_cron(cron@, after),
         result > after,
 {
     echod_cron::next_run_at(cron, after)
@@ -16,7 +16,7 @@ pub fn next_cron(cron: &String, after: u64) -> (result: u64)
 #[verifier::external_body]
 pub fn expand(template: &String, id: &String, at: u64) -> (result: String)
     ensures
-        result@ == rover_abstract_spec::trusted::spec_expand(template@, id@, at),
+        result@ == echod_abstract_spec::trusted::spec_expand(template@, id@, at),
 {
     template
         .replace("{{.id}}", id)

@@ -39,7 +39,7 @@
 //!
 //! The local concrete document machine decides a request, sweep, schedule
 //! run, or occurrence. Each executable step is proved here to compute the
-//! mathematical transition in `echod-rover-concrete-spec`.
+//! mathematical transition in `echod-concrete-spec`.
 //! The handlers turn a document's rows into the model's `Doc`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::
 //! Sequence`, which orders the store calls around it — key, document,

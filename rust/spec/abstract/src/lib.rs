@@ -4,9 +4,9 @@
 //! service process to Rover; `view` holds mathematical views and their lemmas;
 //! `catalogue` states conformance properties; `trusted` contains the explicit
 //! axiomatic boundary. Executable realizations live in
-//! `echod-rover-abstract-exec`.
-//! `model::RoverAbstractSpec` implements `RoverSpec::Spec`;
-//! `RoverSpec::State<model::RoverAbstractSpec>` is the complete mathematical
+//! `echod-abstract-exec`.
+//! `model::EchodAbstractSpec` implements `RoverSpec::Spec`;
+//! `RoverSpec::State<model::EchodAbstractSpec>` is the complete mathematical
 //! state.
 
 #![allow(
@@ -26,7 +26,7 @@ pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
-pub use model::RoverAbstractSpec;
+pub use model::EchodAbstractSpec;
 pub use echod_types as types;
 pub use machine::{Dispatch, ServerConfig};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

@@ -106,9 +106,9 @@ Filesystem directories may be named `abstract` and `concrete`. Rust packages
 should avoid the reserved keyword:
 
 ```text
-echod-rover-abstract-spec  -> rover_abstract_spec
-echod-rover-abstract-exec  -> rover_abstract_exec
-echod-rover-concrete-spec  -> rover_concrete_spec
+echod-abstract-spec  -> echod_abstract_spec
+echod-abstract-exec  -> echod_abstract_exec
+echod-concrete-spec  -> echod_concrete_spec
 ```
 
 ## Layer responsibilities
@@ -172,7 +172,7 @@ It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
 ### `spec/abstract-exec`
 
 The executable realization of the abstract model: persistent store types,
-verified handler bodies, the executable Rover process, client history
+verified handler bodies, the executable Echod abstract process, client history
 translation, model-driven request generation, and coverage marks.
 
 ### `spec/concrete`
@@ -182,7 +182,7 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Rover model in `model.rs`: one `LocalV` process enum (`Node` or `Store`),
+- the Echod concrete model in `model.rs`: one `LocalV` process enum (`Node` or `Store`),
   nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
 - the abstract model, which that step refines
@@ -211,7 +211,7 @@ The production and test runtimes must drive the exact same
 
 `test/runtime/src/rover_sim.rs` is an isolated experiment: generic
 `RoverExec::exec` drives production-backed concrete processes, projects their
-boundary trace, and asks `RoverAbstractExec` to certify it. The existing DST
+boundary trace, and asks `EchodAbstractExec` to certify it. The existing DST
 remains the primary simulator.
 
 ## Dependency direction
@@ -295,8 +295,8 @@ Rover instantiated with the abstract model
 ```
 
 The statement is `echod_rover::rover::refinement::refines` of
-`rover_concrete_spec::RoverConcreteSpec` against
-`rover_abstract_spec::RoverAbstractSpec`: every
+`echod_concrete_spec::EchodConcreteSpec` against
+`echod_abstract_spec::EchodAbstractSpec`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,
@@ -345,7 +345,7 @@ deterministic test runtime
     records clean Boundary events
               |
               v
-abstract Rover checker
+Echod abstract checker
     searches for an abstract execution
               |
               v

@@ -17,7 +17,7 @@ use crate::model::LogicV;
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, AValue};
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::Call;
+use echod_abstract_spec::Call;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::{Time, ProcessEvent};
 #[cfg(verus_keep_ghost)]
@@ -1130,7 +1130,7 @@ pub open spec fn spec_schedule_create(doc: DocV, req: ScheduleCreateReq, now: Ti
                     promise_timeout: req.promise_timeout,
                     promise_param: req.promise_param,
                     promise_tags: req.promise_tags,
-                    next_run_at: rover_abstract_spec::trusted::spec_next_cron(req.cron@, now),
+                    next_run_at: echod_abstract_spec::trusted::spec_next_cron(req.cron@, now),
                     last_run_at: None,
                     created_at: now,
                 };
@@ -1152,7 +1152,7 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
         DocV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
             let pending = PendingV {
-                promise: rover_abstract_spec::trusted::spec_expand(schedule.promise_id@, schedule.id@, at),
+                promise: echod_abstract_spec::trusted::spec_expand(schedule.promise_id@, schedule.id@, at),
                 at,
                 timeout: schedule.promise_timeout,
                 param: schedule.promise_param,
@@ -1160,7 +1160,7 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
             };
             let schedule = Schedule {
                 last_run_at: Some(at),
-                next_run_at: rover_abstract_spec::trusted::spec_next_cron(schedule.cron@, at),
+                next_run_at: echod_abstract_spec::trusted::spec_next_cron(schedule.cron@, at),
                 ..schedule
             };
             (DocV::Schedule(Some(schedule)), None, seq![pending], Seq::empty())

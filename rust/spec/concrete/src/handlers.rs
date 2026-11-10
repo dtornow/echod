@@ -37,7 +37,7 @@ use crate::node::{
     spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::machine::{
+use echod_abstract_spec::machine::{
     spec_acquire as a_acquire, spec_any_settled as a_any_settled, spec_awaited,
     spec_callbacks as a_callbacks, spec_claim_res, spec_extend as a_extend, spec_external,
     spec_fence as a_fence, spec_fence_res, spec_fulfill, spec_handler, spec_has_target,
@@ -53,13 +53,13 @@ use rover_abstract_spec::machine::{
     spec_task_release as a_task_release, spec_unlease as a_unlease, spec_wrap_fence, SpecHeld,
 };
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::trusted::axiom_string_ext;
+use echod_abstract_spec::trusted::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::view::{
+use echod_abstract_spec::view::{
     all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
-use rover_abstract_spec::ServerConfig;
+use echod_abstract_spec::ServerConfig;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
@@ -648,7 +648,7 @@ pub proof fn lemma_task_create_agrees(
             let live = action.timeout_at > now;
             let p_a = PromiseV {
                 state: if live { PromiseState::Pending } else { PromiseState::RejectedTimedout },
-                value: rover_abstract_spec::machine::spec_empty_value(),
+                value: echod_abstract_spec::machine::spec_empty_value(),
                 param: action.param,
                 timeout_at: action.timeout_at,
                 created_at: if live { now } else { action.timeout_at },
@@ -2000,7 +2000,7 @@ pub proof fn lemma_schedule_create_agrees(
             },
             None => {
                 assert(!s.schedules.contains_key(req.id@));
-                let next_run_at = rover_abstract_spec::trusted::spec_next_cron(req.cron@, now);
+                let next_run_at = echod_abstract_spec::trusted::spec_next_cron(req.cron@, now);
                 let schedule = Schedule {
                     id: req.id,
                     cron: req.cron,

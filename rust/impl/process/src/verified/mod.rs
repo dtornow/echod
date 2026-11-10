@@ -6,7 +6,7 @@
 //! The executable document machine is `crate::concrete`: `handle`, `sweep`,
 //! `run_due` and `create_occurrence` are proved here to compute `spec_handle`,
 //! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
-//! concrete Rover model. `doc.rs` turns a document's rows into its `Doc`
+//! Echod concrete model. `doc.rs` turns a document's rows into its `Doc`
 //! and back; the handlers order the store calls around those steps.
 //!
 //! ```text
@@ -41,7 +41,7 @@
 //! - Copies: `runtime::copy` returns its argument;
 //!   `flight::copy_error` the same for a `StoreError`.
 //! - The store: `StoreOutcome` is what the store answered. Whether S3
-//!   answers as `rover_concrete_spec::store::spec_apply` says is the store's
+//!   answers as `echod_concrete_spec::store::spec_apply` says is the store's
 //!   fidelity, outside the proof; the simulator exercises it.
 //! - The runtime: the clock handed in on every event, the effects
 //!   performed in the order they leave, and each store answer returned
