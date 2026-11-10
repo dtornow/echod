@@ -12,9 +12,9 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover-spec`: mathematical Rover processes, state, steps, and refinement |
 | `rust/spec/rover-exec` | `echod-rover-exec`: executable search and verified certificate replay |
-| `rust/spec/abstract` | `echod-abstract-spec`: the mathematical Resonate protocol model |
-| `rust/spec/abstract-exec` | `echod-abstract-exec`: executable realization, history translation, and model driving |
-| `rust/spec/concrete` | `echod-concrete-spec`: the mathematical catalogue, Rover model, and its proved refinement to the abstract model |
+| `rust/spec/abstract` | `echod-rover-abstract-spec` (library `rover_abstract_spec`): the mathematical Resonate protocol model |
+| `rust/spec/abstract-exec` | `echod-rover-abstract-exec` (library `rover_abstract_exec`): executable realization, history translation, and model driving |
+| `rust/spec/concrete` | `echod-rover-concrete-spec` (library `rover_concrete_spec`): the mathematical catalogue, Rover model, and its proved refinement to the abstract model |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
@@ -69,7 +69,7 @@ bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
 `clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete-spec` and `-p echod-process` run Verus. Verus pins its own
+-p echod-rover-concrete-spec` and `-p echod-process` run Verus. Verus pins its own
 rustc, so the two are separate toolchains.
 
 ## echod-logic and echod

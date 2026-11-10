@@ -34,5 +34,5 @@ pub mod timers;
 pub mod relation;
 pub mod simulation;
 
-pub use model::Spec;
+pub use model::RoverConcreteSpec;
 pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};

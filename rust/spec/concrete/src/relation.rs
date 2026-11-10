@@ -24,7 +24,8 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    Fleet, LocalV, Message as CMessage, Spec as CModel, NodeV, Pid as CPid, spec_string,
+    Fleet, LocalV, Message as CMessage, RoverConcreteSpec as CModel, NodeV, Pid as CPid,
+    spec_string,
     StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
@@ -35,15 +36,17 @@ use crate::node::{
 #[cfg(verus_keep_ghost)]
 use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{spec_create_if_absent, spec_handler};
+use rover_abstract_spec::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{Spec as AModel, Pid as APid, spec_run_timeout, StateV};
+use rover_abstract_spec::model::{
+    RoverAbstractSpec as AModel, Pid as APid, spec_run_timeout, StateV,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::protocol::Message as AMessage;
+use rover_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{InternalV, StoreV as AStore};
+use rover_abstract_spec::view::{InternalV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::{Dispatch, Output, ServerConfig};
+use rover_abstract_spec::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::Envelope;
 #[cfg(verus_keep_ghost)]
@@ -532,7 +535,10 @@ pub open spec fn inv(fleet: Fleet, world: State<CModel>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// `call` was injected at the service.
-pub open spec fn service_request(network: Seq<Envelope<APid, AMessage>>, call: echod_abstract::Call) -> bool {
+pub open spec fn service_request(
+    network: Seq<Envelope<APid, AMessage>>,
+    call: rover_abstract_spec::Call,
+) -> bool {
     exists|j: int|
         #![trigger network[j]]
         0 <= j < network.len() && network[j] == Envelope {

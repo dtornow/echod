@@ -1,4 +1,4 @@
-//! Executable process realization of `echod_abstract::model::StateV`.
+//! Executable process realization of `rover_abstract_spec::model::StateV`.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
 use echod_rover::rover::comm::{ProcessEvent, Time};
@@ -7,8 +7,8 @@ use echod_types::{Request, Response};
 use crate::machine::*;
 use crate::trusted::*;
 use crate::view::*;
-pub use echod_abstract::model::*;
-use echod_abstract::protocol::{Call, Message, Output};
+pub use rover_abstract_spec::model::*;
+use rover_abstract_spec::protocol::{Call, Message, Output};
 
 verus! {
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -860,7 +860,7 @@ impl State {
 pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, State)>)
     ensures
         states@.map_values(|entry: (Pid, State)| (entry.0, entry.1@))
-            == Spec.processes(*_config),
+            == RoverAbstractSpec.processes(*_config),
         states@.map_values(|entry: (Pid, State)| entry.0).no_duplicates(),
         forall|i: int| 0 <= i < states@.len() ==> states@[i].0 != Pid::Outside,
 {
@@ -895,7 +895,7 @@ pub fn initial(_config: &ServerConfig) -> (states: Vec<(Pid, State)>)
 
 pub fn injectable(_config: &ServerConfig, message: &Message) -> (injectable: bool)
     ensures
-        injectable == Spec.injectable(*_config, *message),
+        injectable == RoverAbstractSpec.injectable(*_config, *message),
 {
     match message {
         Message::Request(_) => true,

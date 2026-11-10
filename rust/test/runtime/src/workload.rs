@@ -1,7 +1,7 @@
 //! The requests a run issues, and how they are generated.
 //!
 //! Every request kind the server serves, as the model types it
-//! (`echod_abstract::Request`), over a small space of ids so that operations
+//! (`rover_abstract_spec::Request`), over a small space of ids so that operations
 //! collide: a few origins, a few promises per origin, one child each.
 //! Versions and pids are drawn from what the client has seen, so that fenced
 //! operations sometimes carry the right version and sometimes not.

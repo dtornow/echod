@@ -19,7 +19,7 @@
 use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
-use echod_concrete::node::*;
+use rover_concrete_spec::node::*;
 
 use echod_types::{
     origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
@@ -33,10 +33,10 @@ use serde::{Deserialize, Serialize};
 use crate::concrete::runtime::{expand, next_cron};
 use crate::verified::runtime::copy;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{axiom_string_ext, axiom_vec_ext};
+use rover_abstract_spec::trusted::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{lemma_tags_ext, lemma_value_ext};
-use echod_abstract::{Call, Dispatch, Output};
+use rover_abstract_spec::machine::{lemma_tags_ext, lemma_value_ext};
+use rover_abstract_spec::{Call, Dispatch, Output};
 use echod_rover::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::StepResultV;
@@ -45,13 +45,13 @@ use echod_rover::rover::comm::Time;
 use echod_types::{origin, same_origin_spec, AValue};
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete::model::{
+use rover_concrete_spec::model::{
     spec_bytes, spec_clock, spec_get, spec_initial_node, spec_node, spec_notes, spec_notify,
     spec_one, spec_reply, spec_string, LocalV, LogicV,
 };
 use crate::concrete::model::{Fleet, Logic, Message, Pid};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{spec_before, spec_fnv, spec_sat_add, spec_starts};
+use rover_concrete_spec::store::{spec_before, spec_fnv, spec_sat_add, spec_starts};
 use crate::concrete::store::{Read, StoreError};
 use crate::concrete::store::{fnv1a, Etag, StoreCall, StoreOutcome};
 
@@ -1933,7 +1933,7 @@ fn task_record(id: &String, t: &Tk) -> (r: TaskRecord)
 {
     proof {
         if t@.pid is Some {
-            echod_concrete::interpret::lemma_string_of(t.pid.unwrap());
+            rover_concrete_spec::interpret::lemma_string_of(t.pid.unwrap());
         }
     }
     TaskRecord {
@@ -3269,7 +3269,7 @@ fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: 
                 let address = promise.listeners.remove(0);
                 proof {
                     lemma_strs_skip(before);
-                    echod_concrete::interpret::lemma_string_of(*id);
+                    rover_concrete_spec::interpret::lemma_string_of(*id);
                 }
                 let rec = record(id, &promise);
                 let mut notes: Vec<Outbound> = Vec::new();
@@ -3510,7 +3510,7 @@ fn reply(client: &String, id: u64, response: Response) -> (r: (Pid, Message))
         r == spec_reply(client@, id, response),
 {
     proof {
-        echod_concrete::interpret::lemma_string_of(*client);
+        rover_concrete_spec::interpret::lemma_string_of(*client);
     }
     (Pid::Outside, Message::Output(Output::Response { client: client.clone(), id, response }))
 }
@@ -3532,13 +3532,13 @@ fn notify(note: &Outbound) -> (r: (Pid, Message))
     match note {
         Outbound::Execute { id, version } => {
             proof {
-                echod_concrete::interpret::lemma_string_of(*id);
+                rover_concrete_spec::interpret::lemma_string_of(*id);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Execute { id: id.clone(), version: *version })))
         },
         Outbound::Unblock { address, promise } => {
             proof {
-                echod_concrete::interpret::lemma_string_of(*address);
+                rover_concrete_spec::interpret::lemma_string_of(*address);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Unblock { address: address.clone(), promise: copy(promise) })))
         },
@@ -3854,7 +3854,7 @@ impl Node {
                 next.flight = Some(flight);
                 next.next_op = op + 1;
                 proof {
-                    echod_concrete::interpret::lemma_string_of(key);
+                    rover_concrete_spec::interpret::lemma_string_of(key);
                 }
                 (next, one((Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key } })))
             },
@@ -3910,14 +3910,14 @@ impl Node {
             let op = self.next_op;
             let body = encode(&next);
             proof {
-                echod_concrete::simulation::lemma_bytes(spec_encode(next@));
+                rover_concrete_spec::simulation::lemma_bytes(spec_encode(next@));
                 axiom_vec_ext(body, spec_bytes(spec_encode(next@)));
-                echod_concrete::interpret::lemma_string_of(key);
+                rover_concrete_spec::interpret::lemma_string_of(key);
             }
             let call = match &etag {
                 Some(tag) => {
                     proof {
-                        echod_concrete::interpret::lemma_string_of(tag.0);
+                        rover_concrete_spec::interpret::lemma_string_of(tag.0);
                     }
                     StoreCall::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
                 },

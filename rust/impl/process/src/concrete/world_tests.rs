@@ -1,8 +1,8 @@
 //! The concrete world: the nodes and the store Rover starts from, one node
 //! flight, and the store's conditional write.
 
-use echod_abstract::{Call, Dispatch, Output};
-use crate::concrete::model::{Fleet, Local, Message, Model, Pid};
+use rover_abstract_spec::{Call, Dispatch, Output};
+use crate::concrete::model::{Fleet, Local, Message, Pid, RoverConcreteExec};
 use crate::concrete::store::Store;
 use crate::concrete::{Etag, StoreCall, StoreError, StoreOutcome};
 use echod_types::{
@@ -38,7 +38,7 @@ fn step(
 
 #[test]
 fn the_world_is_the_nodes_then_the_store() {
-    let world = Model.initial(&Fleet::new(2, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(2, true));
     assert_eq!(world.len(), 3);
     assert_eq!(world[0].0, Pid::Node(0));
     assert_eq!(world[1].0, Pid::Node(1));
@@ -54,16 +54,16 @@ fn the_world_is_the_nodes_then_the_store() {
     assert_eq!(first.wake, None);
     assert!(store(&world[2].1).entries.is_empty());
 
-    let quiet = Model.initial(&Fleet::new(1, false));
+    let quiet = RoverConcreteExec.initial(&Fleet::new(1, false));
     assert!(!node(&quiet[0].1).logic.loops);
 }
 
 #[test]
 fn the_outside_injects_requests_and_stop() {
     let config = Fleet::new(2, true);
-    assert_eq!(Model.outside(), Pid::Outside);
-    assert!(Model.injectable(&config, &Message::Stop));
-    assert!(!Model.injectable(
+    assert_eq!(RoverConcreteExec.outside(), Pid::Outside);
+    assert!(RoverConcreteExec.injectable(&config, &Message::Stop));
+    assert!(!RoverConcreteExec.injectable(
         &config,
         &Message::StoreReq {
             op: 1,
@@ -74,7 +74,7 @@ fn the_outside_injects_requests_and_stop() {
 
 #[test]
 fn a_timeout_is_a_tick_only_when_a_wake_is_due() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, state) = &world[0];
     assert!(step(pid, state, 5, &ProcessEvent::Timeout).is_empty());
 
@@ -147,7 +147,7 @@ fn deliver(
 
 #[test]
 fn a_promise_get_loads_the_document_and_a_miss_is_404() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, state) = world[0].clone();
     let mut armed = node(&state).clone();
     armed.wake = Some(40);
@@ -214,7 +214,7 @@ fn a_promise_get_loads_the_document_and_a_miss_is_404() {
 
 #[test]
 fn a_promise_create_lands_and_the_next_get_reads_it() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let create = call(
@@ -290,7 +290,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
 
 #[test]
 fn stop_ends_the_loop() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, state) = world[0].clone();
     let stopped = step(
         &pid,
@@ -310,7 +310,7 @@ fn stop_ends_the_loop() {
 
 #[test]
 fn the_store_commits_a_conditional_write_and_answers_the_node() {
-    let world = Model.initial(&Fleet::new(1, false));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, false));
     let store = world[1].1.clone();
     let call = StoreCall::PutIfNoneMatch {
         key: "doc".into(),
@@ -426,7 +426,7 @@ fn the_store_commits_a_conditional_write_and_answers_the_node() {
 
 #[test]
 fn the_store_executes_each_op_once() {
-    let world = Model.initial(&Fleet::new(1, false));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, false));
     let store = world[1].1.clone();
     let put = ProcessEvent::Receive {
         sender: Pid::Node(0),
@@ -461,7 +461,7 @@ fn the_store_executes_each_op_once() {
 
 #[test]
 fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
-    let world = Model.initial(&Fleet::new(1, false));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, false));
     let (node_pid, node_state) = &world[0];
     let ask = ProcessEvent::Receive {
         sender: Pid::Node(0),
@@ -483,7 +483,7 @@ fn a_node_ignores_a_store_request_and_a_store_ignores_a_client() {
 
 #[test]
 fn a_due_retry_offers_the_task() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let create = call(
@@ -522,7 +522,7 @@ fn a_due_retry_offers_the_task() {
 
 #[test]
 fn a_settled_listener_is_told() {
-    let world = Model.initial(&Fleet::new(1, true));
+    let world = RoverConcreteExec.initial(&Fleet::new(1, true));
     let (pid, node_state) = world[0].clone();
     let store_state = world[1].1.clone();
     let (node_state, store_state, _) = deliver(

@@ -2,7 +2,7 @@
 //! `mk("...")` in the executable abstract model, and nothing else.
 
 use std::collections::BTreeSet;
-use echod_abstract_exec;
+use rover_abstract_exec;
 
 #[test]
 fn the_list_of_marks_matches_the_spec() {
@@ -13,7 +13,7 @@ fn the_list_of_marks_matches_the_spec() {
         include_str!("../src/model.rs"),
     );
     let in_spec: BTreeSet<&str> = spec.split("mk(\"").skip(1).filter_map(|rest| rest.split('"').next()).collect();
-    let listed: BTreeSet<&str> = echod_abstract_exec::MARKS.iter().copied().collect();
+    let listed: BTreeSet<&str> = rover_abstract_exec::MARKS.iter().copied().collect();
     assert_eq!(listed, in_spec, "update MARKS in rust/spec/abstract-exec/src/history.rs");
-    assert_eq!(listed.len(), echod_abstract_exec::MARKS.len(), "a mark is listed twice");
+    assert_eq!(listed.len(), rover_abstract_exec::MARKS.len(), "a mark is listed twice");
 }

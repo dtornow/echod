@@ -24,9 +24,9 @@ pub use crate::verified::flight::FiredKey;
 #[cfg(verus_keep_ghost)]
 use echod_types::{PromiseRecordSpec, ScheduleSpec, AResponse};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{StoreCallSpec, StoreErrorSpec};
+use rover_concrete_spec::store::{StoreCallSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::DocV;
+use rover_concrete_spec::node::DocV;
 #[cfg(verus_keep_ghost)]
 use crate::target::TargetSpec;
 

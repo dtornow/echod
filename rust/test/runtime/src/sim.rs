@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use echod_abstract::Dispatch;
+use rover_abstract_spec::Dispatch;
 use echod_logic::types::{Answer, Armed, Effect, Event, StoreCall};
 use echod_logic::{Call, Config, Message, Note, State, Target};
 use echod_types::{PromiseGetReq, PromiseState, Request, Response, ScheduleGetReq, TaskGetReq};

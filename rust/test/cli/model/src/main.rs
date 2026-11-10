@@ -1,7 +1,7 @@
 //! echod-model: echod driven by the Resonate model,
 //! over HTTP, and every trace checked against that model.
 //!
-//! The model (`echod_abstract`, the Rover abstract model) is an executable
+//! The model (`rover_abstract_spec`, the Rover abstract model) is an executable
 //! specification in Verus of the Resonate protocol as the Lean specification
 //! has it: what every request does, what runs on its own (a deadline, a lease,
 //! a resume, a redispatch, a schedule's occurrence), what the server sends.
@@ -44,11 +44,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use echod_rover_exec::{check_guided, marks, CheckConfig};
-use echod_abstract::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
-use echod_abstract::{Dispatch, ServerConfig};
-use echod_abstract_exec::{
+use rover_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
+use rover_abstract_spec::{Dispatch, ServerConfig};
+use rover_abstract_exec::{
     arbitrary, finish, history_rank, history_responses, rover_trace, suggest,
-    Action, HistoryEvent, Model as RoverModel, Store as Model, MARKS,
+    Action, HistoryEvent, RoverAbstractExec, Store as AbstractStore, MARKS,
 };
 use serde_json::{json, Value};
 
@@ -137,7 +137,7 @@ impl Driver {
         self.client.send(&self.echod, kind, data, now as i64, &corr).await
     }
 
-    async fn snap(&mut self, now: u64) -> Model {
+    async fn snap(&mut self, now: u64) -> AbstractStore {
         let (status, data) = self.send("debug.snap", &json!({}), now).await;
         assert_eq!(status, 200, "debug.snap: {data}");
         model_state(&data)
@@ -265,14 +265,14 @@ fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
     let events = rover_trace(trace);
     let expected = history_responses(trace);
     match check_guided(
-        &RoverModel,
+        &RoverAbstractExec,
         &config,
         &events,
         CheckConfig::for_trace_len(events.len()),
         |event, action, sent| history_rank(event, action, sent, &expected),
     ) {
         Some(certificate) => Outcome::Ok(
-            marks(&RoverModel, &config, &certificate).expect("the certificate replays"),
+            marks(&RoverAbstractExec, &config, &certificate).expect("the certificate replays"),
         ),
         None => Outcome::Unknown(Violation {
             reason: "bounded Rover search found no certificate".into(),

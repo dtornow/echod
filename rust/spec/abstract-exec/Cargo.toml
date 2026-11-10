@@ -1,16 +1,16 @@
 [package]
-name = "echod-abstract-exec"
+name = "echod-rover-abstract-exec"
 description = "Executable realization and history tooling for the Resonate abstract specification."
 version.workspace = true
 edition.workspace = true
 license = "MIT"
 
 [lib]
-name = "echod_abstract_exec"
+name = "rover_abstract_exec"
 path = "src/lib.rs"
 
 [dependencies]
-echod-abstract = { package = "echod-abstract-spec", path = "../abstract" }
+rover-abstract-spec = { package = "echod-rover-abstract-spec", path = "../abstract" }
 echod-cron = { path = "../../comm/cron" }
 echod-rover = { package = "echod-rover-spec", path = "../rover" }
 echod-rover-exec = { path = "../rover-exec" }

@@ -24,10 +24,10 @@ use vstd::prelude::*;
 use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use crate::model::{
-    EntryV, Fleet, LocalV, Message as CMessage, Spec as CModel, NodeV, Pid as CPid, spec_bytes,
-    spec_get, spec_initial_node as initial_node, spec_node as spec_node_step, spec_nodes,
-    spec_notes, spec_notify, spec_one, spec_reply, spec_store, spec_string, spec_world,
-    StoreV as CStore,
+    EntryV, Fleet, LocalV, Message as CMessage, RoverConcreteSpec as CModel, NodeV,
+    Pid as CPid, spec_bytes, spec_get, spec_initial_node as initial_node,
+    spec_node as spec_node_step, spec_nodes, spec_notes, spec_notify, spec_one, spec_reply,
+    spec_store, spec_string, spec_world, StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
 use crate::node::{
@@ -44,23 +44,27 @@ use crate::store::{
 #[cfg(verus_keep_ghost)]
 use crate::relation::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{spec_body, spec_create_if_absent, spec_handler, spec_process_work};
+use rover_abstract_spec::machine::{
+    spec_body, spec_create_if_absent, spec_handler, spec_process_work,
+};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{
+use rover_abstract_spec::model::{
     empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
     spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
     spec_send, spec_service, spec_shed, StateV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::Pid as APid;
+use rover_abstract_spec::model::Pid as APid;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::protocol::Message as AMessage;
+use rover_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised};
+use rover_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{InOutV, InternalV, OutV, StoreV as AStore};
+use rover_abstract_spec::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::{BoundaryEvent, Call, Spec as AModel, Output, ServerConfig};
+use rover_abstract_spec::{
+    BoundaryEvent, Call, RoverAbstractSpec as AModel, Output, ServerConfig,
+};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::refinement::{
     concrete_refines_abstract, end, matches, project, refines, simulation,
@@ -1254,7 +1258,7 @@ pub proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
     requires
         0 <= i < s.len(),
     ensures
-        echod_abstract::model::remove_at(s, i) =~= s.remove(i),
+        rover_abstract_spec::model::remove_at(s, i) =~= s.remove(i),
 {
 }
 
@@ -1263,7 +1267,7 @@ pub proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
 // ---------------------------------------------------------------------------
 
 /// An empty document that reads as `s` under `key` is the empty document.
-pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract::view::StoreV)
+pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: rover_abstract_spec::view::StoreV)
     requires
         doc_rel(key, doc, s),
         spec_is_empty(doc),
@@ -1322,7 +1326,7 @@ pub proof fn lemma_bytes(bytes: Seq<u8>)
         crate::model::spec_bytes(bytes)@ == bytes,
 {
     reveal(crate::model::spec_bytes);
-    echod_abstract::trusted::axiom_bytes_realised(bytes);
+    rover_abstract_spec::trusted::axiom_bytes_realised(bytes);
 }
 
 /// `spec_notes` sends each note's output to the outside.
@@ -1564,7 +1568,7 @@ pub proof fn lemma_queue_offers(config: ServerConfig, state: StateV, now: Time, 
 
 /// The second half of `spec_run_timeout`, named so the sum above reads.
 pub open spec fn derived(config: ServerConfig, state: StateV, now: Time) -> Seq<StepResultV<StateV, APid, AMessage>> {
-    echod_abstract::model::spec_derived(config, state, now)
+    rover_abstract_spec::model::spec_derived(config, state, now)
 }
 
 /// A timeout result at `j` is an outcome of the service's timeout step.
@@ -2882,10 +2886,10 @@ pub proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, call: C
 {
     let send = spec_send(call, response, Seq::empty());
     let output = Output::Response { client: call.client, id: call.id, response };
-    assert(Seq::<echod_abstract::view::DispatchV>::empty().map_values(
-        |dispatch: echod_abstract::view::DispatchV| (
+    assert(Seq::<rover_abstract_spec::view::DispatchV>::empty().map_values(
+        |dispatch: rover_abstract_spec::view::DispatchV| (
             APid::Outside,
-            AMessage::Output(Output::Dispatch(echod_abstract::view::lift_dispatch(dispatch))),
+            AMessage::Output(Output::Dispatch(rover_abstract_spec::view::lift_dispatch(dispatch))),
         ),
     ) =~= Seq::<(APid, AMessage)>::empty());
     assert(send =~= seq![(APid::Outside, AMessage::Output(output))]);
@@ -3005,12 +3009,12 @@ pub proof fn lemma_request_served(
     let served = spec_run(config, state, call, at);
     assert(served.len() == 1);
     assert(served[0] == spec_request_outcome(state, call, outs[0]));
-    assert(outcomes == served + echod_abstract::model::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
+    assert(outcomes == served + rover_abstract_spec::model::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
     assert(outcomes[0] == served[0]);
     let aa = lemma_service_step(config, ab, at, event, 0);
     let outcome = outcomes[0];
     assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
-    assert(outs[0].send =~= Seq::<echod_abstract::view::DispatchV>::empty());
+    assert(outs[0].send =~= Seq::<rover_abstract_spec::view::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
     assert(finite_store(astate(aa).store));

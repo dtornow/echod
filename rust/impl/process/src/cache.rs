@@ -18,7 +18,7 @@ use crate::verified::text::copy_string;
 #[cfg(verus_keep_ghost)]
 use crate::doc::LoadedSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::EtagSpec;
+use rover_concrete_spec::store::EtagSpec;
 
 verus! {
 

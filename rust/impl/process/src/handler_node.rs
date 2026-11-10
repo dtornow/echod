@@ -25,7 +25,7 @@ use crate::state_node::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_read_config;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
+use rover_concrete_spec::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
 
 verus! {
 

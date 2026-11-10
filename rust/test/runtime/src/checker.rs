@@ -19,8 +19,10 @@
 //! an instant of its own, and the model, whose deadlines are exact, would
 //! see a deadline fire early or late.
 
-use echod_abstract::ServerConfig;
-use echod_abstract_exec::{history_rank, history_responses, rover_trace, HistoryEvent, Model};
+use rover_abstract_spec::ServerConfig;
+use rover_abstract_exec::{
+    history_rank, history_responses, rover_trace, HistoryEvent, RoverAbstractExec,
+};
 use echod_rover_exec::{check_guided, CheckConfig};
 
 use crate::history::Entry;
@@ -115,7 +117,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let mut limits = CheckConfig::for_trace_len(events.len());
     limits.max_nodes = budget as usize;
     match check_guided(
-        &Model,
+        &RoverAbstractExec,
         &ServerConfig { retry_timeout },
         &events,
         limits,

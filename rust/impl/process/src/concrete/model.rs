@@ -5,16 +5,16 @@
 
 use vstd::prelude::*;
 
-pub use echod_concrete::model::{Fleet, Message, Pid};
-use echod_concrete::model::{LocalV, LogicV};
+pub use rover_concrete_spec::model::{Fleet, Message, Pid};
+use rover_concrete_spec::model::{LocalV, LogicV};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::model::{spec_store, spec_world};
+use rover_concrete_spec::model::{spec_store, spec_world};
 #[cfg(test)]
-use echod_concrete::model::Spec;
+use rover_concrete_spec::model::RoverConcreteSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::NodeV;
+use rover_concrete_spec::node::NodeV;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreV;
+use rover_concrete_spec::store::StoreV;
 use echod_rover::rover::comm::ProcessEvent;
 #[cfg(test)]
 use echod_rover::rover::comm::Time;
@@ -68,7 +68,7 @@ impl View for Local {
     }
 }
 
-pub struct Model;
+pub struct RoverConcreteExec;
 
 pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
     v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
@@ -155,11 +155,11 @@ impl RoverExec::Proc for Local {
 }
 
 #[cfg(test)]
-impl RoverExec::Spec for Model {
-    type Spec = Spec;
+impl RoverExec::Spec for RoverConcreteExec {
+    type Spec = RoverConcreteSpec;
     type Proc = Local;
 
-    open spec fn spec(&self) -> Spec { Spec }
+    open spec fn spec(&self) -> RoverConcreteSpec { RoverConcreteSpec }
     fn outside(&self) -> Pid { Pid::Outside }
 
     fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {

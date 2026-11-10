@@ -28,7 +28,7 @@ use crate::state_node::MembersSpec;
 #[cfg(verus_keep_ghost)]
 use crate::state_timers::spec_next_wake;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::StoreCallSpec;
+use rover_concrete_spec::store::StoreCallSpec;
 
 verus! {
 

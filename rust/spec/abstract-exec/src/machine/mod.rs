@@ -4,8 +4,8 @@ use vstd::prelude::*;
 use echod_types::*;
 use crate::trusted::*;
 use crate::view::*;
-pub use echod_abstract::machine::*;
-pub use echod_abstract::{Dispatch, ServerConfig};
+pub use rover_abstract_spec::machine::*;
+pub use rover_abstract_spec::{Dispatch, ServerConfig};
 
 verus! {
 /// Executable handlers bound to a passive specification configuration.

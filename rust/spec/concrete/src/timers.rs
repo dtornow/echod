@@ -45,30 +45,30 @@ use crate::relation::{
     occurrences_agree,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{
+use rover_abstract_spec::machine::{
     spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_has_target,
     spec_is_timer, spec_lease, spec_lease_at, spec_listener, spec_new_object, spec_process_work,
     spec_project_promise, spec_project_task, spec_promise_record, spec_retry, spec_schedule_step,
     spec_string as a_string, spec_unlease as a_unlease,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::model::{
+use rover_abstract_spec::model::{
     Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
     spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, StateV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{
+use rover_abstract_spec::view::{
     DispatchV, InOutV, InternalV, least as a_least, lemma_least_exists as a_lemma_least_exists,
     lemma_lift_dispatch, lemma_min_key as a_lemma_min_key, lift_dispatch, PromiseV, sat_add,
     ScheduleV, spec_before as a_before, spec_keys, spec_min_key as a_min_key,
     spec_sorted as a_sorted, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::protocol::Message as AMessage;
+use rover_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{pset_seq, spec_expand, spec_next_cron};
+use rover_abstract_spec::trusted::{pset_seq, spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::{Dispatch, Output, ServerConfig};
+use rover_abstract_spec::{Dispatch, Output, ServerConfig};
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::RoverSpec::StepResultV;
 #[cfg(verus_keep_ghost)]
@@ -81,7 +81,7 @@ verus! {
 broadcast use
     vstd::seq::group_seq_lemmas,
     vstd::set::group_set_lemmas,
-    echod_abstract::view::group_views;
+    rover_abstract_spec::view::group_views;
 
 /// One abstract step result.
 #[cfg(verus_keep_ghost)]

@@ -1092,40 +1092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-abstract-exec"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-spec",
- "echod-cron",
- "echod-rover-exec",
- "echod-rover-spec",
- "echod-types",
- "imbl",
- "vstd",
-]
-
-[[package]]
-name = "echod-abstract-spec"
-version = "0.1.0"
-dependencies = [
- "echod-rover-spec",
- "echod-types",
- "vstd",
-]
-
-[[package]]
-name = "echod-concrete-spec"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-spec",
- "echod-rover-spec",
- "echod-types",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
 name = "echod-cron"
 version = "0.1.0"
 dependencies = [
@@ -1153,8 +1119,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "echod-abstract-exec",
- "echod-abstract-spec",
+ "echod-rover-abstract-exec",
+ "echod-rover-abstract-spec",
  "echod-rover-exec",
  "echod-rover-spec",
  "reqwest 0.12.28",
@@ -1167,9 +1133,9 @@ dependencies = [
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
- "echod-concrete-spec",
  "echod-cron",
+ "echod-rover-abstract-spec",
+ "echod-rover-concrete-spec",
  "echod-rover-exec",
  "echod-rover-spec",
  "echod-types",
@@ -1181,11 +1147,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-rover-abstract-exec"
+version = "0.1.0"
+dependencies = [
+ "echod-cron",
+ "echod-rover-abstract-spec",
+ "echod-rover-exec",
+ "echod-rover-spec",
+ "echod-types",
+ "imbl",
+ "vstd",
+]
+
+[[package]]
+name = "echod-rover-abstract-spec"
+version = "0.1.0"
+dependencies = [
+ "echod-rover-spec",
+ "echod-types",
+ "vstd",
+]
+
+[[package]]
+name = "echod-rover-concrete-spec"
+version = "0.1.0"
+dependencies = [
+ "echod-rover-abstract-spec",
+ "echod-rover-spec",
+ "echod-types",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
 name = "echod-rover-exec"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
+ "echod-rover-abstract-exec",
+ "echod-rover-abstract-spec",
  "echod-rover-spec",
  "vstd",
 ]
@@ -1248,10 +1248,10 @@ dependencies = [
 name = "echod-test-runtime"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
  "echod-cron",
  "echod-process",
+ "echod-rover-abstract-exec",
+ "echod-rover-abstract-spec",
  "echod-rover-exec",
  "echod-types",
  "serde",

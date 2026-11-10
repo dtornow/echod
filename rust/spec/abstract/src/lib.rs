@@ -3,9 +3,11 @@
 //! `machine` is the transition relation; `model` adapts one mathematical
 //! service process to Rover; `view` holds mathematical views and their lemmas;
 //! `catalogue` states conformance properties; `trusted` contains the explicit
-//! axiomatic boundary. Executable realizations live in `echod-abstract-exec`.
-//! `model::Spec` implements `RoverSpec::Spec`; `RoverSpec::State<model::Spec>`
-//! is the complete mathematical state.
+//! axiomatic boundary. Executable realizations live in
+//! `echod-rover-abstract-exec`.
+//! `model::RoverAbstractSpec` implements `RoverSpec::Spec`;
+//! `RoverSpec::State<model::RoverAbstractSpec>` is the complete mathematical
+//! state.
 
 #![allow(
     clippy::ptr_arg,
@@ -24,7 +26,7 @@ pub mod protocol;
 pub mod catalogue;
 pub mod view;
 
-pub use model::Spec;
+pub use model::RoverAbstractSpec;
 pub use echod_types as types;
 pub use machine::{Dispatch, ServerConfig};
 pub use protocol::{BoundaryEvent, Call, Message, Output};

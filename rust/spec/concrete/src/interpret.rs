@@ -29,7 +29,7 @@ use crate::node::{
 #[cfg(verus_keep_ghost)]
 use crate::store::{spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::machine::{
+use rover_abstract_spec::machine::{
     spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_handler, spec_has_key,
     spec_has_target, spec_held as a_held, spec_is_external_tag, spec_is_global, spec_is_timer,
     spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64,
@@ -39,11 +39,11 @@ use echod_abstract::machine::{
     tag_scope, tag_target, tag_timer, tag_true,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
+use rover_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
+use rover_abstract_spec::view::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
-use echod_abstract::ServerConfig;
+use rover_abstract_spec::ServerConfig;
 #[cfg(verus_keep_ghost)]
 use echod_rover::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
@@ -694,20 +694,20 @@ pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
 pub proof fn lemma_string_view(chars: Seq<char>)
     ensures
         crate::model::spec_string(chars)@ == chars,
-        echod_abstract::machine::spec_string(chars)@ == chars,
-        crate::model::spec_string(chars) == echod_abstract::machine::spec_string(chars),
+        rover_abstract_spec::machine::spec_string(chars)@ == chars,
+        crate::model::spec_string(chars) == rover_abstract_spec::machine::spec_string(chars),
 {
     reveal(crate::model::spec_string);
-    reveal(echod_abstract::machine::spec_string);
+    reveal(rover_abstract_spec::machine::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(crate::model::spec_string(chars), echod_abstract::machine::spec_string(chars));
+    axiom_string_ext(crate::model::spec_string(chars), rover_abstract_spec::machine::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
 pub proof fn lemma_string_of(s: String)
     ensures
         crate::model::spec_string(s@) == s,
-        echod_abstract::machine::spec_string(s@) == s,
+        rover_abstract_spec::machine::spec_string(s@) == s,
 {
     lemma_string_view(s@);
     axiom_string_ext(crate::model::spec_string(s@), s);

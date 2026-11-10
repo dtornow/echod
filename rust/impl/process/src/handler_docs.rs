@@ -57,9 +57,9 @@ use crate::verified::PromiseResSpec;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::document::notes_v;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{spec_doc_deadline, spec_origin_map, DocV, NoteV};
+use rover_concrete_spec::node::{spec_doc_deadline, spec_origin_map, DocV, NoteV};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
+use rover_concrete_spec::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use echod_types::spec::AResponse;
 

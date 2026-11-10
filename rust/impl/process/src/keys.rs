@@ -276,7 +276,7 @@ pub fn bucket_of(at: u64, bucket_ms: u64) -> (r: u64)
 /// The version a body quotes, as an S3 ETag: the same bytes are the same version.
 pub fn content_etag(body: &[u8]) -> (r: crate::types::Etag)
     ensures
-        r == echod_concrete::store::spec_etag(body@),
+        r == rover_concrete_spec::store::spec_etag(body@),
 {
     crate::concrete::content_etag(body)
 }

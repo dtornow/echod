@@ -17,8 +17,8 @@ use echod_types::{
 };
 
 use crate::machine::*;
-use echod_abstract::model::Pid;
-use echod_abstract::protocol::{Call, Message, Output};
+use rover_abstract_spec::model::Pid;
+use rover_abstract_spec::protocol::{Call, Message, Output};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action<X> {

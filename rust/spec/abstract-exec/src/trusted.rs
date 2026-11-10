@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use vstd::prelude::*;
 use crate::hashed_map::HashedMap;
 pub use echod_types::same_origin;
-pub use echod_abstract::trusted::*;
+pub use rover_abstract_spec::trusted::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract::trusted::spec_has_colon as abstract_spec_has_colon;
+use rover_abstract_spec::trusted::spec_has_colon as abstract_spec_has_colon;
 
 verus! {
 /// A persistent map from ids to `V`, seen by Verus as a

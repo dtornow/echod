@@ -6,7 +6,7 @@
 
 use vstd::prelude::*;
 
-use echod_abstract::{BoundaryEvent, Call, Output};
+use rover_abstract_spec::{BoundaryEvent, Call, Output};
 use echod_rover::rover::comm::{ProcessEvent, Time};
 use echod_rover::rover::RoverSpec;
 use RoverSpec::Label;
@@ -49,7 +49,7 @@ pub struct Fleet {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// The mathematical concrete Rover model, with no executable local state.
-pub struct Spec;
+pub struct RoverConcreteSpec;
 
 // What crosses the boundary
 // ---------------------------------------------------------------------------
@@ -256,8 +256,8 @@ pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
 
 pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
     let dispatch = match note {
-        NoteV::Execute { id, version } => echod_abstract::Dispatch::Execute { id: spec_string(id), version },
-        NoteV::Unblock { address, promise } => echod_abstract::Dispatch::Unblock { address: spec_string(address), promise },
+        NoteV::Execute { id, version } => rover_abstract_spec::Dispatch::Execute { id: spec_string(id), version },
+        NoteV::Unblock { address, promise } => rover_abstract_spec::Dispatch::Unblock { address: spec_string(address), promise },
     };
     (Pid::Outside, Message::Output(Output::Dispatch(dispatch)))
 }
@@ -287,7 +287,7 @@ impl Fleet {
 verus! {
 
 
-impl RoverSpec::Spec for Spec {
+impl RoverSpec::Spec for RoverConcreteSpec {
     type Config = Fleet;
     type Pid = Pid;
     type Proc = LocalV;

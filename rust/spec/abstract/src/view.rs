@@ -1,5 +1,6 @@
 //! Mathematical state and protocol views.
-//! View implementations for executable model records live in `echod-abstract-exec`.
+//! View implementations for executable model records live in
+//! `echod-rover-abstract-exec`.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;

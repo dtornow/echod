@@ -1,12 +1,12 @@
 [package]
-name = "echod-abstract-spec"
+name = "echod-rover-abstract-spec"
 description = "The mathematical Resonate protocol specification and verified transition kernel."
 version.workspace = true
 edition.workspace = true
 license = "MIT"
 
 [lib]
-name = "echod_abstract"
+name = "rover_abstract_spec"
 path = "src/lib.rs"
 
 [dependencies]

@@ -106,9 +106,9 @@ Filesystem directories may be named `abstract` and `concrete`. Rust packages
 should avoid the reserved keyword:
 
 ```text
-echod-abstract-spec  -> echod_abstract
-echod-abstract-exec  -> echod_abstract_exec
-echod-concrete-spec  -> echod_concrete
+echod-rover-abstract-spec  -> rover_abstract_spec
+echod-rover-abstract-exec  -> rover_abstract_exec
+echod-rover-concrete-spec  -> rover_concrete_spec
 ```
 
 ## Layer responsibilities
@@ -289,7 +289,8 @@ Rover instantiated with the abstract model
 ```
 
 The statement is `echod_rover::rover::refinement::refines` of
-`echod_concrete::Spec` against `echod_abstract::Spec`: every
+`rover_concrete_spec::RoverConcreteSpec` against
+`rover_abstract_spec::RoverAbstractSpec`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

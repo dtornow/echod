@@ -13,8 +13,8 @@ path = "src/lib.rs"
 # spec, proof, requires and ensures under plain rustc. `cargo verus verify`
 # checks the whole crate: `State::on_event` computes `spec_on_event`.
 [dependencies]
-echod-abstract = { package = "echod-abstract-spec", path = "../../spec/abstract" }
-echod-concrete = { package = "echod-concrete-spec", path = "../../spec/concrete" }
+rover-abstract-spec = { package = "echod-rover-abstract-spec", path = "../../spec/abstract" }
+rover-concrete-spec = { package = "echod-rover-concrete-spec", path = "../../spec/concrete" }
 echod-cron = { path = "../../comm/cron" }
 echod-rover = { package = "echod-rover-spec", path = "../../spec/rover" }
 echod-types = { path = "../../comm/types" }

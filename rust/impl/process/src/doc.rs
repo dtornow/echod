@@ -28,7 +28,7 @@ use crate::concrete::{clone_doc, doc_deadline, empty_origin, empty_schedule, key
 use crate::concrete::document::lemma_doc_view;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::DocV;
+use rover_concrete_spec::node::DocV;
 
 verus! {
 
@@ -85,7 +85,7 @@ pub struct Header {
 /// The nearest deadline of a document.
 pub fn deadline(doc: &Doc) -> (r: Option<u64>)
     ensures
-        crate::concrete::document::nat_v(r) == echod_concrete::node::spec_doc_deadline(doc@),
+        crate::concrete::document::nat_v(r) == rover_concrete_spec::node::spec_doc_deadline(doc@),
 {
     doc_deadline(doc)
 }

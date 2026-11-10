@@ -33,7 +33,7 @@ use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::document::pend_v;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{spec_doc_deadline, DocV};
+use rover_concrete_spec::node::{spec_doc_deadline, DocV};
 
 verus! {
 

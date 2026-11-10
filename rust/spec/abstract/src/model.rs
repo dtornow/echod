@@ -1,5 +1,6 @@
 //! Mathematical Rover process for the abstract protocol.
-//! The executable `State::on_event` realization lives in `echod-abstract-exec`.
+//! The executable `State::on_event` realization lives in
+//! `echod-rover-abstract-exec`.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
@@ -41,7 +42,7 @@ impl RoverSpec::Proc for StateV {
 }
 
 /// The mathematical Resonate Rover model, with no executable state.
-pub struct Spec;
+pub struct RoverAbstractSpec;
 
 pub open spec fn empty_store() -> StoreV {
     StoreV {
@@ -274,7 +275,7 @@ pub open spec fn spec_idle(state: StateV) -> Seq<StepResultV<StateV, Pid, Messag
     }]
 }
 
-impl RoverSpec::Spec for Spec {
+impl RoverSpec::Spec for RoverAbstractSpec {
     type Config = ServerConfig;
     type Pid = Pid;
     type Proc = StateV;
