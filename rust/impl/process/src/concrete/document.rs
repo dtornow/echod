@@ -1933,7 +1933,7 @@ fn task_record(id: &String, t: &Tk) -> (r: TaskRecord)
 {
     proof {
         if t@.pid is Some {
-            echod_concrete_spec::interpret::lemma_string_of(t.pid.unwrap());
+            echod_concrete_spec::model::lemma_string_of(t.pid.unwrap());
         }
     }
     TaskRecord {
@@ -3269,7 +3269,7 @@ fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: 
                 let address = promise.listeners.remove(0);
                 proof {
                     lemma_strs_skip(before);
-                    echod_concrete_spec::interpret::lemma_string_of(*id);
+                    echod_concrete_spec::model::lemma_string_of(*id);
                 }
                 let rec = record(id, &promise);
                 let mut notes: Vec<Outbound> = Vec::new();
@@ -3510,7 +3510,7 @@ fn reply(client: &String, id: u64, response: Response) -> (r: (Pid, Message))
         r == spec_reply(client@, id, response),
 {
     proof {
-        echod_concrete_spec::interpret::lemma_string_of(*client);
+        echod_concrete_spec::model::lemma_string_of(*client);
     }
     (Pid::Outside, Message::Output(Output::Response { client: client.clone(), id, response }))
 }
@@ -3532,13 +3532,13 @@ fn notify(note: &Outbound) -> (r: (Pid, Message))
     match note {
         Outbound::Execute { id, version } => {
             proof {
-                echod_concrete_spec::interpret::lemma_string_of(*id);
+                echod_concrete_spec::model::lemma_string_of(*id);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Execute { id: id.clone(), version: *version })))
         },
         Outbound::Unblock { address, promise } => {
             proof {
-                echod_concrete_spec::interpret::lemma_string_of(*address);
+                echod_concrete_spec::model::lemma_string_of(*address);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Unblock { address: address.clone(), promise: copy(promise) })))
         },
@@ -3854,7 +3854,7 @@ impl Node {
                 next.flight = Some(flight);
                 next.next_op = op + 1;
                 proof {
-                    echod_concrete_spec::interpret::lemma_string_of(key);
+                    echod_concrete_spec::model::lemma_string_of(key);
                 }
                 (next, one((Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key } })))
             },
@@ -3910,14 +3910,14 @@ impl Node {
             let op = self.next_op;
             let body = encode(&next);
             proof {
-                echod_concrete_spec::simulation::lemma_bytes(spec_encode(next@));
+                echod_concrete_spec::model::lemma_bytes_realised(spec_encode(next@));
                 axiom_vec_ext(body, spec_bytes(spec_encode(next@)));
-                echod_concrete_spec::interpret::lemma_string_of(key);
+                echod_concrete_spec::model::lemma_string_of(key);
             }
             let call = match &etag {
                 Some(tag) => {
                     proof {
-                        echod_concrete_spec::interpret::lemma_string_of(tag.0);
+                        echod_concrete_spec::model::lemma_string_of(tag.0);
                     }
                     StoreCall::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
                 },

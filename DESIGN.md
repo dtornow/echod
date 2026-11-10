@@ -14,7 +14,8 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/spec/rover/exec` | `rover-exec` (library `rover_exec`): deterministic execution, bounded search, and verified certificate replay |
 | `rust/spec/echod/abstract/spec` | `echod-abstract-spec` (library `echod_abstract_spec`): the mathematical Resonate protocol model |
 | `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization, history translation, and model driving |
-| `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue, Echod concrete model, and its proved refinement to the abstract model |
+| `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue and Echod concrete model |
+| `rust/spec/echod/concrete/refinement` | `echod-concrete-refinement` (library `echod_concrete_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
@@ -43,7 +44,9 @@ occurrence; `sweep` runs `run_due` until a step changes nothing or a step
 limit is reached; `create_occurrence` births an occurrence in its origin.
 Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
 `spec_sweep`, `spec_occurrence` — and those are the steps of the
-Echod concrete model, which `simulation.rs` proves refines the abstract one.
+Echod concrete model, which
+`rust/spec/echod/concrete/refinement/src/simulation.rs` proves refines the
+abstract one.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
 models under `lean/` state it: 18 request handlers, the fence's check with
@@ -69,7 +72,8 @@ bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
 `clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete-spec` and `-p echod-process` run Verus. Verus pins its own
+-p echod-concrete-spec -p echod-concrete-refinement` and
+`-p echod-process` run Verus. Verus pins its own
 rustc, so the two are separate toolchains.
 
 ## echod-logic and echod

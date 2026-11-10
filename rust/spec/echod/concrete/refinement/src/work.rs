@@ -14,12 +14,12 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::handlers::{
+use crate::requests::{
     lemma_finite_at, lemma_promises_kept, lemma_skip_no_duplicates, lemma_tasks_kept,
     lemma_within_one,
 };
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{
+use crate::interpretation::{
     abstract_task, callbacks_in, changed_within, doc_rel, finite_store, lemma_contains_to_set,
     lemma_empty_to_set, lemma_offer, lemma_origin_doc, lemma_origin_reads, lemma_origin_update,
     lemma_others_kept_schedule, lemma_others_kept_within, lemma_project_object, lemma_record,
@@ -28,17 +28,17 @@ use crate::interpret::{
     slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use crate::model::{spec_string as c_string};
+use echod_concrete_spec::model::{spec_string as c_string};
 #[cfg(verus_keep_ghost)]
-use crate::node::{
-    DocV, NoteV, ObjV, PendingV, PromV, spec_due_id, spec_min_key as c_min_key, spec_new_obj,
-    spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
-    spec_project_obj, spec_record, spec_resume, spec_run_due, spec_schedule_key,
-    spec_sorted as c_sorted, spec_step_object, spec_targeted, spec_timer, spec_unlease as c_unlease,
-    TkV,
+use echod_concrete_spec::node::{
+    lemma_min_key_present as c_lemma_min_key, DocV, NoteV, ObjV, PendingV, PromV, spec_due_id,
+    spec_min_key as c_min_key, spec_new_obj, spec_obj_due, spec_occurrence, spec_offer_at,
+    spec_opened, spec_origin_key, spec_origin_map, spec_project_obj, spec_record, spec_resume,
+    spec_run_due, spec_schedule_key, spec_sorted as c_sorted, spec_step_object, spec_targeted,
+    spec_timer, spec_unlease as c_unlease, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{spec_before as c_before, spec_sat_add, spec_starts};
+use echod_concrete_spec::store::{spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
 use crate::relation::{
     agreement, as_item, due_agrees, dues_agree, items, note_sends, occurrence_agrees,
@@ -58,9 +58,8 @@ use echod_abstract_spec::model::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::view::{
-    DispatchV, InOutV, InternalV, least as a_least, lemma_least_exists as a_lemma_least_exists,
-    lemma_lift_dispatch, lemma_min_key as a_lemma_min_key, lift_dispatch, PromiseV, sat_add,
-    ScheduleV, spec_before as a_before, spec_keys, spec_min_key as a_min_key,
+    DispatchV, InOutV, InternalV, lemma_lift_dispatch, lemma_min_key as a_lemma_min_key,
+    lift_dispatch, PromiseV, sat_add, ScheduleV, spec_keys, spec_min_key as a_min_key,
     spec_sorted as a_sorted, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
@@ -91,22 +90,7 @@ pub type AResult = StepResultV<Proc, APid, AMessage>;
 // The key order
 // ---------------------------------------------------------------------------
 
-/// The two copies of the order are one order.
-pub proof fn lemma_before_same(a: Seq<char>, b: Seq<char>)
-    ensures
-        c_before(a, b) == a_before(a, b),
-    decreases a.len() + b.len(),
-{
-    if a.len() == 0 {
-    } else if b.len() == 0 {
-    } else if a[0] != b[0] {
-    } else {
-        lemma_before_same(a.drop_first(), b.drop_first());
-    }
-}
-
-/// The chosen minimums, both of them, are keys. The abstract order has a
-/// least key; by [`lemma_before_same`] it is least in the concrete order too.
+/// The chosen minimums, both of them, are keys.
 pub proof fn lemma_min_key(keys: Set<Seq<char>>)
     requires
         keys.finite(),
@@ -115,14 +99,8 @@ pub proof fn lemma_min_key(keys: Set<Seq<char>>)
         keys.contains(c_min_key(keys)),
         keys.contains(a_min_key(keys)),
 {
-    reveal(crate::node::spec_min_key);
+    c_lemma_min_key(keys);
     a_lemma_min_key(keys);
-    a_lemma_least_exists(keys);
-    let k = choose|k: Seq<char>| a_least(keys, k);
-    assert forall|o: Seq<char>| keys.contains(o) implies !c_before(o, k) by {
-        lemma_before_same(o, k);
-    };
-    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !c_before(o, k));
 }
 
 /// The concrete sorted keys are the keys.
@@ -921,7 +899,7 @@ pub open spec fn due_matched(
     &&& r.send == note_sends(notes)
     &&& r.state.pending == state.pending + items(born)
     &&& doc_rel(key, next, r.state.store)
-    &&& crate::interpret::others_kept(key, state.store, r.state.store)
+    &&& crate::interpretation::others_kept(key, state.store, r.state.store)
     &&& finite_store(r.state.store)
 }
 
@@ -1947,7 +1925,7 @@ pub proof fn lemma_agreement(config: ServerConfig)
     ensures
         agreement(config),
 {
-    crate::handlers::lemma_requests_agree(config);
+    crate::requests::lemma_requests_agree(config);
     lemma_dues_agree(config);
     lemma_occurrences_agree();
 }

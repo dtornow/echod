@@ -541,7 +541,7 @@ impl Store {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
                     proof {
-                        echod_concrete_spec::simulation::lemma_bytes(entry.body@);
+                        echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
                         echod_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
                     StoreOutcome::Got(Some((body, etag(&entry.body))))
@@ -560,7 +560,7 @@ impl Store {
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
-                            echod_concrete_spec::simulation::lemma_bytes(entry.body@);
+                            echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
                             echod_abstract_spec::trusted::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
                         StoreOutcome::Read(Read::Body(body, have))
@@ -605,7 +605,7 @@ impl Store {
                             't', 'h', 'i', 's', ' ', 's', 't', 'o', 'r', 'e', ' ', 'd', 'o', 'e', 's', ' ',
                             'n', 'o', 't', ' ', 'a', 'p', 'p', 'e', 'n', 'd',
                         ]);
-                        echod_concrete_spec::interpret::lemma_string_of(text);
+                        echod_concrete_spec::model::lemma_string_of(text);
                     }
                     StoreOutcome::Failed(StoreError::Unavailable(text))
                 } else {

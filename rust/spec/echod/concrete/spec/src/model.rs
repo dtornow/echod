@@ -7,6 +7,8 @@
 use vstd::prelude::*;
 
 use echod_abstract_spec::{BoundaryEvent, Call, Output};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::trusted::{axiom_bytes_realised, axiom_string_ext, axiom_string_realised};
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec;
 use RoverSpec::Label;
@@ -160,10 +162,37 @@ pub open spec fn spec_string(chars: Seq<char>) -> String {
     choose|s: String| s@ == chars
 }
 
-/// Opaque: the choice is read through [`crate::simulation::lemma_bytes`] alone.
+/// Opaque: the choice is read through [`lemma_bytes_realised`] alone.
 #[verifier::opaque]
 pub open spec fn spec_bytes(body: Seq<u8>) -> Vec<u8> {
     choose|v: Vec<u8>| v@ == body
+}
+
+/// The chosen string has exactly the requested characters.
+pub proof fn lemma_string_realised(chars: Seq<char>)
+    ensures
+        spec_string(chars)@ == chars,
+{
+    reveal(spec_string);
+    axiom_string_realised(chars);
+}
+
+/// A string is the chosen string of its own characters.
+pub proof fn lemma_string_of(s: String)
+    ensures
+        spec_string(s@) == s,
+{
+    lemma_string_realised(s@);
+    axiom_string_ext(spec_string(s@), s);
+}
+
+/// The chosen byte vector has exactly the requested bytes.
+pub proof fn lemma_bytes_realised(bytes: Seq<u8>)
+    ensures
+        spec_bytes(bytes)@ == bytes,
+{
+    reveal(spec_bytes);
+    axiom_bytes_realised(bytes);
 }
 
 pub open spec fn spec_one(state: Proc, send: Seq<(Pid, Message)>) -> Seq<StepResultV<Proc, Pid, Message>> {

@@ -97,7 +97,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit
     match after.flight {
         Some(open) => {
             match flight.etag {
-                Some(chars) => echod_concrete_spec::interpret::lemma_string_view(chars),
+                Some(chars) => echod_concrete_spec::model::lemma_string_realised(chars),
                 None => {},
             }
         },

@@ -15,26 +15,28 @@
 //!
 //! [`agreement`] is what remains of the handlers: one request, one due
 //! step, or one occurrence, on a document and on the abstract store it
-//! reads as, do the same thing. `interpret` proves it for the promise
+//! reads as, do the same thing. `interpretation` proves it for the promise
 //! handlers. Cargo erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{doc_rel, finite_store, others_kept, request_agrees};
+use crate::interpretation::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
-use crate::model::{
+use echod_concrete_spec::model::{
     Fleet, Message as CMessage, Spec as CModel, NodeV, Pid as CPid,
     spec_string,
     StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use echod_concrete_spec::node::{
     CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_doc, spec_encode,
     spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome};
+use echod_concrete_spec::store::{
+    Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome,
+};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::machine::{spec_create_if_absent, spec_handler};
 #[cfg(verus_keep_ghost)]
@@ -435,12 +437,12 @@ pub open spec fn request_of(flight: FlightV) -> StoreCall {
         match flight.etag {
             Some(chars) => StoreCall::PutIfMatch {
                 key: spec_string(flight.key),
-                body: crate::model::spec_bytes(flight.decided.unwrap()),
+                body: echod_concrete_spec::model::spec_bytes(flight.decided.unwrap()),
                 etag: Etag(spec_string(chars)),
             },
             None => StoreCall::PutIfNoneMatch {
                 key: spec_string(flight.key),
-                body: crate::model::spec_bytes(flight.decided.unwrap()),
+                body: echod_concrete_spec::model::spec_bytes(flight.decided.unwrap()),
             },
         }
     }
@@ -617,7 +619,7 @@ pub open spec fn related(fleet: Fleet, concrete: State<CModel>, abstract_world: 
 // Agreement: the handlers, on a document and on the abstract store
 // ---------------------------------------------------------------------------
 
-/// Every request on the document it names, by `interpret::request_agrees`.
+/// Every request on the document it names, by `interpretation::request_agrees`.
 pub open spec fn requests_agree(config: ServerConfig) -> bool {
     forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) ==> #[trigger] request_agrees(

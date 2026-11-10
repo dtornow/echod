@@ -100,10 +100,10 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Echod concrete refinement, open.** `rust/spec/echod/concrete/spec` holds the
-  catalogue and the handler specifications, and the kernel is proved equal
-  to them. It depends on the abstract model and not on the process. The
-  simulation that `on_event` refines that model is not written yet. The earlier `concrete_refines_abstract` against
+- **Echod concrete refinement.** `rust/spec/echod/concrete/spec` holds the
+  concrete semantics, and `rust/spec/echod/concrete/refinement` holds the
+  verified interpretation, relation, and forward simulation. The kernel is
+  proved equal to the concrete semantics. The earlier `concrete_refines_abstract` against
   the previous-generation `Model` left with `refine/`. What it established, and what
   the Rover proof has to establish again: every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a

@@ -13,7 +13,7 @@
 //!
 //! [`lemma_simulation`] is the simulation under [`agreement`]: the
 //! handlers, the due step, and the occurrence do the same on a document and
-//! on the abstract store it reads as. `handlers` and `timers` prove that
+//! on the abstract store it reads as. `requests` and `work` prove that
 //! agreement at the configuration the node implements, and
 //! [`lemma_refines`] is trace inclusion there, with nothing assumed. Cargo
 //! erases these bodies; a Verus run is what checks them.
@@ -21,16 +21,16 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
+use crate::interpretation::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
-use crate::model::{
+use echod_concrete_spec::model::{
     EntryV, Fleet, Proc as CProc, Message as CMessage, Spec as CModel, NodeV,
     Pid as CPid, spec_bytes, spec_get, spec_initial_node as initial_node,
     spec_node as spec_node_step, spec_nodes, spec_notes, spec_notify, spec_one, spec_reply,
     spec_store, spec_string, spec_world, StoreV as CStore,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use echod_concrete_spec::node::{
     axiom_decode_encode, CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
     spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
     spec_empty_doc, spec_encode, spec_flight, spec_forget, spec_handle, spec_is_empty, spec_keep,
@@ -38,7 +38,7 @@ use crate::node::{
     spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{
+use echod_concrete_spec::store::{
     Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreCall, StoreOutcome,
 };
 #[cfg(verus_keep_ghost)]
@@ -58,7 +58,7 @@ use echod_abstract_spec::model::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::protocol::Message as AMessage;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::trusted::{axiom_string_ext, axiom_string_realised};
+use echod_abstract_spec::trusted::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::view::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
@@ -613,7 +613,7 @@ pub proof fn lemma_service_step(
 // ---------------------------------------------------------------------------
 
 /// `spec_find` from `j` finds the first entry at or after `j` with the key.
-pub proof fn lemma_find_from(entries: Seq<crate::model::EntryV>, key: Seq<char>, j: int)
+pub proof fn lemma_find_from(entries: Seq<echod_concrete_spec::model::EntryV>, key: Seq<char>, j: int)
     requires
         0 <= j <= entries.len(),
     ensures
@@ -632,7 +632,7 @@ pub proof fn lemma_find_from(entries: Seq<crate::model::EntryV>, key: Seq<char>,
 }
 
 /// The characterisation of a hit, in both directions.
-pub proof fn lemma_find_is(entries: Seq<crate::model::EntryV>, key: Seq<char>, i: int)
+pub proof fn lemma_find_is(entries: Seq<echod_concrete_spec::model::EntryV>, key: Seq<char>, i: int)
     requires
         0 <= i < entries.len(),
         entries[i].key == key,
@@ -655,7 +655,7 @@ pub proof fn lemma_find_is(entries: Seq<crate::model::EntryV>, key: Seq<char>, i
     }
 }
 
-pub proof fn lemma_find_absent(entries: Seq<crate::model::EntryV>, key: Seq<char>)
+pub proof fn lemma_find_absent(entries: Seq<echod_concrete_spec::model::EntryV>, key: Seq<char>)
     requires
         forall|k: int| 0 <= k < entries.len() ==> #[trigger] entries[k].key != key,
     ensures
@@ -981,7 +981,11 @@ pub proof fn lemma_keep(
 
 /// Inserting an absent key: the new key is found with its body, other keys
 /// read as before, and keys stay distinct.
-pub proof fn lemma_insert_at(entries: Seq<crate::model::EntryV>, entry: crate::model::EntryV, i: int)
+pub proof fn lemma_insert_at(
+    entries: Seq<echod_concrete_spec::model::EntryV>,
+    entry: echod_concrete_spec::model::EntryV,
+    i: int,
+)
     requires
         0 <= i <= entries.len(),
         forall|k: int| 0 <= k < entries.len() ==> #[trigger] entries[k].key != entry.key,
@@ -989,23 +993,23 @@ pub proof fn lemma_insert_at(entries: Seq<crate::model::EntryV>, entry: crate::m
             0 <= j < k < entries.len() ==> #[trigger] entries[j].key != #[trigger] entries[k].key,
     ensures
         ({
-            let next = crate::store::spec_insert_at(entries, entry, i);
+            let next = echod_concrete_spec::store::spec_insert_at(entries, entry, i);
             &&& forall|j: int, k: int| 0 <= j < k < next.len() ==> #[trigger] next[j].key != #[trigger] next[k].key
-            &&& physical(crate::model::StoreV { entries: next, appendable: false, seen: Seq::empty() }, entry.key)
+            &&& physical(echod_concrete_spec::model::StoreV { entries: next, appendable: false, seen: Seq::empty() }, entry.key)
                 == Some(entry.body)
             &&& forall|other: Seq<char>| other != entry.key ==> #[trigger] physical(
-                crate::model::StoreV { entries: next, appendable: false, seen: Seq::empty() },
+                echod_concrete_spec::model::StoreV { entries: next, appendable: false, seen: Seq::empty() },
                 other,
             ) == physical(
-                crate::model::StoreV { entries, appendable: false, seen: Seq::empty() },
+                echod_concrete_spec::model::StoreV { entries, appendable: false, seen: Seq::empty() },
                 other,
             )
         }),
     decreases entries.len() - i,
 {
-    let next = crate::store::spec_insert_at(entries, entry, i);
-    let after = crate::model::StoreV { entries: next, appendable: false, seen: Seq::empty() };
-    let before_store = crate::model::StoreV { entries, appendable: false, seen: Seq::empty() };
+    let next = echod_concrete_spec::store::spec_insert_at(entries, entry, i);
+    let after = echod_concrete_spec::model::StoreV { entries: next, appendable: false, seen: Seq::empty() };
+    let before_store = echod_concrete_spec::model::StoreV { entries, appendable: false, seen: Seq::empty() };
     if i >= entries.len() {
         assert(next == entries.push(entry));
         assert forall|j: int, k: int| 0 <= j < k < next.len() implies #[trigger] next[j].key
@@ -1039,7 +1043,7 @@ pub proof fn lemma_insert_at(entries: Seq<crate::model::EntryV>, entry: crate::m
                 },
             }
         };
-    } else if crate::store::spec_before(entry.key, entries[i].key) {
+    } else if echod_concrete_spec::store::spec_before(entry.key, entries[i].key) {
         assert(next == entries.take(i).push(entry) + entries.skip(i));
         assert(next.len() == entries.len() + 1);
         assert forall|k: int| 0 <= k < next.len() implies #[trigger] next[k] == (if k < i {
@@ -1093,13 +1097,16 @@ pub proof fn lemma_insert_at(entries: Seq<crate::model::EntryV>, entry: crate::m
 
 /// `spec_put`: the key reads as the new body, other keys as before, and keys
 /// stay distinct.
-pub proof fn lemma_put(store: crate::model::StoreV, entry: crate::model::EntryV)
+pub proof fn lemma_put(
+    store: echod_concrete_spec::model::StoreV,
+    entry: echod_concrete_spec::model::EntryV,
+)
     requires
         entries_distinct(store),
     ensures
         ({
-            let next = crate::model::StoreV {
-                entries: crate::store::spec_put(store.entries, entry),
+            let next = echod_concrete_spec::model::StoreV {
+                entries: echod_concrete_spec::store::spec_put(store.entries, entry),
                 ..store
             };
             &&& entries_distinct(next)
@@ -1109,8 +1116,8 @@ pub proof fn lemma_put(store: crate::model::StoreV, entry: crate::model::EntryV)
         }),
 {
     let entries = store.entries;
-    let next_entries = crate::store::spec_put(entries, entry);
-    let next = crate::model::StoreV { entries: next_entries, ..store };
+    let next_entries = echod_concrete_spec::store::spec_put(entries, entry);
+    let next = echod_concrete_spec::model::StoreV { entries: next_entries, ..store };
     lemma_find_from(entries, entry.key, 0);
     match spec_find(entries, entry.key, 0) {
         Some(i) => {
@@ -1136,12 +1143,12 @@ pub proof fn lemma_put(store: crate::model::StoreV, entry: crate::model::EntryV)
         },
         None => {
             lemma_insert_at(entries, entry, 0);
-            let bare_next = crate::model::StoreV {
+            let bare_next = echod_concrete_spec::model::StoreV {
                 entries: next_entries,
                 appendable: false,
                 seen: Seq::empty(),
             };
-            let bare = crate::model::StoreV { entries, appendable: false, seen: Seq::empty() };
+            let bare = echod_concrete_spec::model::StoreV { entries, appendable: false, seen: Seq::empty() };
             assert(physical(bare_next, entry.key) == physical(next, entry.key));
             assert forall|other: Seq<char>| other != entry.key implies #[trigger] physical(next, other)
                 == physical(store, other) by {
@@ -1276,19 +1283,19 @@ pub proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract_sp
 {
     match doc {
         DocV::Origin(map) => {
-            assert(!crate::store::spec_starts(key, crate::interpret::schedule_prefix()));
+            assert(!echod_concrete_spec::store::spec_starts(key, crate::interpretation::schedule_prefix()));
             assert(map.dom().finite());
             assert(map.dom().len() == 0);
             assert(map.dom() =~= Set::<Seq<char>>::empty());
-            assert(map =~= Map::<Seq<char>, crate::node::ObjV>::empty());
-            assert(spec_empty_doc(key) == DocV::Origin(Map::<Seq<char>, crate::node::ObjV>::empty()));
+            assert(map =~= Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty());
+            assert(spec_empty_doc(key) == DocV::Origin(Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty()));
         },
         DocV::Schedule(slot) => {
             assert(slot is None);
-            if crate::store::spec_starts(key, crate::interpret::schedule_prefix()) {
+            if echod_concrete_spec::store::spec_starts(key, crate::interpretation::schedule_prefix()) {
                 assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
             } else {
-                let map = Map::<Seq<char>, crate::node::ObjV>::empty();
+                let map = Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty();
                 assert(spec_empty_doc(key) == DocV::Origin(map));
                 assert(map.dom() =~= Set::<Seq<char>>::empty());
             }
@@ -1317,16 +1324,14 @@ pub proof fn lemma_string(chars: Seq<char>)
     ensures
         spec_string(chars)@ == chars,
 {
-    reveal(crate::model::spec_string);
-    axiom_string_realised(chars);
+    echod_concrete_spec::model::lemma_string_realised(chars);
 }
 
 pub proof fn lemma_bytes(bytes: Seq<u8>)
     ensures
-        crate::model::spec_bytes(bytes)@ == bytes,
+        echod_concrete_spec::model::spec_bytes(bytes)@ == bytes,
 {
-    reveal(crate::model::spec_bytes);
-    echod_abstract_spec::trusted::axiom_bytes_realised(bytes);
+    echod_concrete_spec::model::lemma_bytes_realised(bytes);
 }
 
 /// `spec_notes` sends each note's output to the outside.
@@ -1399,9 +1404,9 @@ pub proof fn lemma_empty_is_empty(key: Seq<char>)
     ensures
         spec_is_empty(spec_empty_doc(key)),
 {
-    if crate::store::spec_starts(key, seq!['s', '/']) {
+    if echod_concrete_spec::store::spec_starts(key, seq!['s', '/']) {
     } else {
-        let map = Map::<Seq<char>, crate::node::ObjV>::empty();
+        let map = Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty();
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
     }
@@ -1606,7 +1611,7 @@ pub proof fn lemma_earliest_from(
     } else if !spec_owns(node, docs[i].key) {
         lemma_earliest_from(node, docs, i + 1, now, best);
     } else {
-        match crate::node::spec_earliest_in(spec_read(docs[i].key, docs[i].body), now) {
+        match echod_concrete_spec::node::spec_earliest_in(spec_read(docs[i].key, docs[i].body), now) {
             Some(at) => {
                 let better = match best {
                     None => true,
@@ -2285,7 +2290,7 @@ pub open spec fn begin_keyed(key: Seq<char>, job: JobV, caller: Option<(Seq<char
     match job {
         JobV::External(request) => caller is Some && spec_key(request) == Some(key),
         JobV::Due => caller is None,
-        JobV::Occurrence(pending) => caller is None && key == crate::node::spec_origin_key(
+        JobV::Occurrence(pending) => caller is None && key == echod_concrete_spec::node::spec_origin_key(
             origin(pending.promise),
         ),
     }
@@ -3179,7 +3184,7 @@ pub proof fn lemma_occurrence_begin(
             let node0 = node_at(cb, i);
             let p = node0.pending[0];
             let node1 = NodeV { pending: node0.pending.skip(1), ..node0 };
-            let key = crate::node::spec_origin_key(origin(p.promise));
+            let key = echod_concrete_spec::node::spec_origin_key(origin(p.promise));
             &&& spec_owns(node1, key)
             &&& (node2, send) == spec_begin(node1, key, JobV::Occurrence(p), at, None)
         }),
@@ -3194,7 +3199,7 @@ pub proof fn lemma_occurrence_begin(
     let pending = node0.pending;
     let p = pending[0];
     let node1 = NodeV { pending: pending.skip(1), ..node0 };
-    let key = crate::node::spec_origin_key(origin(p.promise));
+    let key = echod_concrete_spec::node::spec_origin_key(origin(p.promise));
     let job = JobV::Occurrence(p);
     let caller = None::<(Seq<char>, u64)>;
     let state = astate(ab);
@@ -3955,7 +3960,7 @@ pub proof fn lemma_store_answers(fleet: Fleet, world: State<CModel>, n: int)
                 assert(store.entries[idx].body == c.body);
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
                 assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
-                let entry = EntryV { key, body: decided, version: crate::store::spec_bump(store.entries[idx].version) };
+                let entry = EntryV { key, body: decided, version: echod_concrete_spec::store::spec_bump(store.entries[idx].version) };
                 let (next, outcome) = spec_apply(store, request_of(flight));
                 assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
                 assert(outcome == StoreOutcome::Written(spec_etag(decided)));
@@ -4217,8 +4222,8 @@ pub proof fn lemma_node(
                     if w <= at as nat && node.flight is None && node.next_op < u64::MAX {
                         let (next, send) = spec_timeout(node, at);
                         let node2 = NodeV {
-                            logic: crate::model::LogicV { clock: at as nat, last_wake: None, ..node.logic },
-                            wake: crate::node::spec_wake(next),
+                            logic: echod_concrete_spec::model::LogicV { clock: at as nat, last_wake: None, ..node.logic },
+                            wake: echod_concrete_spec::node::spec_wake(next),
                             ..next
                         };
                         assert(results == spec_one(CProc::Node(node2), send));
@@ -4257,9 +4262,9 @@ pub proof fn lemma_node(
             } else {
                 let (next, send) = spec_request(node, at, call);
                 let node2 = NodeV {
-                    logic: crate::model::spec_clock(node.logic, at),
+                    logic: echod_concrete_spec::model::spec_clock(node.logic, at),
                     next_request: (node.next_request + 1) as u64,
-                    wake: crate::node::spec_wake(next),
+                    wake: echod_concrete_spec::node::spec_wake(next),
                     ..next
                 };
                 assert(results == spec_one(CProc::Node(node2), send));
@@ -4281,8 +4286,8 @@ pub proof fn lemma_node(
             } else {
                 let (next, send) = spec_store_reply(node, op, outcome);
                 let node2 = NodeV {
-                    logic: crate::model::spec_clock(node.logic, at),
-                    wake: crate::node::spec_wake(next),
+                    logic: echod_concrete_spec::model::spec_clock(node.logic, at),
+                    wake: echod_concrete_spec::node::spec_wake(next),
                     ..next
                 };
                 assert(results == spec_one(CProc::Node(node2), send));
@@ -4296,7 +4301,7 @@ pub proof fn lemma_node(
         },
         ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Stop } => {
             let node2 = NodeV {
-                logic: crate::model::LogicV { clock: at as nat, loops: false, stopping: true, ..node.logic },
+                logic: echod_concrete_spec::model::LogicV { clock: at as nat, loops: false, stopping: true, ..node.logic },
                 ..node
             };
             assert(results == spec_one(CProc::Node(node2), Seq::empty()));
@@ -4602,22 +4607,22 @@ pub proof fn lemma_empty_reads(key: Seq<char>)
         doc_rel(key, spec_empty_doc(key), empty_store()),
 {
     let s = empty_store();
-    if crate::store::spec_starts(key, seq!['s', '/']) {
+    if echod_concrete_spec::store::spec_starts(key, seq!['s', '/']) {
         assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
         assert(!s.schedules.contains_key(key.skip(2)));
     } else {
-        let map = Map::<Seq<char>, crate::node::ObjV>::empty();
+        let map = Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty();
         assert(spec_empty_doc(key) == DocV::Origin(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
-        if crate::store::spec_starts(key, crate::interpret::origin_prefix()) {
+        if echod_concrete_spec::store::spec_starts(key, crate::interpretation::origin_prefix()) {
             let o = key.skip(2);
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {
                 &&& s.promises.contains_key(id) == map.contains_key(id)
-                &&& (map.contains_key(id) ==> crate::interpret::object_rel(
+                &&& (map.contains_key(id) ==> crate::interpretation::object_rel(
                     map[id],
                     s.promises[id],
-                    crate::interpret::abstract_task(s, id),
+                    crate::interpretation::abstract_task(s, id),
                 ))
                 &&& (!map.contains_key(id) ==> !s.tasks.contains_key(id))
             } by {
@@ -4752,7 +4757,7 @@ pub proof fn lemma_timeout(
     if node0.pending.len() > 0 {
         let p = node0.pending[0];
         let node1 = NodeV { pending: node0.pending.skip(1), ..node0 };
-        let key = crate::node::spec_origin_key(origin(p.promise));
+        let key = echod_concrete_spec::node::spec_origin_key(origin(p.promise));
         if !spec_owns(node1, key) {
             assert(node2 == node1);
             assert(send =~= Seq::<(CPid, CMessage)>::empty());
@@ -4801,14 +4806,14 @@ pub proof fn lemma_simulation(fleet: Fleet, config: ServerConfig)
 /// Trace inclusion: every boundary trace of the concrete world is one of
 /// the abstract world, at the abstract configuration the fleet implements:
 /// the same retry timeout. The handlers, the due step, and the occurrence
-/// agree by `timers::lemma_agreement`.
+/// agree by `work::lemma_agreement`.
 pub proof fn lemma_refines(concrete_config: Fleet)
     ensures
         refines(concrete_model(), concrete_config, abstract_model(), abstract_config(concrete_config)),
 {
     let fleet = concrete_config;
     let config = abstract_config(fleet);
-    crate::timers::lemma_agreement(config);
+    crate::work::lemma_agreement(config);
     lemma_initial(fleet, config);
     lemma_link(
         fleet,

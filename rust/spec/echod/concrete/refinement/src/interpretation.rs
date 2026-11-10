@@ -17,7 +17,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use echod_concrete_spec::node::{
     DocV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
     spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
     spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
@@ -27,7 +27,7 @@ use crate::node::{
     spec_with_origin, TkV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{spec_sat_add, spec_starts};
+use echod_concrete_spec::store::{spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::machine::{
     spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_handler, spec_has_key,
@@ -693,24 +693,24 @@ pub proof fn lemma_others_same(key: Seq<char>, s: AStore)
 /// The chosen string of some characters is the string of those characters.
 pub proof fn lemma_string_view(chars: Seq<char>)
     ensures
-        crate::model::spec_string(chars)@ == chars,
+        echod_concrete_spec::model::spec_string(chars)@ == chars,
         echod_abstract_spec::machine::spec_string(chars)@ == chars,
-        crate::model::spec_string(chars) == echod_abstract_spec::machine::spec_string(chars),
+        echod_concrete_spec::model::spec_string(chars) == echod_abstract_spec::machine::spec_string(chars),
 {
-    reveal(crate::model::spec_string);
+    reveal(echod_concrete_spec::model::spec_string);
     reveal(echod_abstract_spec::machine::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(crate::model::spec_string(chars), echod_abstract_spec::machine::spec_string(chars));
+    axiom_string_ext(echod_concrete_spec::model::spec_string(chars), echod_abstract_spec::machine::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
 pub proof fn lemma_string_of(s: String)
     ensures
-        crate::model::spec_string(s@) == s,
+        echod_concrete_spec::model::spec_string(s@) == s,
         echod_abstract_spec::machine::spec_string(s@) == s,
 {
     lemma_string_view(s@);
-    axiom_string_ext(crate::model::spec_string(s@), s);
+    axiom_string_ext(echod_concrete_spec::model::spec_string(s@), s);
 }
 
 pub proof fn lemma_task_record(id: String, c: TkV, a: TaskV)

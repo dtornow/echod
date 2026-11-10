@@ -88,7 +88,8 @@ echod/
 │       │   ├── spec/     # independent Resonate model and properties
 │       │   └── exec/     # executable realization and history tooling
 │       └── concrete/
-│           └── spec/     # process views/twins, relation, simulation proof
+│           ├── spec/     # mathematical concrete state and transitions
+│           └── refinement/ # interpretation, relation, simulation proof
 │
 ├── test/
 │   ├── runtime/          # synchronous deterministic Effect interpreter
@@ -109,6 +110,7 @@ should avoid the reserved keyword:
 echod-abstract-spec  -> echod_abstract_spec
 echod-abstract-exec  -> echod_abstract_exec
 echod-concrete-spec  -> echod_concrete_spec
+echod-concrete-refinement -> echod_concrete_refinement
 ```
 
 ## Layer responsibilities
@@ -185,14 +187,23 @@ and not a dependent of the process:
 - the Echod concrete model in `model.rs`: one `Proc` process enum (`Node` or `Store`),
   nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
-- the abstract model, which that step refines
+- the Rover adapter over those concrete semantics
 
-`simulation.rs` proves the concrete world refines the abstract world through
-the generic Rover forward-simulation theorem.
+The dependency on `echod-abstract-spec` is semantic rather than a refinement
+proof dependency: concrete network messages use the shared
+`Call`/`Output`/`Dispatch` boundary types, and schedule transitions use the
+trusted cron and occurrence-expansion functions.
 
 Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
 exec-to-spec proofs live under `impl/process/src/concrete`; production code
 imports those local executable definitions.
+
+### `spec/echod/concrete/refinement`
+
+The model-specific proof boundary. It interprets concrete documents as the
+abstract store, proves request and internal-work agreement, defines the
+simulation relation, and exports `lemma_refines`. It depends only on Rover,
+the two specification crates, protocol types, and Verus.
 
 ### `test/runtime`
 
@@ -218,15 +229,19 @@ remains the primary simulator.
 
 ```text
 spec/rover/spec ---> spec/echod/abstract/spec ---> spec/echod/concrete/spec ---> impl/process ---> impl/runtime ---> impl/cli
-      |               |
-      v               v
-spec/rover/exec --> spec/echod/abstract/exec
+      |               |                              |
+      v               v                              v
+spec/rover/exec --> spec/echod/abstract/exec     spec/echod/concrete/refinement
+                       |                              ^
+                       +------------------------------+
 
 impl + spec -----------------> test/*
 ```
 
-Concrete depends on the Rover world and on the abstract model. The process depends on concrete,
-because a handler's `ensures` names `spec_promise_create`. Concrete depends on neither the process nor the runtime. Production code must
+Concrete depends on the Rover world and the abstract model's shared semantic
+boundary. Refinement depends on both models. The process depends on concrete,
+because a handler's `ensures` names `spec_promise_create`. Concrete and
+refinement depend on neither the process nor the runtime. Production code must
 never depend on test code. The ghost half of the concrete crate erases
 under `cargo build`.
 
@@ -290,13 +305,14 @@ impl/process::State::on_event
 spec/echod/concrete/spec::spec_logic_on_event
     which is the node step of
 Rover instantiated with the concrete model
-    refines
+    is proved by spec/echod/concrete/refinement to refine
 Rover instantiated with the abstract model
 ```
 
 The statement is `rover_spec::rover::refinement::refines` of
 `echod_concrete_spec::Spec` against
-`echod_abstract_spec::Spec`: every
+`echod_abstract_spec::Spec`, exported as
+`echod_concrete_refinement::lemma_refines`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

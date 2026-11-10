@@ -1,6 +1,6 @@
 //! The remaining request handlers agree, each on the document it names.
 //!
-//! `interpret` proves promise get, create, and settle. This module proves
+//! `interpretation` proves promise get, create, and settle. This module proves
 //! the callbacks and listeners, the task handlers, the heartbeat, the
 //! suspend, the fence, and the schedule handlers, and gathers them into
 //! [`lemma_requests_agree`]: every request with a key agrees on every
@@ -10,7 +10,7 @@
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use crate::interpret::{
+use crate::interpretation::{
     abstract_task, callbacks_in, changed_within, doc_rel, finite_store, lemma_awaitable,
     lemma_contains_to_set, lemma_empty_to_set, lemma_held, lemma_origin_doc, lemma_origin_reads,
     lemma_origin_update, lemma_others_kept_schedule, lemma_others_kept_within, lemma_others_same,
@@ -20,7 +20,7 @@ use crate::interpret::{
     origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use echod_concrete_spec::node::{
     DocV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
     spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited,
     spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check,
@@ -297,7 +297,7 @@ pub proof fn lemma_register_callback_agrees(
             } else {
                 lemma_record(awaited, ao.promise, p);
                 let res = a_promise_res(200, Some(spec_promise_record(awaited, p)));
-                assert(c_promise_res(200, Some(crate::node::spec_record(awaited, ao.promise))) == res);
+                assert(c_promise_res(200, Some(echod_concrete_spec::node::spec_record(awaited, ao.promise))) == res);
                 if ao.promise.state == PromiseState::Pending && wo.promise.state == PromiseState::Pending {
                     assert(ao == map[awaited@]);
                     assert(p == p0);
@@ -836,7 +836,7 @@ pub proof fn lemma_held_update(
         ({
             let n = AStore { promises: s.promises.insert(x, q), tasks: s.tasks.insert(x, u), ..s };
             &&& doc_rel(key, DocV::Origin(map.insert(x, obj2)), n)
-            &&& crate::interpret::others_kept(key, s, n)
+            &&& crate::interpretation::others_kept(key, s, n)
             &&& finite_store(n)
         }),
 {
@@ -964,7 +964,7 @@ pub proof fn lemma_task_fulfill_agrees(
                 assert(n.promises[x] == q);
                 lemma_record(req.id, promise, q);
                 assert(outs == spec_out(a_promise_res(200, Some(spec_promise_record(req.id, q))), n));
-                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(crate::node::spec_record(req.id, promise))));
+                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(echod_concrete_spec::node::spec_record(req.id, promise))));
                 lemma_held_update(key, o, map, s, x, obj2, q, u);
                 assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocV::Origin(map.insert(x, obj2)));
             },
@@ -1283,7 +1283,7 @@ pub proof fn lemma_extend(
                 Some(n) => n,
                 None => 0,
             };
-            let at = crate::store::spec_sat_add(now, ttl);
+            let at = echod_concrete_spec::store::spec_sat_add(now, ttl);
             let t2 = TkV { lease_timeout_at: Some(at), ..t };
             let obj2 = ObjV { task: Some(t2), ..obj };
             let t_a = a->Ok_0;
