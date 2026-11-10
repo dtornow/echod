@@ -108,7 +108,7 @@ should avoid the reserved keyword:
 ```text
 echod-abstract-spec  -> echod_abstract
 echod-abstract-exec  -> echod_abstract_exec
-echod-concrete  -> echod_concrete
+echod-concrete-spec  -> echod_concrete
 ```
 
 ## Layer responsibilities
@@ -188,6 +188,10 @@ and not a dependent of the process:
 
 `simulation.rs` proves the concrete world refines the abstract world through
 the generic Rover forward-simulation theorem.
+
+Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
+exec-to-spec proofs live under `impl/process/src/concrete`; production code
+imports those local executable definitions.
 
 ### `test/runtime`
 

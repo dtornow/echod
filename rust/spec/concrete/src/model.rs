@@ -1,42 +1,29 @@
-//! The concrete Rover model.
+//! Mathematical concrete Rover model.
 //!
-//! A world is the nodes and one store, an empty network, and time 0. Each
-//! node keeps its own documents and one flight. A request or a due
-//! document loads, is decided, and is written back. The store applies each
-//! call once; Rover may deliver an envelope again, and the store answers a
-//! `(node, op)` it has answered with a stutter. The abstract model is a
-//! different machine. See `simulation`.
-//!
-//! The initial world has executable and specification forms (`initial` and
-//! `spec_world`). Each `Local` implements `RoverExec::Proc`; its `LocalV`
-//! specification dispatches to `spec_node` or `spec_store`.
+//! This crate contains only the `*V` process state, transitions, passive
+//! protocol algebra, and `RoverSpec::Spec`. Executable realizations live in
+//! `echod-process::concrete`.
 
 use vstd::prelude::*;
 
 use echod_abstract::{BoundaryEvent, Call, Output};
-use echod_rover::rover::comm::ProcessEvent;
+use echod_rover::rover::comm::{ProcessEvent, Time};
 use echod_rover::rover::RoverSpec;
-use echod_rover_exec as RoverExec;
-use RoverExec::ProcResult;
 use RoverSpec::Label;
 #[cfg(verus_keep_ghost)]
 use RoverSpec::StepResultV;
-use echod_rover::rover::comm::Time;
-
 use echod_types::Response;
 
 #[cfg(verus_keep_ghost)]
-use crate::node::{node_results_v, spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
-pub use crate::node::{Node, NodeV};
+use crate::node::{spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
+pub use crate::node::NodeV;
 #[cfg(verus_keep_ghost)]
 use crate::store::spec_apply;
-pub use crate::store::{Entry, EntryV, Store, StoreV};
+pub use crate::store::{EntryV, StoreV};
 use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 
 verus! {
 
-// ---------------------------------------------------------------------------
-// Processes
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -61,12 +48,9 @@ pub struct Fleet {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Model;
-
 /// The mathematical concrete Rover model, with no executable local state.
 pub struct Spec;
 
-// ---------------------------------------------------------------------------
 // What crosses the boundary
 // ---------------------------------------------------------------------------
 
@@ -119,40 +103,7 @@ impl RoverSpec::Proc for LocalV {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub struct Logic {
-    pub clock: u64,
-    pub loops: bool,
-    pub stopping: bool,
-    pub stopped: bool,
-    pub last_wake: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum Local {
-    Node(Node),
-    Store(Store),
-}
-
-impl View for Logic {
-    type V = LogicV;
-    open spec fn view(&self) -> LogicV {
-        LogicV {
-            clock: self.clock as nat,
-            loops: self.loops,
-            stopping: self.stopping,
-            stopped: self.stopped,
-            last_wake: match self.last_wake {
-                Some(t) => Some(t as nat),
-                None => None,
-            },
-        }
-    }
-}
-
-/// The nodes a fleet starts, then the store. The same world `Model::initial` builds.
+/// The nodes a fleet starts, then the store.
 pub open spec fn spec_nodes(config: Fleet, id: u64) -> Seq<(Pid, LocalV)>
     decreases (config.nodes - id) as int
 {
@@ -196,17 +147,6 @@ pub open spec fn spec_world(config: Fleet) -> Seq<(Pid, LocalV)> {
     )]
 }
 
-impl View for Local {
-    type V = LocalV;
-    open spec fn view(&self) -> LocalV {
-        match self {
-            Local::Node(node) => LocalV::Node(node@),
-            Local::Store(store) => LocalV::Store(store@),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // The process steps as specifications. `LocalV::on_event` dispatches on the
 // model-specific process enum: a node runs one flight, the store applies one
 // call. `RoverExec::Proc::on_event` proves the executable process returns these
@@ -331,11 +271,6 @@ pub open spec fn spec_notes(notes: Seq<NoteV>) -> Seq<(Pid, Message)>
 
 } // verus!
 
-// ---------------------------------------------------------------------------
-// The world Rover steps.
-// ---------------------------------------------------------------------------
-
-/// The retry timeout the kernel uses.
 pub const RETRY_TIMEOUT: u64 = 5_000;
 
 impl Fleet {
@@ -351,219 +286,6 @@ impl Fleet {
 
 verus! {
 
-/// The world, as the specification sees it.
-pub open spec fn world_v(v: Seq<(Pid, Local)>) -> Seq<(Pid, LocalV)> {
-    v.map_values(|entry: (Pid, Local)| (entry.0, entry.1@))
-}
-
-/// The store's results, as the specification sees them.
-pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<StepResultV<LocalV, Pid, Message>> {
-    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| StepResultV { state: LocalV::Store(pair.0@), send: pair.1@ })
-}
-
-fn same_pid(a: Pid, b: Pid) -> (r: bool)
-    ensures
-        r == (a == b),
-{
-    match (a, b) {
-        (Pid::Outside, Pid::Outside) => true,
-        (Pid::Store, Pid::Store) => true,
-        (Pid::Node(x), Pid::Node(y)) => x == y,
-        _ => false,
-    }
-}
-
-/// Whether the store has answered `(sender, op)`.
-fn seen_has(seen: &Vec<(Pid, u64)>, sender: Pid, op: u64) -> (r: bool)
-    ensures
-        r == seen@.contains((sender, op)),
-{
-    let mut i = 0;
-    while i < seen.len()
-        invariant
-            i <= seen.len(),
-            forall|j: int| 0 <= j < i ==> seen@[j] != (sender, op),
-        decreases seen.len() - i,
-    {
-        let (p, o) = seen[i];
-        if same_pid(p, sender) && o == op {
-            assert(seen@[i as int] == (sender, op));
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-impl Store {
-    /// The store's step: `spec_store`. Each `(sender, op)` is answered once;
-    /// a delivery it has answered is a stutter.
-    pub fn step(&self, event: &ProcessEvent<Pid, Message>) -> (r: Vec<(Store, Vec<(Pid, Message)>)>)
-        ensures
-            store_results_v(r@) == spec_store(self@, *event),
-    {
-        let mut r: Vec<(Store, Vec<(Pid, Message)>)> = Vec::new();
-        match event {
-            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
-                if seen_has(&self.seen, *sender, *op) {
-                    r.push((self.copy(), Vec::new()));
-                    proof {
-                        assert(store_results_v(r@) =~~= spec_store(self@, *event));
-                    }
-                    return r;
-                }
-                let (mut next, outcome) = self.apply(call);
-                next.seen.push((*sender, *op));
-                let mut send: Vec<(Pid, Message)> = Vec::new();
-                send.push((*sender, Message::StoreReply { op: *op, outcome }));
-                r.push((next, send));
-                proof {
-                    assert(store_results_v(r@) =~~= spec_store(self@, *event));
-                }
-                r
-            },
-            _ => {
-                proof {
-                    assert(store_results_v(r@) =~~= Seq::<StepResultV<LocalV, Pid, Message>>::empty());
-                }
-                r
-            },
-        }
-    }
-}
-
-impl RoverExec::Proc for Local {
-    type Spec = LocalV;
-
-    fn on_event(
-        &self,
-        _config: &Fleet,
-        now: Time,
-        event: &ProcessEvent<Pid, Message>,
-    ) -> Vec<ProcResult<Self>> {
-        let mut results: Vec<ProcResult<Local>> = Vec::new();
-        match self {
-            Local::Node(node) => {
-                let mut pairs = node.step(now, event);
-                let ghost all = pairs@;
-                while pairs.len() > 0
-                    invariant
-                        results@.len() + pairs@.len() == all.len(),
-                        pairs@ == all.skip(results@.len() as int),
-                        forall|i: int| 0 <= i < results@.len() ==> {
-                            let result = #[trigger] results@[i];
-                            StepResultV { state: result.state@, send: result.send@ } == node_results_v(all)[i]
-                        },
-                    decreases pairs@.len(),
-                {
-                    let ghost k = results@.len() as int;
-                    let (node, send) = pairs.remove(0);
-                    proof {
-                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-                    }
-                    results.push(ProcResult {
-                        state: Local::Node(node),
-                        send,
-                        marks: Vec::new(),
-                    });
-                }
-            }
-            Local::Store(store) => {
-                let mut pairs = store.step(event);
-                let ghost all = pairs@;
-                while pairs.len() > 0
-                    invariant
-                        results@.len() + pairs@.len() == all.len(),
-                        pairs@ == all.skip(results@.len() as int),
-                        forall|i: int| 0 <= i < results@.len() ==> {
-                            let result = #[trigger] results@[i];
-                            StepResultV { state: result.state@, send: result.send@ } == store_results_v(all)[i]
-                        },
-                    decreases pairs@.len(),
-                {
-                    let ghost k = results@.len() as int;
-                    let (store, send) = pairs.remove(0);
-                    proof {
-                        assert(all.skip(k).remove(0) =~= all.skip(k + 1));
-                    }
-                    results.push(ProcResult {
-                        state: Local::Store(store),
-                        send,
-                        marks: Vec::new(),
-                    });
-                }
-            }
-        }
-        results
-    }
-}
-
-impl RoverExec::Spec for Model {
-    type Spec = Spec;
-    type Proc = Local;
-
-    open spec fn spec(&self) -> Spec {
-        Spec
-    }
-
-    fn outside(&self) -> Pid {
-        Pid::Outside
-    }
-
-    /// The nodes, then the store: `spec_world`.
-    fn initial(&self, config: &Fleet) -> Vec<(Pid, Local)> {
-        let mut process: Vec<(Pid, Local)> = Vec::new();
-        let mut id: u64 = 0;
-        proof {
-            assert(world_v(process@) =~= Seq::<(Pid, LocalV)>::empty());
-        }
-        while id < config.nodes
-            invariant
-                id <= config.nodes,
-                process@.len() == id,
-                forall|i: int| 0 <= i < process@.len() ==> #[trigger] process@[i].0 == Pid::Node(i as u64),
-                world_v(process@) + spec_nodes(*config, id) == spec_nodes(*config, 0),
-            decreases config.nodes - id,
-        {
-            let node = Node::new(id, config.nodes, config.loops, config.retry_timeout);
-            let ghost before = world_v(process@);
-            process.push((Pid::Node(id), Local::Node(node)));
-            proof {
-                assert(world_v(process@) =~= before.push((Pid::Node(id), LocalV::Node(node@))));
-                assert(spec_nodes(*config, id) == seq![(Pid::Node(id), LocalV::Node(spec_initial_node(*config, id)))] + spec_nodes(*config, (id + 1) as u64));
-                assert(world_v(process@) + spec_nodes(*config, (id + 1) as u64) =~= before + spec_nodes(*config, id));
-            }
-            id = id + 1;
-        }
-        let ghost before = world_v(process@);
-        process.push((Pid::Store, Local::Store(Store::empty(config.appendable))));
-        proof {
-            assert(spec_nodes(*config, id) =~= Seq::<(Pid, LocalV)>::empty());
-            assert(before =~= spec_nodes(*config, 0));
-            assert(world_v(process@) =~= spec_world(*config));
-            assert(process@.map_values(|entry: (Pid, Local)| (entry.0, entry.1@)) =~= spec_world(*config));
-            let pids = process@.map_values(|entry: (Pid, Local)| entry.0);
-            assert forall|i: int, j: int| 0 <= i < pids.len() && 0 <= j < pids.len() && i != j implies pids[i] != pids[j] by {
-                assert(pids[i] == process@[i].0);
-                assert(pids[j] == process@[j].0);
-                if i < pids.len() - 1 && j < pids.len() - 1 {
-                    assert(process@[i].0 == Pid::Node(i as u64));
-                    assert(process@[j].0 == Pid::Node(j as u64));
-                }
-            };
-            assert(pids.no_duplicates());
-        }
-        process
-    }
-
-    fn injectable(&self, _config: &Fleet, message: &Message) -> bool {
-        match message {
-            Message::Request(_) | Message::Stop => true,
-            _ => false,
-        }
-    }
-
-}
 
 impl RoverSpec::Spec for Spec {
     type Config = Fleet;

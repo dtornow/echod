@@ -23,9 +23,9 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::{clone_doc, doc_deadline, empty_origin, empty_schedule, keys_within, same_doc, Doc};
+use crate::concrete::{clone_doc, doc_deadline, empty_origin, empty_schedule, keys_within, same_doc, Doc};
 #[cfg(verus_keep_ghost)]
-use echod_concrete::lemma_doc_view;
+use crate::concrete::document::lemma_doc_view;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete::node::DocV;
@@ -85,7 +85,7 @@ pub struct Header {
 /// The nearest deadline of a document.
 pub fn deadline(doc: &Doc) -> (r: Option<u64>)
     ensures
-        echod_concrete::node::nat_v(r) == echod_concrete::node::spec_doc_deadline(doc@),
+        crate::concrete::document::nat_v(r) == echod_concrete::node::spec_doc_deadline(doc@),
 {
     doc_deadline(doc)
 }
@@ -204,7 +204,7 @@ pub fn encode_delta(header: &Header, before: &Doc, after: &Doc) -> (r: (Vec<u8>,
 /// stated above.
 #[cfg(not(verus_keep_ghost))]
 pub mod codec {
-    use echod_concrete::{Doc, Obj, Objects, Prom, Tk};
+    use crate::concrete::{Doc, Obj, Objects, Prom, Tk};
     use echod_types::{PromiseState, Schedule, Tags, TaskState, Value};
     use serde::de::DeserializeOwned;
     use serde::{Deserialize, Serialize};
@@ -424,7 +424,7 @@ pub mod codec {
 /// Under Verus the bytes are stated, never built: serde is absent there.
 #[cfg(verus_keep_ghost)]
 pub mod codec {
-    use echod_concrete::Doc;
+    use crate::concrete::Doc;
 
     use super::{Header, Loaded};
 

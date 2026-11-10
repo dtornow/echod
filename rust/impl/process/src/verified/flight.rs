@@ -10,8 +10,8 @@
 
 use vstd::prelude::*;
 
-use echod_concrete::store::{StoreError, StoreOutcome};
-use echod_concrete::{create_occurrence, handle, run_due, sweep, Doc, Outbound, Pending};
+use crate::concrete::{StoreError, StoreOutcome};
+use crate::concrete::{create_occurrence, handle, run_due, sweep, Doc, Outbound, Pending};
 use echod_types::{Request, Response};
 
 use super::commit::Commit;
@@ -22,7 +22,8 @@ use super::commit_spec::*;
 #[cfg(verus_keep_ghost)]
 use super::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{notes_v, pend_v, NoteV, PendingV};
+use crate::concrete::document::{notes_v, pend_v};
+use echod_concrete::node::{NoteV, PendingV};
 
 verus! {
 

@@ -18,7 +18,7 @@ use echod_types::{PromiseRecord, Request, Response, Schedule};
 
 use crate::target::Target;
 
-pub use echod_concrete::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+pub use crate::concrete::{Etag, Read, StoreCall, StoreError, StoreOutcome};
 pub use crate::verified::flight::FiredKey;
 
 #[cfg(verus_keep_ghost)]
@@ -225,7 +225,7 @@ pub enum DebugBody {
     /// A short refusal.
     Message(String),
     /// The documents a `debug.snap` read: every origin's, and every schedule.
-    Snap { origins: Vec<echod_concrete::Doc>, schedules: Vec<Schedule> },
+    Snap { origins: Vec<crate::concrete::Doc>, schedules: Vec<Schedule> },
 }
 
 #[cfg(verus_keep_ghost)]

@@ -278,7 +278,7 @@ pub fn content_etag(body: &[u8]) -> (r: crate::types::Etag)
     ensures
         r == echod_concrete::store::spec_etag(body@),
 {
-    echod_concrete::content_etag(body)
+    crate::concrete::content_etag(body)
 }
 
 /// The origin of an id: everything before the first `:`.

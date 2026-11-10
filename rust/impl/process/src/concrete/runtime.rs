@@ -5,14 +5,6 @@ use vstd::prelude::*;
 verus! {
 
 #[verifier::external_body]
-pub fn copy<T: Clone>(value: &T) -> (result: T)
-    ensures
-        result == *value,
-{
-    value.clone()
-}
-
-#[verifier::external_body]
 pub fn next_cron(cron: &String, after: u64) -> (result: u64)
     ensures
         result == echod_abstract::trusted::spec_next_cron(cron@, after),

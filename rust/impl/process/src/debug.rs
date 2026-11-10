@@ -14,7 +14,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::Doc;
+use crate::concrete::Doc;
 
 use crate::verified::node::{str_eq, NodeCore};
 use crate::verified::table::Table;
@@ -896,7 +896,7 @@ impl State {
                                     match doc::decode_schedule(bytes.as_slice()) {
                                         Ok(loaded) => {
                                             proof {
-                                                echod_concrete::lemma_doc_view(&loaded.doc);
+                                                crate::concrete::document::lemma_doc_view(&loaded.doc);
                                             }
                                             match loaded.doc {
                                                 Doc::Schedule(Some(row)) => {

@@ -1,6 +1,6 @@
 [package]
-name = "echod-concrete"
-description = "The concrete Rover model: the nodes and one store, each node a machine of its own."
+name = "echod-concrete-spec"
+description = "The mathematical concrete Rover model and its refinement to the abstract specification."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,12 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 echod-types = { path = "../../comm/types" }
-echod-cron = { path = "../../comm/cron" }
 echod-rover = { package = "echod-rover-spec", path = "../rover" }
-echod-rover-exec = { path = "../rover-exec" }
 echod-abstract = { package = "echod-abstract-spec", path = "../abstract" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"

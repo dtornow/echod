@@ -1114,16 +1114,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-concrete"
+name = "echod-concrete-spec"
 version = "0.1.0"
 dependencies = [
  "echod-abstract-spec",
- "echod-cron",
- "echod-rover-exec",
  "echod-rover-spec",
  "echod-types",
- "serde",
- "serde_json",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
@@ -1172,7 +1168,10 @@ name = "echod-process"
 version = "0.1.0"
 dependencies = [
  "echod-abstract-spec",
- "echod-concrete",
+ "echod-concrete-spec",
+ "echod-cron",
+ "echod-rover-exec",
+ "echod-rover-spec",
  "echod-types",
  "serde",
  "serde_json",

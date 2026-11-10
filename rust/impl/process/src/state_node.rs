@@ -39,7 +39,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::store::before;
+use crate::concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::{str_eq, NodeCore};

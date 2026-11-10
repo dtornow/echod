@@ -6,9 +6,10 @@
 
 use vstd::prelude::*;
 
-use echod_concrete::{peek, Doc, Obj, Tags};
+use crate::concrete::{peek, Doc, Obj};
+use echod_types::Tags;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::lemma_obj_view;
+use crate::concrete::document::lemma_obj_view;
 use echod_types::{Request, Response, TaskState};
 
 use crate::verified::node::str_eq;

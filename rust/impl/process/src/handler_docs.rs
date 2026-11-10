@@ -19,7 +19,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use echod_concrete::{clone_doc, doc_len, peek, Doc, Outbound};
+use crate::concrete::{clone_doc, doc_len, peek, Doc, Outbound};
 
 use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequence};
 use crate::verified::node::Key;
@@ -55,7 +55,9 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::PromiseResSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete::node::{notes_v, spec_doc_deadline, spec_origin_map, DocV, NoteV};
+use crate::concrete::document::notes_v;
+#[cfg(verus_keep_ghost)]
+use echod_concrete::node::{spec_doc_deadline, spec_origin_map, DocV, NoteV};
 #[cfg(verus_keep_ghost)]
 use echod_concrete::store::{EtagSpec, StoreCallSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
@@ -290,7 +292,7 @@ pub struct FireCtx {
     pub ws: Working,
     pub row: crate::verified::Schedule,
     pub advanced: Doc,
-    pub pending: echod_concrete::Pending,
+    pub pending: crate::concrete::Pending,
     pub t1: u64,
     pub origin: String,
     pub next: u64,
@@ -516,14 +518,14 @@ pub fn dispatches(doc: &Doc, notes: &Vec<Outbound>) -> (r: Vec<(String, Message)
         let ghost before = out.deep_view();
         proof {
             assert(nv[i as int] == notes@[i as int]@);
-            echod_concrete::lemma_outbound_view(&notes@[i as int]);
+            crate::concrete::document::lemma_outbound_view(&notes@[i as int]);
         }
         match &notes[i] {
             Outbound::Execute { id, version } => {
                 match peek(doc, id) {
                     Some(obj) => {
                         proof {
-                            echod_concrete::lemma_obj_view(&obj);
+                            crate::concrete::document::lemma_obj_view(&obj);
                         }
                         match crate::reason::target_of(&obj.promise.tags) {
                             Some(address) => {
@@ -563,7 +565,7 @@ pub fn is_origin(d: &Doc) -> (r: bool)
         r == (d@ is Origin),
 {
     proof {
-        echod_concrete::lemma_doc_view(d);
+        crate::concrete::document::lemma_doc_view(d);
     }
     match d {
         Doc::Origin(_) => true,
@@ -1127,13 +1129,13 @@ pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: 
     let (call, mode, row_count, bytes) = match cond {
         None => {
             let body = doc::spec_encode(header, c.after);
-            (StoreCallSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, echod_concrete::node::spec_doc_len(c.after) as usize, body.len() as u64)
+            (StoreCallSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, crate::concrete::document::spec_doc_len(c.after) as usize, body.len() as u64)
         },
         Some(etag) => {
             let etag = EtagSpec(etag);
             let (delta, changed) = if idle { doc::spec_encode_delta(header, c.after, c.after) } else { doc::spec_encode_delta(header, c.w.loaded.doc, c.after) };
             let removed = doc::spec_removed_any(c.w.loaded.doc, c.after);
-            let after_len = echod_concrete::node::spec_doc_len(c.after) as usize;
+            let after_len = crate::concrete::document::spec_doc_len(c.after) as usize;
             let stale_after = c.w.loaded.row_count.saturating_add(changed).saturating_sub(after_len);
             let append = !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
             if append {
@@ -1936,7 +1938,7 @@ impl State {
     /// nearest deadline. `fired` is the key whose firing this is.
     pub fn commit_new(&mut self, w: Working, after: Doc, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> (c: Committing)
         ensures
-            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, echod_concrete::node::nat_v(deadline), now, fired.deep_view()),
+            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, crate::concrete::document::nat_v(deadline), now, fired.deep_view()),
     {
         proof {
             reveal(spec_commit_new);

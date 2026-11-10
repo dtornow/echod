@@ -7,8 +7,8 @@ the whole process.
 The server speaks the Resonate protocol, one `POST /` and one envelope. Every
 origin is one document in the bucket, committed with a conditional write;
 deadlines are keys; nodes find each other in the bucket. What the server does
-to a document is `echod_concrete`'s document machine, each step proved to
-compute its specification, and that concrete model is proved to refine the
+to a document is `echod_logic::concrete`'s document machine, each step proved
+to compute `echod_concrete`'s specification, and that model is proved to refine the
 abstract Resonate model. The process around it, `echod_logic`, is proved
 whole: `State::on_event`, the one step of the node — a request, a store
 answer, the heartbeat, the wheel — ensures it computes `spec_on_event`, and
@@ -29,7 +29,7 @@ rust/spec/rover       Rover mathematical state, steps, and refinement
 rust/spec/rover-exec  Rover executable search and verified replay
 rust/spec/abstract    the mathematical Resonate protocol model
 rust/spec/abstract-exec  its executable store, handlers, Rover realization, and history tooling
-rust/spec/concrete    the document machine the process runs, proved; the Rover model and its refinement
+rust/spec/concrete    mathematical concrete document/Rover model and its refinement
 rust/test/runtime     the deterministic effect interpreter
 rust/test/cli         the simulator, the differential, the model driver, the store tests
 lean/src/Rover        the Rover world, for experiment
@@ -39,8 +39,8 @@ examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
 ```
 
-The process's document steps are `rust/spec/concrete`'s, each proved equal to
-its specification; the process itself is proved to compute `spec_on_event`,
+The process's document steps live under `rust/impl/process/src/concrete`,
+each proved equal to `rust/spec/concrete`'s specification; the process itself is proved to compute `spec_on_event`,
 its bookkeeping and the sequence of store calls around each step included.
 Concrete depends on the abstract model; it does not depend on the process.
 What the process assumes — the text of keys, the bytes of documents — is
@@ -56,7 +56,7 @@ cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
 cargo verus verify -p echod-rover-spec -p echod-rover-exec
 cargo verus verify -p echod-abstract-spec -p echod-abstract-exec
-cargo verus verify -p echod-concrete    # the document machine and the refinement, under Verus
+cargo verus verify -p echod-concrete-spec  # the mathematical concrete model and refinement
 cargo verus verify -p echod-process     # State::on_event == spec_on_event, under Verus
 cargo run --release -p echod-sim -- soak --from 1 --seeds 20   # the simulator
 cargo run --release -p echod            # a node on an in-memory store, :8001

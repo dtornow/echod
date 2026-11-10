@@ -1,28 +1,22 @@
-//! The concrete Rover model.
+//! The mathematical concrete Rover model.
+//!
+//! This crate contains mathematical `*V` state, `spec_*` transitions,
+//! passive protocol/store algebra, and the relation, simulation, and
+//! refinement proofs. The sole executable concrete document/store
+//! implementation lives in `echod-process::concrete`.
 //!
 //! A world is the nodes and one store. Each node keeps its own documents
 //! and takes one flight at a time. The abstract model is a separate machine.
-//! This crate does not import its handlers. The document machine of `node.rs`
-//! (`handle`, `run_due`, `sweep`, `create_occurrence`) is the one the process
-//! runs: each is proved equal to its specification here, and the process
-//! wraps it in flights and commits. Refinement of this model to the abstract
-//! one is `simulation`: the relation, the injected call, the observed output,
-//! the shed and the empty heartbeat.
-//!
-//! Each file of the model holds the executable code and, below it, the same
-//! step as a specification (`spec_*`, over the view types `*V`). The proof
-//! files read the specifications.
 //!
 //! ```text
-//! node.rs             one node: its documents, one flight, the handlers, the due step
-//! store.rs            the store: its calls and their answers, one call applied
-//! model.rs            the Rover model: nodes, one store, the initial world, one step
+//! node.rs             document/node state and transitions
+//! store.rs            passive calls/outcomes and the mathematical store step
+//! model.rs            the Rover spec: nodes, one store, the initial world, one step
 //! interpret.rs        the documents read as the abstract store; the promise handlers agree
 //! handlers.rs         the remaining request handlers agree
 //! timers.rs           the due step and the occurrence agree; `lemma_agreement`
 //! relation.rs         the invariant, the simulation relation, and agreement
 //! simulation.rs       the forward simulation and `lemma_refines`
-//! refine.rs           the same statement, for the executable crate
 //! ```
 
 #![cfg_attr(
@@ -39,21 +33,6 @@ pub mod handlers;
 pub mod timers;
 pub mod relation;
 pub mod simulation;
-mod runtime;
 
-#[cfg(not(verus_keep_ghost))]
-pub mod refine;
-
-#[cfg(not(verus_keep_ghost))]
-pub use refine::abstract_model;
-
-pub use echod_types::*;
-pub use model::{Model, Spec};
-#[cfg(verus_keep_ghost)]
-pub use node::{lemma_doc_view, lemma_obj_view, lemma_outbound_view, lemma_pending_view};
-pub use node::{
-    clone_doc, doc_len, empty_origin, empty_schedule, keys_within, same_doc,
-    create_occurrence, doc_deadline, empty_doc, handle, peek, run_due, sweep, Doc, Obj, Objects,
-    Outbound, Pending, Prom, Tk,
-};
-pub use store::{content_etag, fnv1a, Etag, Read, StoreCall, StoreError, StoreOutcome};
+pub use model::Spec;
+pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};

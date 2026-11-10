@@ -2,15 +2,17 @@
 //! flight, and the store's conditional write.
 
 use echod_abstract::{Call, Dispatch, Output};
-use echod_concrete::model::{Fleet, Local, Message, Model, Pid, Store};
-use echod_concrete::{
-    Etag, PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes,
-    PromiseSettleReq, PromiseState, Request, Response, StoreCall, StoreError, StoreOutcome, Value,
+use crate::concrete::model::{Fleet, Local, Message, Model, Pid};
+use crate::concrete::store::Store;
+use crate::concrete::{Etag, StoreCall, StoreError, StoreOutcome};
+use echod_types::{
+    PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes, PromiseSettleReq,
+    PromiseState, Request, Response, Value,
 };
 use echod_rover::rover::comm::ProcessEvent;
 use echod_rover_exec::{Proc as _, ProcResult, Spec as _};
 
-fn node(local: &Local) -> &echod_concrete::model::Node {
+fn node(local: &Local) -> &crate::concrete::document::Node {
     match local {
         Local::Node(node) => node,
         Local::Store(_) => panic!("expected a node"),
@@ -277,7 +279,7 @@ fn a_promise_create_lands_and_the_next_get_reads_it() {
         )] if client == "c" => {
             assert_eq!(
                 body.promise.as_ref().map(|p| p.state),
-                Some(echod_concrete::PromiseState::Pending)
+                Some(echod_types::PromiseState::Pending)
             );
         }
         other => panic!("get reply {other:?}"),

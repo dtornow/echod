@@ -7,14 +7,14 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
+| `rust/impl/process` | `echod-process` (library `echod_logic`): the executable concrete document machine and the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover-spec`: mathematical Rover processes, state, steps, and refinement |
 | `rust/spec/rover-exec` | `echod-rover-exec`: executable search and verified certificate replay |
 | `rust/spec/abstract` | `echod-abstract-spec`: the mathematical Resonate protocol model |
 | `rust/spec/abstract-exec` | `echod-abstract-exec`: executable realization, history translation, and model driving |
-| `rust/spec/concrete` | `echod-concrete`: the catalogue, handler specifications, Rover model (nodes and one store), and its proved refinement to the abstract model |
+| `rust/spec/concrete` | `echod-concrete-spec`: the mathematical catalogue, Rover model, and its proved refinement to the abstract model |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
@@ -27,15 +27,15 @@ on `resonate-core` for the traits and protocol types. Origin:
 The Anvil cluster model and the earlier refinement of the store machine
 against the previous-generation `Model` are not in this tree. Catalogue,
 deadline keys, cache revalidation, and fired occurrences
-are to be restated as Rover concrete theorems. The document machine is
-`rust/spec/concrete`'s, proved equal to its specification there; the process
-runs it.
+are to be restated as Rover concrete theorems. The document machine lives
+under `rust/impl/process/src/concrete`, where it is proved equal to
+`rust/spec/concrete`'s mathematical transitions.
 The sections below that name `echod-system` or `refine/` describe that
 earlier proof.
 
 ## The document machine
 
-`echod_concrete::node` (`rust/spec/concrete/src/node.rs`). A document is
+`echod_logic::concrete::document` (`rust/impl/process/src/concrete/document.rs`). A document is
 `Doc`: an origin's objects, sorted by id, or a schedule. `handle` runs one
 request on it; `run_due` one due step — a promise's timeout, a lease or a
 retry timeout, one callback resumed, one listener told, or a schedule's
@@ -69,7 +69,7 @@ bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
 `clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete` and `-p echod-process` run Verus. Verus pins its own
+-p echod-concrete-spec` and `-p echod-process` run Verus. Verus pins its own
 rustc, so the two are separate toolchains.
 
 ## echod-logic and echod

@@ -37,9 +37,9 @@
 //! `cargo build` compiles the same sources with the ghost code erased.
 //! What is assumed is listed in `verified/mod.rs`.
 //!
-//! The concrete Rover model decides: a request is `echod_concrete::handle`,
-//! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
-//! `create_occurrence`, each proved there to compute its specification.
+//! The local concrete document machine decides a request, sweep, schedule
+//! run, or occurrence. Each executable step is proved here to compute the
+//! mathematical transition in `echod-concrete-spec`.
 //! The handlers turn a document's rows into the model's `Doc`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::
 //! Sequence`, which orders the store calls around it — key, document,
@@ -56,6 +56,7 @@
 // checks that `State::on_event` computes `spec_on_event`.
 pub mod cache;
 pub mod config;
+pub mod concrete;
 pub mod debug;
 pub mod doc;
 pub mod handler;

@@ -11,11 +11,12 @@
 
 use vstd::prelude::*;
 
+use crate::concrete::document::{notes_v, pend_v};
+use crate::concrete::{StoreCall, StoreError, StoreOutcome};
 use echod_concrete::node::{
-    notes_v, pend_v, spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocV,
-    FlightV, JobV, NodeV, NoteV, PendingV,
+    spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocV, FlightV, JobV,
+    NodeV, NoteV, PendingV,
 };
-use echod_concrete::store::{StoreCall, StoreError, StoreOutcome};
 use echod_concrete::model::{Message, Pid};
 use echod_types::Response;
 

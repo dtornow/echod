@@ -3,8 +3,8 @@
 //! removes, and remembers. Each function ensures it computes its `spec_*`,
 //! as does every function of the crate around it, up to `State::on_event`.
 //!
-//! The document machine is `echod_concrete`: `handle`, `sweep`, `run_due`
-//! and `create_occurrence` are proved there to compute `spec_handle`,
+//! The executable document machine is `crate::concrete`: `handle`, `sweep`,
+//! `run_due` and `create_occurrence` are proved here to compute `spec_handle`,
 //! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
 //! concrete Rover model. `doc.rs` turns a document's rows into its `Doc`
 //! and back; the handlers order the store calls around those steps.
@@ -37,7 +37,7 @@
 //! - Strings as characters: `text::strip_prefix`, `text::starts_with`,
 //!   `text::u64_text`, `node::clone_string`, `node::str_eq`.
 //! - Hashing: `node::fnv1a` computes `node_spec::hash`, an uninterpreted
-//!   function of the string; `echod_concrete::content_etag` likewise.
+//!   function of the string; `crate::concrete::content_etag` likewise.
 //! - Copies: `runtime::copy` returns its argument;
 //!   `flight::copy_error` the same for a `StoreError`.
 //! - The store: `StoreOutcome` is what the store answered. Whether S3
