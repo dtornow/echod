@@ -11,7 +11,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
 | `rust/spec/rover` | `echod-rover-spec`: mathematical Rover processes, state, steps, and refinement |
-| `rust/spec/rover-exec` | `echod-rover-exec`: executable search and verified certificate replay |
+| `rust/spec/rover-exec` | `echod-rover-exec`: deterministic execution, bounded search, and verified certificate replay |
 | `rust/spec/abstract` | `echod-rover-abstract-spec` (library `rover_abstract_spec`): the mathematical Resonate protocol model |
 | `rust/spec/abstract-exec` | `echod-rover-abstract-exec` (library `rover_abstract_exec`): executable realization, history translation, and model driving |
 | `rust/spec/concrete` | `echod-rover-concrete-spec` (library `rover_concrete_spec`): the mathematical catalogue, Rover model, and its proved refinement to the abstract model |

@@ -1,7 +1,8 @@
 //! Bounded Rover trace search.
 //!
-//! This module is intentionally not part of the trusted argument. [`check`]
-//! accepts only after [`super::replay`] independently validates the certificate.
+//! This module is intentionally not part of the trusted argument. Its public
+//! checkers accept only after [`super::replay`] independently validates the
+//! certificate.
 
 use super::replay::{Action, Certificate, ReplayState};
 use super::{Proc as ExecProc, Spec as ExecSpec};
@@ -217,7 +218,7 @@ pub fn search<M: ExecSpec>(
 
 /// Search and independently replay. `Some(certificate)` is the acceptance
 /// result covered by [`super::replay`]'s Verus soundness theorem.
-pub fn check<M: ExecSpec>(
+pub fn check_unranked<M: ExecSpec>(
     model: &M,
     config: &<M::Spec as SpecModel>::Config,
     events: &[BoundaryEvent<
@@ -234,7 +235,11 @@ pub fn check<M: ExecSpec>(
     Some(certificate)
 }
 
-pub fn check_guided<M: ExecSpec>(
+/// Bounded guided search followed by independent verified replay.
+///
+/// `Some(certificate)` means valid. `None` means only that this bounded search
+/// did not find a certificate; it is not an invalid verdict.
+pub fn check<M: ExecSpec>(
     model: &M,
     config: &<M::Spec as SpecModel>::Config,
     events: &[BoundaryEvent<
@@ -286,6 +291,9 @@ pub fn check_guided<M: ExecSpec>(
         // Preserve one direct continuation from every candidate before any
         // candidate is allowed to spend the beam on hidden alternatives.
         for (world, certificate) in &frontier {
+            if certificate.len() >= limits.max_steps {
+                continue;
+            }
             let visible = visible_action::<M>(event);
             let mut next = world.clone();
             if next.apply(&visible).is_ok() {
@@ -301,6 +309,9 @@ pub fn check_guided<M: ExecSpec>(
         // injected-only candidate and a few immediate process outcomes.
         if matches!(event, BoundaryEvent::Input { .. }) {
             for (world, certificate) in &direct {
+                if certificate.len() >= limits.max_steps {
+                    continue;
+                }
                 let mut actions = Vec::new();
                 for action in hidden_actions(world, world.now, false) {
                     let mut next = world.clone();
@@ -392,7 +403,8 @@ pub fn check_guided<M: ExecSpec>(
                     next_certificate.push(action);
                     let visible = visible_action::<M>(event);
                     let mut visible_next = next.clone();
-                    if visible_next.apply(&visible).is_ok()
+                    if next_certificate.len() < limits.max_steps
+                        && visible_next.apply(&visible).is_ok()
                         && !advanced.iter().any(|(have, _)|
                             have.same_snapshot(&visible_next))
                     {

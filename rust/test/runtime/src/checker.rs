@@ -23,7 +23,7 @@ use rover_abstract_spec::ServerConfig;
 use rover_abstract_exec::{
     history_rank, history_responses, rover_trace, HistoryEvent, RoverAbstractExec,
 };
-use echod_rover_exec::{check_guided, CheckConfig};
+use echod_rover_exec::{check as check_trace, CheckConfig};
 
 use crate::history::Entry;
 use crate::sim::Sent;
@@ -116,7 +116,7 @@ pub fn check(trace: &Trace, retry_timeout: u64, budget: u64) -> Verdict {
     let expected = history_responses(trace);
     let mut limits = CheckConfig::for_trace_len(events.len());
     limits.max_nodes = budget as usize;
-    match check_guided(
+    match check_trace(
         &RoverAbstractExec,
         &ServerConfig { retry_timeout },
         &events,

@@ -9,8 +9,10 @@ use echod_types::{
     PromiseCreateReq, PromiseGetReq, PromiseRegisterListenerReq, PromiseRes, PromiseSettleReq,
     PromiseState, Request, Response, Value,
 };
-use echod_rover::rover::comm::ProcessEvent;
-use echod_rover_exec::{Proc as _, ProcResult, Spec as _};
+use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
+use echod_rover_exec::{
+    check, exec, replay, Action, CheckConfig, Driver, Proc as _, ProcResult, Spec as _,
+};
 
 fn node(local: &Local) -> &crate::concrete::document::Node {
     match local {
@@ -34,6 +36,112 @@ fn step(
     event: &ProcessEvent<Pid, Message>,
 ) -> Vec<ProcResult<Local>> {
     state.on_event(&Fleet::new(1, true), now, event)
+}
+
+#[test]
+fn concrete_rover_exec_is_deterministic_and_certified() {
+    let config = Fleet::new(1, true);
+    let request = call(
+        7,
+        Request::PromiseGet(PromiseGetReq {
+            id: "a:missing".into(),
+        }),
+    );
+    let run = || {
+        exec(
+            &RoverConcreteExec,
+            &config,
+            5,
+            |driver: Driver<'_, RoverConcreteExec>| match driver.step {
+                0 => Some(Action::Inject {
+                    recipient: Pid::Node(0),
+                    at: 3,
+                    message: Message::Request(request.clone()),
+                }),
+                1 => driver
+                    .internal
+                    .iter()
+                    .find(|action| matches!(
+                        action,
+                        Action::Process {
+                            process: Pid::Node(0),
+                            event: ProcessEvent::Receive {
+                                sender: Pid::Outside,
+                                message: Message::Request(_),
+                            },
+                            ..
+                        }
+                    ))
+                    .cloned(),
+                2 => driver
+                    .internal
+                    .iter()
+                    .find(|action| matches!(
+                        action,
+                        Action::Process {
+                            process: Pid::Store,
+                            event: ProcessEvent::Receive {
+                                sender: Pid::Node(0),
+                                message: Message::StoreReq { .. },
+                            },
+                            ..
+                        }
+                    ))
+                    .cloned(),
+                3 => driver
+                    .internal
+                    .iter()
+                    .find(|action| matches!(
+                        action,
+                        Action::Process {
+                            process: Pid::Node(0),
+                            event: ProcessEvent::Receive {
+                                sender: Pid::Store,
+                                message: Message::StoreReply { .. },
+                            },
+                            ..
+                        }
+                    ))
+                    .cloned(),
+                4 => driver.observe.first().cloned(),
+                _ => None,
+            },
+        )
+        .expect("concrete execution")
+    };
+
+    let first = run();
+    assert_eq!(first, run());
+    assert!(matches!(
+        first.trace.as_slice(),
+        [
+            BoundaryEvent::Input { .. },
+            BoundaryEvent::Output {
+                message: Message::Output(Output::Response { .. }),
+                ..
+            }
+        ]
+    ));
+    assert_eq!(
+        replay(
+            &RoverConcreteExec,
+            &config,
+            &first.trace,
+            &first.certificate,
+        ),
+        Ok(())
+    );
+    // This dev-only round trip checks the concrete spec named by the adapter.
+    // The abstract model has distinct boundary types; relating those traces
+    // belongs to the concrete refinement rather than this execution harness.
+    assert!(check(
+        &RoverConcreteExec,
+        &config,
+        &first.trace,
+        CheckConfig::for_trace_len(first.trace.len()),
+        |_, _, _| 0,
+    )
+    .is_some());
 }
 
 #[test]

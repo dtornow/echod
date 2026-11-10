@@ -156,6 +156,7 @@ Domain-independent formal machinery:
 
 The executable realization of Rover specifications:
 
+- deterministic single-path execution with a strategy-selected action
 - bounded trace and history search
 - certificates and verified replay
 - coverage labels from selected executable outcomes

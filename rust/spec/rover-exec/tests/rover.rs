@@ -3,7 +3,9 @@
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
 use echod_rover::rover::RoverSpec;
 use echod_rover_exec as RoverExec;
-use RoverExec::{check, replay, Action, CheckConfig, ProcResult};
+use RoverExec::{
+    check, check_unranked, exec, replay, Action, CheckConfig, Driver, ExecError, ProcResult,
+};
 use echod_rover::rover::comm::Time;
 use vstd::prelude::View;
 
@@ -62,7 +64,7 @@ impl RoverExec::Proc for CounterState {
                 vec![ProcResult {
                     state: CounterState(next),
                     send: vec![(Pid::Outside, Message::Value(next))],
-                    marks: Vec::new(),
+                    marks: vec!["counter.add"],
                 }]
             }
             _ => Vec::new(),
@@ -137,6 +139,81 @@ fn output(at: Time, value: u64) -> Event {
     }
 }
 
+fn generated_counter_run() -> RoverExec::ExecResult<Pid, Message> {
+    exec(
+        &Counter,
+        &(),
+        4,
+        |driver: Driver<'_, Counter>| match driver.step {
+            0 => Some(Action::Clock { at: 4 }),
+            1 => Some(Action::Inject {
+                recipient: Pid::Service,
+                at: 5,
+                message: Message::Add(3),
+            }),
+            2 => driver.internal.first().cloned(),
+            3 => driver.observe.first().cloned(),
+            _ => None,
+        },
+    )
+    .expect("deterministic execution")
+}
+
+#[test]
+fn exec_is_deterministic_and_round_trips_through_check() {
+    let first = generated_counter_run();
+    let second = generated_counter_run();
+    assert_eq!(first, second);
+    assert_eq!(
+        first.trace,
+        vec![Event::Clock { at: 4 }, input(5, 3), output(5, 3)]
+    );
+    assert_eq!(first.marks.into_iter().collect::<Vec<_>>(), ["counter.add"]);
+    assert_eq!(
+        replay(&Counter, &(), &first.trace, &first.certificate),
+        Ok(())
+    );
+    assert!(check(
+        &Counter,
+        &(),
+        &first.trace,
+        CheckConfig::for_trace_len(first.trace.len()),
+        |_, _, _| 0,
+    )
+    .is_some());
+}
+
+#[test]
+fn generation_and_check_enforce_step_bounds() {
+    assert_eq!(
+        exec(
+            &Counter,
+            &(),
+            0,
+            |_: Driver<'_, Counter>| Some(Action::Clock { at: 1 }),
+        ),
+        Err(ExecError::StepLimit { max_steps: 0 }),
+    );
+
+    let trace = [Event::Clock { at: 1 }];
+    assert!(check(
+        &Counter,
+        &(),
+        &trace,
+        CheckConfig { max_steps: 0, max_nodes: 100 },
+        |_, _, _| 0,
+    )
+    .is_none());
+    assert!(check(
+        &Counter,
+        &(),
+        &trace,
+        CheckConfig { max_steps: 1, max_nodes: 100 },
+        |_, _, _| 0,
+    )
+    .is_some());
+}
+
 #[test]
 fn clock_events_move_time_without_observing_a_process() {
     let trace = [
@@ -144,7 +221,7 @@ fn clock_events_move_time_without_observing_a_process() {
         input(5, 3),
         output(5, 3),
     ];
-    assert!(check(
+    assert!(check_unranked(
         &Counter,
         &(),
         &trace,
@@ -153,7 +230,7 @@ fn clock_events_move_time_without_observing_a_process() {
     .is_some());
 
     let backwards = [Event::Clock { at: 5 }, Event::Clock { at: 4 }];
-    assert!(check(
+    assert!(check_unranked(
         &Counter,
         &(),
         &backwards,
@@ -165,7 +242,7 @@ fn clock_events_move_time_without_observing_a_process() {
 #[test]
 fn check_finds_and_replays_a_valid_trace() {
     let trace = [input(0, 3), output(1, 3)];
-    let certificate = check(
+    let certificate = check_unranked(
         &Counter,
         &(),
         &trace,
@@ -181,7 +258,7 @@ fn check_finds_and_replays_a_valid_trace() {
 #[test]
 fn check_rejects_an_output_the_model_never_sent() {
     let trace = [input(0, 3), output(1, 4)];
-    assert!(check(
+    assert!(check_unranked(
         &Counter,
         &(),
         &trace,
@@ -195,32 +272,32 @@ fn append_only_delivery_can_be_duplicated() {
     // The same injected request is received twice. Receiving never consumes
     // its network envelope, so the two hidden steps produce values 2 and 4.
     let trace = [input(0, 2), output(1, 2), output(2, 4)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 6, max_nodes: 100_000 }).is_some());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 6, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn append_only_output_can_be_observed_twice() {
     let trace = [input(0, 2), output(1, 2), output(2, 2)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_some());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn outputs_can_be_observed_in_a_different_order() {
     let trace = [input(0, 1), input(0, 10), output(1, 11), output(2, 1)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_some());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
 fn replay_rejects_nonmonotone_time() {
     let trace = [input(2, 1), output(1, 1)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 4, max_nodes: 100_000 }).is_none());
 }
 
 #[test]
 fn a_bound_limits_search_without_claiming_invalidity() {
     let trace = [input(0, 3), output(1, 3)];
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 2, max_nodes: 100_000 }).is_none());
-    assert!(check(&Counter, &(), &trace, CheckConfig { max_steps: 3, max_nodes: 100_000 }).is_some());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 2, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&Counter, &(), &trace, CheckConfig { max_steps: 3, max_nodes: 100_000 }).is_some());
 }
 
 #[test]
@@ -265,6 +342,6 @@ fn injection_checks_the_boundary_policy_and_recipient() {
         message: Message::Add(7),
     }];
 
-    assert!(check(&Counter, &(), &noninjectable, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
-    assert!(check(&Counter, &(), &outside, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&Counter, &(), &noninjectable, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&Counter, &(), &outside, CheckConfig { max_steps: 1, max_nodes: 100_000 }).is_none());
 }

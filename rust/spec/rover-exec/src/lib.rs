@@ -6,9 +6,11 @@ use echod_rover::rover::comm::{ProcessEvent, Time};
 use echod_rover::rover::spec::{Proc as SpecProc, Spec as SpecModel};
 
 mod checker;
+mod executor;
 mod replay;
 
-pub use checker::{check, check_guided, search, CheckConfig};
+pub use checker::{check, check_unranked, search, CheckConfig};
+pub use executor::{exec, Driver, ExecError, ExecResult, ModelAction, Strategy};
 pub use replay::{marks, replay, Action, Certificate};
 
 verus! {

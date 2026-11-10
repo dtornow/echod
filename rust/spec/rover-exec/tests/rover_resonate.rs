@@ -1,7 +1,7 @@
 //! The complete standalone Resonate protocol through Rover's world.
 
 use echod_rover::rover::comm::{BoundaryEvent, ProcessEvent};
-use echod_rover_exec::{check, CheckConfig, Spec as _};
+use echod_rover_exec::{check_unranked, CheckConfig, Spec as _};
 use rover_abstract_spec::model::Pid;
 use rover_abstract_spec::types::*;
 use rover_abstract_spec::*;
@@ -118,7 +118,7 @@ fn every_request_family_runs_through_rover() {
     for request in requests {
         let trace = trace_for(vec![request.clone()]);
         assert!(
-            check(&RoverAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
+            check_unranked(&RoverAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 12, max_nodes: 100_000 }).is_some(),
             "Rover rejected {request:?}",
         );
     }
@@ -136,7 +136,7 @@ fn an_unpredicted_response_is_rejected() {
         response: Response::Status(StatusRes { status: 200 }),
     });
 
-    assert!(check(&RoverAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
+    assert!(check_unranked(&RoverAbstractExec, &ServerConfig::default(), &trace, CheckConfig { max_steps: 8, max_nodes: 100_000 }).is_none());
 }
 
 #[test]

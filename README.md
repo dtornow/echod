@@ -26,7 +26,7 @@ rust/impl/process     the pure State::on_event around the concrete document mach
 rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
 rust/spec/rover       Rover mathematical state, steps, and refinement
-rust/spec/rover-exec  Rover executable search and verified replay
+rust/spec/rover-exec  Rover deterministic execution, bounded search, and verified replay
 rust/spec/abstract    the mathematical Resonate protocol model
 rust/spec/abstract-exec  its executable store, handlers, Rover realization, and history tooling
 rust/spec/concrete    mathematical concrete document/Rover model and its refinement

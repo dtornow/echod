@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use echod_rover_exec::{check_guided, marks, CheckConfig};
+use echod_rover_exec::{check as check_trace, marks, CheckConfig};
 use rover_abstract_spec::types::{PromiseRegisterListenerReq, Request, TaskFenceAction};
 use rover_abstract_spec::{Dispatch, ServerConfig};
 use rover_abstract_exec::{
@@ -264,7 +264,7 @@ fn check(model: &ServerConfig, trace: &Trace) -> Outcome {
     let config = ServerConfig { retry_timeout: model.retry_timeout };
     let events = rover_trace(trace);
     let expected = history_responses(trace);
-    match check_guided(
+    match check_trace(
         &RoverAbstractExec,
         &config,
         &events,
