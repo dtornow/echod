@@ -1,0 +1,5 @@
+target/
+store/
+nodes/
+.lein-*
+*.log
