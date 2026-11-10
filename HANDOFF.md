@@ -202,7 +202,9 @@ imports those local executable definitions.
 
 The model-specific proof boundary. It interprets concrete documents as the
 abstract store, proves request and internal-work agreement, defines the
-simulation relation, and exports `lemma_refines`. It depends only on Rover,
+simulation relation, and exports `refinement_claim` and `refinement_proof`.
+The claim is the crate root; all proof machinery is consolidated privately in
+`refinement_proof.rs`. It depends only on Rover,
 the two specification crates, protocol types, and Verus.
 
 ### `test/runtime`
@@ -312,7 +314,8 @@ Rover instantiated with the abstract model
 The statement is `rover_spec::rover::refinement::refines` of
 `echod_concrete_spec::Spec` against
 `echod_abstract_spec::Spec`, exported as
-`echod_refinement::lemma_refines`: every
+`echod_refinement::refinement_claim` and proved by
+`echod_refinement::refinement_proof`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

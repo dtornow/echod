@@ -50,7 +50,7 @@ What the process assumes — the text of keys, the bytes of documents — is
 stated as specifications and listed in `src/verified/mod.rs`; its tests feed
 it events by hand. The runtime performs what it asks. The simulator is the
 evidence. [DESIGN.md](DESIGN.md) is the design; [BACKLOG.md](BACKLOG.md) is
-what is next. Each crate's `lib.rs` opens with a map of its files.
+what is next. Each crate root opens with a map of its files.
 
 ## Build, verify, soak
 

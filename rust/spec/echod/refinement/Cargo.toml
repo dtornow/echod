@@ -7,7 +7,7 @@ license.workspace = true
 
 [lib]
 name = "echod_refinement"
-path = "src/lib.rs"
+path = "src/refinement_claim.rs"
 
 [dependencies]
 echod-types = { path = "../../../comm/types" }

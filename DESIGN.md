@@ -44,9 +44,10 @@ occurrence; `sweep` runs `run_due` until a step changes nothing or a step
 limit is reached; `create_occurrence` births an occurrence in its origin.
 Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
 `spec_sweep`, `spec_occurrence` — and those are the steps of the
-Echod concrete model, which
-`rust/spec/echod/refinement/src/simulation.rs` proves refines the
-abstract one.
+Echod concrete model. `echod_refinement::refinement_claim` states that this
+model refines the abstract one, and
+`echod_refinement::refinement_proof` proves it; the private machinery is
+consolidated in `rust/spec/echod/refinement/src/refinement_proof.rs`.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
 models under `lean/` state it: 18 request handlers, the fence's check with
