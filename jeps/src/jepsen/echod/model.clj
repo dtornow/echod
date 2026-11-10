@@ -9,8 +9,14 @@
   promise as it stands. A task is born at version 0 when the create carries
   `resonate:target`. `acquire` bumps that version. `release` drops the lease
   and keeps the version. `fulfill` and a client `settle` both settle the
-  promise and fulfill the task. `heartbeat` is a lease extension the record
+  promise and fulfill the task.   `heartbeat` is a lease extension the record
   does not show, so it is a legal no-op on the observable state.
+  `halt` parks a task, `continue` offers a halted one again, and `suspend`
+  drops the lease into `suspended`. `task.create` births a targeted promise
+  and acquires it, or acquires one that is still pending, or echoes a
+  fulfilled one. `fence` runs a create of another id in the same origin and
+  leaves this promise where it was. `register_callback` returns the awaited
+  promise. A search is refused with 403 and writes nothing.
 
   Knossos steps an `:ok` op with the server's answer (the request merged
   with `:status`, `:promise`, `:task`). It steps an `:info` op with the
@@ -152,6 +158,14 @@
          (= "pending" (:state t))
          (= (c/n (:version t)) (c/n (:version v))))))
 
+(defn- pending-task?
+  "task.create carries no version. It acquires whatever pending task is there."
+  [p]
+  (let [t (:task p)]
+    (and p t
+         (= "pending" (:state p))
+         (= "pending" (:state t)))))
+
 (defn- held?
   [p v]
   (let [t (:task p)]
@@ -175,6 +189,25 @@
   (assoc p :task {:state "pending"
                   :version (:version (:task p))
                   :pid nil}))
+
+(defn- park
+  "Drop the lease and move the task to `state`. The version stays."
+  [p state]
+  (assoc p :task {:state state
+                  :version (:version (:task p))
+                  :pid nil}))
+
+(defn- can-halt?
+  [p]
+  (let [t (:task p)]
+    (and p t
+         (not (#{"fulfilled" "halted"} (:state t))))))
+
+(defn- can-continue?
+  [p]
+  (and p (:task p)
+       (= "halted" (:state (:task p)))
+       (= "pending" (:state p))))
 
 (defn- same-task
   [have seen]
@@ -345,6 +378,198 @@
     (= 200 (:status v)) m
     :else (bad op (str "heartbeat status " (:status v)))))
 
+(defn- install-acquired
+  "A task.create of a missing id writes the promise and takes the lease.
+  The task is born pending at version 0 and the create acquires it, so the
+  record the client sees is version 1."
+  [v created-at]
+  {:p (install-promise v
+                       {:state "acquired" :version 1 :pid (:pid v)}
+                       created-at
+                       nil)})
+
+(defn- step-task-create
+  [op m v]
+  (let [p (:p m)
+        ok (pending-task? p)
+        fulfilled? (and (:task p) (= "fulfilled" (:state (:task p))))]
+    (cond
+      (not (c/observed? v))
+      (cond
+        (nil? p) (assoc m :p (:p (install-acquired v nil)))
+        ok (assoc m :p (do-acquire p v))
+        :else m)
+
+      (= 422 (:status v))
+      (if (and p (not (c/targeted? p)))
+        m
+        (bad op "task.create 422"))
+
+      (= 409 (:status v))
+      (cond
+        (nil? p) (bad op "task.create 409 of a promise that does not exist")
+        ok (bad op "task.create 409 but the task was pending at that version")
+        fulfilled? (bad op "task.create 409 of a fulfilled task; that is a 200")
+        :else m)
+
+      (= 200 (:status v))
+      (cond
+        (nil? p)
+        (let [born (install-acquired v (c/n (:created-at (:promise v))))
+              pr (:promise v)]
+          (cond
+            (not= 200 (:status v)) born
+            (nil? pr) (bad op "task.create 200 without a promise")
+            (not= "pending" (:state pr)) (bad op (str "task.create born " (:state pr)))
+            (not= (:param v) (:param pr)) (bad op "task.create stored a different param")
+            (not= (c/n (:timeout-at v)) (c/n (:timeout-at pr))) (bad op "task.create stored a different timeout")
+            (not= (c/request-tags v) (c/tags (:tags pr))) (bad op "task.create stored different tags")
+            (not (number? (:created-at pr))) (bad op "task.create returned no created-at")
+            :else
+            (or (check-task op (:task (:p born)) (:task v))
+                (assoc m :p (learn (:p born) pr)))))
+
+        ok
+        (let [p' (do-acquire p v)]
+          (or (check-task op (:task p') (:task v))
+              (observe op (assoc m :p p') (:promise v))))
+
+        fulfilled?
+        (or (check-task op (:task p) (:task v))
+            (observe op m (:promise v)))
+
+        :else (bad op "task.create 200 but the task was not pending or fulfilled"))
+
+      :else (bad op (str "task.create status " (:status v))))))
+
+(defn- step-halt
+  [op m v]
+  (let [p (:p m)]
+    (cond
+      (not (c/observed? v))
+      (if (can-halt? p) (assoc m :p (park p "halted")) m)
+
+      (= 404 (:status v))
+      (if (task-missing? p) m (bad op "halt 404 but a task exists"))
+
+      (= 409 (:status v))
+      (cond
+        (task-missing? p) (bad op "halt 409 but there is no task; that is a 404")
+        (= "fulfilled" (:state (:task p))) m
+        :else (bad op "halt 409 but the task is not fulfilled"))
+
+      (= 200 (:status v))
+      (cond
+        (task-missing? p) (bad op "halt 200 but there is no task")
+        (= "fulfilled" (:state (:task p))) (bad op "halt 200 of a fulfilled task")
+        (= "halted" (:state (:task p))) m
+        :else (assoc m :p (park p "halted")))
+
+      :else (bad op (str "halt status " (:status v))))))
+
+(defn- step-continue
+  [op m v]
+  (let [p (:p m)
+        ok (can-continue? p)]
+    (cond
+      (not (c/observed? v))
+      (if ok (assoc m :p (park p "pending")) m)
+
+      (= 404 (:status v))
+      (if (task-missing? p) m (bad op "continue 404 but a task exists"))
+
+      (= 409 (:status v))
+      (cond
+        (task-missing? p) (bad op "continue 409 but there is no task; that is a 404")
+        ok (bad op "continue 409 but the task was halted and the promise pending")
+        :else m)
+
+      (= 200 (:status v))
+      (if ok
+        (assoc m :p (park p "pending"))
+        (bad op "continue 200 but the task was not halted on a pending promise"))
+
+      :else (bad op (str "continue status " (:status v))))))
+
+(defn- step-suspend
+  "200 drops the lease into `suspended`. 300 means an awaited promise was
+  already settled: the lease stays, and the record we compare does not move.
+  422 means the awaited id is missing or not awaitable, which is another
+  key, so this key's record stays where it was."
+  [op m v]
+  (let [p (:p m)
+        ok (held? p v)]
+    (cond
+      (not (c/observed? v))
+      (if ok (assoc m :p (park p "suspended")) m)
+
+      (= 404 (:status v))
+      (if (task-missing? p) m (bad op "suspend 404 but a task exists"))
+
+      (= 409 (:status v))
+      (cond
+        ok (bad op "suspend 409 but the lease was held")
+        (task-missing? p) (bad op "suspend 409 but there is no task; that is a 404")
+        :else m)
+
+      (= 422 (:status v))
+      (if ok m (bad op "suspend 422 but the lease was not held"))
+
+      (= 300 (:status v))
+      (if ok m (bad op "suspend 300 but the lease was not held"))
+
+      (= 200 (:status v))
+      (if ok
+        (assoc m :p (park p "suspended"))
+        (bad op "suspend 200 but the lease was not held"))
+
+      :else (bad op (str "suspend status " (:status v))))))
+
+(defn- step-fence
+  "A fence that holds the lease creates another id and leaves this promise
+  where it was. The child is not this key."
+  [op m v]
+  (let [p (:p m)
+        ok (held? p v)]
+    (cond
+      (not (c/observed? v)) m
+
+      (= 400 (:status v)) m
+
+      (= 404 (:status v))
+      (if (task-missing? p) m (bad op "fence 404 but a task exists"))
+
+      (= 409 (:status v))
+      (cond
+        ok (bad op "fence 409 but the lease was held")
+        (task-missing? p) (bad op "fence 409 but there is no task; that is a 404")
+        :else m)
+
+      (= 200 (:status v))
+      (if ok m (bad op "fence 200 but the lease was not held"))
+
+      :else (bad op (str "fence status " (:status v))))))
+
+(defn- step-callback
+  "register_callback returns the awaited promise. The callback list is not
+  part of the record. 422 means the awaiter is missing or not targeted."
+  [op m v]
+  (cond
+    (not (c/observed? v)) m
+    (= 400 (:status v)) (bad op "callback 400: the awaiter is this id, or another origin")
+    (= 404 (:status v)) (if (:p m) (bad op "callback 404 for a promise that exists") m)
+    (= 422 (:status v)) (if (:p m) m (bad op "callback 422 for a promise that does not exist"))
+    (= 200 (:status v)) (observe op m (:promise v))
+    :else (bad op (str "callback status " (:status v)))))
+
+(defn- step-search
+  "Search is refused. It is not a read and not a write."
+  [op m v]
+  (cond
+    (not (c/observed? v)) m
+    (= 403 (:status v)) m
+    :else (bad op (str "search status " (:status v)))))
+
 (defrecord PromiseModel [p]
   Model
   (step [this op]
@@ -360,6 +585,13 @@
             :release (step-release op this v)
             :fulfill (step-fulfill op this v)
             :heartbeat (step-heartbeat op this v)
+            :task-create (step-task-create op this v)
+            :halt (step-halt op this v)
+            :continue (step-continue op this v)
+            :suspend (step-suspend op this v)
+            :fence (step-fence op this v)
+            :callback (step-callback op this v)
+            :search (step-search op this v)
             this))))
 
   Object
@@ -458,6 +690,12 @@
               (= 404 (:status v)) (if s (bad op "schedule.delete 404 but it exists") this)
               :else (bad op (str "schedule.delete status " (:status v))))
 
+            :search
+            (cond
+              (not (c/observed? v)) this
+              (= 403 (:status v)) this
+              :else (bad op (str "search status " (:status v))))
+
             this))))
 
   Object
@@ -466,6 +704,22 @@
 (defn schedule
   []
   (ScheduleModel. nil))
+
+(defrecord BrutalModel [p s]
+  Model
+  (step [this op]
+    (if (:schedule? (:value op))
+      (let [n (.step ^Model (ScheduleModel. s) op)]
+        (if (model/inconsistent? n) n (BrutalModel. p (:s n))))
+      (let [n (.step ^Model (PromiseModel. p) op)]
+        (if (model/inconsistent? n) n (BrutalModel. (:p n) s)))))
+  Object
+  (toString [_] (pr-str {:p p :s s})))
+
+(defn brutal
+  "One key is either a promise or a schedule. The op says which."
+  []
+  (BrutalModel. nil nil))
 
 (defn step
   "One transition of a model. An illegal transition is an Inconsistent value."

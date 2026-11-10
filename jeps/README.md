@@ -87,6 +87,13 @@ a timeout is a transition nobody invoked.
 a 503 is `:info`. The call may have committed, and the model tries it both
 ways. The final reads use a long timeout. It is not in `test-all`.
 
+`brutal` sends every method on one history: promise create, get, settle,
+listener, and callback; task create, get, acquire, release, fulfill,
+heartbeat, halt, continue, suspend, and fence; both searches; and, on the
+last quarter of the keys, schedule create, get, delete, and search. A fence
+creates a child id in the same origin, and suspend waits on that child. The
+child is not one of the checked keys. It is not in `test-all`.
+
 Several keys share an origin (`--share`, default 4). The checker still treats
 each promise as its own machine, so a conditional write that clobbers a
 neighbour shows up as that neighbour's history failing to linearize.

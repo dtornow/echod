@@ -68,3 +68,25 @@
     (is (= "0 0 0 1 1 *" (get-in body ["data" "cron"])))
     (is (= "o0:born" (get-in body ["data" "promiseId"])))
     (is (= "http://127.0.0.1:9/" (get-in body ["data" "promiseTags" "resonate:target"])))))
+
+(deftest the-remaining-methods-are-envelopes
+  (let [halt (json/parse-string (wire/encode {:f :halt :value {:id "o0:p0"}} nil))
+        callback (json/parse-string
+                  (wire/encode {:f :callback
+                                :value {:awaited "o0:p0" :awaiter "o0:p1"}}
+                               nil))
+        search (json/parse-string
+                (wire/encode {:f :search :value {:search "task"}} nil))
+        fence (json/parse-string
+               (wire/encode {:f :fence
+                             :value {:id "o0:p0" :version 1 :timeout-at 5000
+                                     :child "o0:c0" :child-param "c"}}
+                            nil))]
+    (is (= "task.halt" (get halt "kind")))
+    (is (= "o0:p0" (get-in halt ["data" "id"])))
+    (is (= "promise.register_callback" (get callback "kind")))
+    (is (= "o0:p1" (get-in callback ["data" "awaiter"])))
+    (is (= "task.search" (get search "kind")))
+    (is (= "task.fence" (get fence "kind")))
+    (is (= "promise.create" (get-in fence ["data" "action" "kind"])))
+    (is (= "o0:c0" (get-in fence ["data" "action" "data" "id"])))))

@@ -48,7 +48,7 @@
 
    [nil "--prefix STRING" "Key prefix. Default is unique per test."]
 
-   [nil "--workload NAME" "promise, task, idempotence, schedule, deadline, or indefinite."
+   [nil "--workload NAME" "promise, task, idempotence, schedule, deadline, indefinite, or brutal."
     :default :promise
     :parse-fn keyword
     :validate [workload/workloads (cli/one-of workload/workloads)]]

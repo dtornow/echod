@@ -287,3 +287,94 @@
                         :value (assoc b :http 200 :status 200 :node "n1" :promise (win "a"))}])]
     (is (false? (:valid? both-win)) (pr-str both-win))
     (is (true? (:valid? one-wins)) (pr-str one-wins))))
+
+(defn- held
+  []
+  (let [m (step (model/promise) :create (target) 200 (seen "pending" nil nil))]
+    (model/step m {:type :ok :f :acquire :process 0
+                   :value {:id id :version 0 :pid "p" :ttl 3600000
+                           :http 200 :status 200 :node "n1"
+                           :promise (seen "pending" nil nil)
+                           :task (task "acquired" 1 "p")}})))
+
+(deftest halt-and-continue-round-trip
+  (let [m (held)
+        m (model/step m {:type :ok :f :halt :process 0
+                         :value {:id id :http 200 :status 200 :node "n1"}})
+        m (model/step m {:type :ok :f :continue :process 0
+                         :value {:id id :http 200 :status 200 :node "n1"}})
+        m (model/step m {:type :ok :f :task-get :process 0
+                         :value {:id id :http 200 :status 200 :node "n1"
+                                 :task (task "pending" 1 nil)}})]
+    (is (not (kmodel/inconsistent? m)))
+    (is (= "pending" (:state (:task (:p m)))))))
+
+(deftest halt-of-a-fulfilled-task-is-409
+  (let [m (held)
+        m (model/step m {:type :ok :f :fulfill :process 0
+                         :value {:id id :version 1 :state "resolved" :value "done"
+                                 :http 200 :status 200 :node "n1"
+                                 :promise (seen "resolved" "done" 2000)}})
+        ok (model/step m {:type :ok :f :halt :process 0
+                          :value {:id id :http 409 :status 409 :node "n1"}})
+        bad (model/step m {:type :ok :f :halt :process 0
+                           :value {:id id :http 200 :status 200 :node "n1"}})]
+    (is (not (kmodel/inconsistent? ok)))
+    (is (kmodel/inconsistent? bad))))
+
+(deftest suspend-and-fence-need-the-lease
+  (let [m (held)
+        suspended (model/step m {:type :ok :f :suspend :process 0
+                                 :value {:id id :version 1 :awaited "o0:c0"
+                                         :http 200 :status 200 :node "n1"}})
+        fenced (model/step m {:type :ok :f :fence :process 0
+                              :value {:id id :version 1 :child "o0:c0"
+                                      :http 200 :status 200 :node "n1"}})
+        bare (step (model/promise) :create (target) 200 (seen "pending" nil nil))
+        no-lease (model/step bare {:type :ok :f :fence :process 0
+                                   :value {:id id :version 0 :child "o0:c0"
+                                           :http 200 :status 200 :node "n1"}})]
+    (is (not (kmodel/inconsistent? suspended)))
+    (is (= "suspended" (:state (:task (:p suspended)))))
+    (is (not (kmodel/inconsistent? fenced)))
+    (is (= "acquired" (:state (:task (:p fenced)))))
+    (is (kmodel/inconsistent? no-lease))))
+
+(deftest task-create-acquires-a-pending-task-without-a-version
+  (let [m (step (model/promise) :create (target) 200 (seen "pending" nil nil))
+        req (assoc (target) :pid "p" :ttl 3600000)
+        m (model/step m {:type :ok :f :task-create :process 0
+                         :value (assoc req :http 200 :status 200 :node "n1"
+                                       :promise (seen "pending" nil nil)
+                                       :task (task "acquired" 1 "p"))})
+        again (model/step m {:type :ok :f :task-create :process 1
+                             :value (assoc req :param "b" :http 409 :status 409 :node "n1")})]
+    (is (not (kmodel/inconsistent? m)))
+    (is (= 1 (:version (:task (:p m)))))
+    (is (not (kmodel/inconsistent? again)))))
+
+(deftest task-create-of-a-fresh-id-acquires-it
+  (let [req (assoc (target) :pid "p" :ttl 3600000)
+        m (model/step (model/promise)
+                      {:type :ok :f :task-create :process 0
+                       :value (assoc req :http 200 :status 200 :node "n1"
+                                     :promise (seen "pending" nil nil)
+                                     :task (task "acquired" 1 "p"))})]
+    (is (not (kmodel/inconsistent? m)))
+    (is (= "acquired" (:state (:task (:p m)))))
+    (is (= 1 (:version (:task (:p m)))))))
+
+(deftest a-callback-is-a-read-and-a-search-is-a-refusal
+  (let [m (created)
+        m (model/step m {:type :ok :f :callback :process 0
+                         :value (assoc (base {}) :awaited id :awaiter "o0:p1"
+                                       :http 200 :status 200 :node "n1"
+                                       :promise (promise-of "pending" nil nil))})
+        m (model/step m {:type :ok :f :search :process 0
+                         :value {:id id :search "promise"
+                                 :http 403 :status 403 :node "n1"}})]
+    (is (not (kmodel/inconsistent? m)))
+    (is (kmodel/inconsistent?
+         (model/step m {:type :ok :f :search :process 0
+                        :value {:id id :search "promise"
+                                :http 200 :status 200 :node "n1"}})))))

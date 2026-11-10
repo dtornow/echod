@@ -358,6 +358,15 @@
         :resumed)
       (catch Exception _ :not-running))))
 
+(defn clear-partition!
+  "Drop any store-port rule a previous fault left in OUTPUT. A fault window
+  can end while a node is still cut, and the next test would then start
+  unable to reach the bucket."
+  [test]
+  (when-not (:local? test)
+    (try (c/su (c/exec :iptables :-F :OUTPUT))
+         (catch Exception _ nil))))
+
 (defn heal!
   "Resume anything frozen and start anything that is not running. `on` is
   `jepsen.control/on-nodes` for a remote test and a local loop otherwise;
@@ -365,6 +374,8 @@
   [test nodes procs backing on]
   (on test nodes
       (fn [test node]
+        (try (clear-partition! test)
+             (catch Exception e (warn e "clear partition" node)))
         (try (resume-node! test node procs)
              (catch Exception e (warn e "resume" node)))
         (when-not (try (alive? test node procs) (catch Exception _ false))
@@ -374,6 +385,7 @@
 (defrecord DB [procs prepared? backing]
   db/DB
   (setup! [_ test node]
+    (try (clear-partition! test) (catch Exception _ nil))
     (locking prepared?
       (when (compare-and-set! prepared? false true)
         (prepare! test backing)))

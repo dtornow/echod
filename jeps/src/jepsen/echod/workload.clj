@@ -17,7 +17,7 @@
 
 (def workloads
   "Workloads a single test can name."
-  #{:promise :task :idempotence :schedule :deadline :indefinite})
+  #{:promise :task :idempotence :schedule :deadline :indefinite :brutal})
 
 (def suite-workloads
   "What `test-all` runs. Indefinite is opt-in: it shortens the client
@@ -322,10 +322,172 @@
   [opts]
   (assoc (promise opts) :client-timeout 50))
 
+;; ---------------------------------------------------------------------------
+;; brutal: every method, promise and schedule keys together
+;; ---------------------------------------------------------------------------
+
+(defn- schedule-key?
+  "The last quarter of the keys are schedules. The rest are promises, and
+  each of those origins is a whole group, so a callback's awaiter is a
+  promise this test also creates."
+  [opts k]
+  (>= (long k) (long (quot (* 3 (long (:key-count opts 40))) 4))))
+
+(defn- brutal-keys
+  "Schedule keys first, so a thread group creates and deletes them before
+  the promise keys fill the rest of the run. The key list is visited in
+  order, and a key that starts late otherwise never runs."
+  [opts]
+  (let [n (long (:key-count opts 40))
+        sched (filterv #(schedule-key? opts %) (range n))
+        prom (filterv #(not (schedule-key? opts %)) (range n))]
+    (concat (take 8 sched) prom (drop 8 sched))))
+
+(defn- child-id
+  "A promise in this key's origin that no generator settles. A fence creates
+  it and a suspend waits on it, so the suspend is not woken by another key."
+  [opts k]
+  (let [id (c/promise-id opts k)
+        colon (.indexOf ^String id ":")]
+    (str (subs id 0 colon) ":c" k)))
+
+(defn- sibling-id
+  "Another promise key in the same origin. A callback's awaiter has to be a
+  targeted promise, and it cannot be the awaited id."
+  [opts k]
+  (let [share (long (:share opts 4))
+        origin (quot (long k) share)
+        mates (vec (filter (fn [i]
+                             (and (= origin (quot (long i) share))
+                                  (not (schedule-key? opts i))))
+                           (range (long (:key-count opts 40)))))
+        mates (if (seq mates) mates [k])
+        i (.indexOf ^java.util.List mates (long k))
+        i (if (neg? i) 0 i)]
+    (c/promise-id opts (nth mates (mod (inc i) (count mates))))))
+
+(defn- brutal-task-op
+  [opts versions k id pid]
+  (let [v (long (or (get @versions k) 0))
+        state (settle-state)
+        timeout (later (:promise-timeout-ms opts 3600000))]
+    (rand-nth
+     [{:f :create :value (task-create opts k id)}
+      {:f :create :value (assoc (task-create opts k id)
+                                :param (str "b" k)
+                                :timeout-at (+ timeout 50))}
+      {:f :task-create :value (assoc (task-create opts k id) :pid pid :ttl 3600000)}
+      {:f :get :value {:id id}}
+      {:f :task-get :value {:id id}}
+      {:f :listen :value {:id id}}
+      {:f :settle :value {:id id :state state :value (str "s" k)}}
+      {:f :callback :value {:id id :awaited id :awaiter (sibling-id opts k)}}
+      {:f :acquire :value {:id id :version v :pid pid :ttl 3600000}}
+      {:f :release :value {:id id :version v}}
+      {:f :fulfill :value {:id id :version v :state state :value (str "f" k)}}
+      {:f :heartbeat :value {:id id :version v :pid pid}}
+      {:f :halt :value {:id id}}
+      {:f :continue :value {:id id}}
+      {:f :fence :value {:id id
+                         :version v
+                         :timeout-at timeout
+                         :child (child-id opts k)
+                         :child-param (str "c" k)}}
+      {:f :suspend :value {:id id :version v :awaited (child-id opts k)}}
+      {:f :search :value {:id id :search "promise"}}
+      {:f :search :value {:id id :search "task"}}])))
+
+(defn- scripted
+  "The first ops on a key, in order, then the random mix. One thread on the
+  key makes the order real: task.create leaves the lease held, so the fence
+  and the suspend that follow can succeed, and halt then continue."
+  [script then]
+  (let [left (atom script)]
+    (fn []
+      (if-let [op (first @left)]
+        (do (swap! left rest) (op))
+        (then)))))
+
+(defn brutal-client
+  [opts versions]
+  (ind/concurrent-generator
+   (long (:key-concurrency opts 2))
+   (brutal-keys opts)
+   (fn [k]
+     (if (schedule-key? opts k)
+       (let [id (c/schedule-id k)
+             a {:id id
+                :schedule? true
+                :cron "0 0 0 1 1 *"
+                :promise-id (str "o" k ":born")
+                :promise-timeout 60000
+                :param (str "a" k)
+                :tags (schedule-tags)}
+             b (assoc a :param (str "b" k))
+             once (fn [v] (fn [] v))]
+         (gen/limit (long (:ops-per-key opts 20))
+                    (scripted
+                     [(once {:f :create :value a})
+                      (once {:f :get :value {:id id :schedule? true}})
+                      (once {:f :delete :value {:id id :schedule? true}})
+                      (once {:f :create :value b})
+                      (once {:f :search :value {:id id :schedule? true :search "schedule"}})]
+                     (fn []
+                       (rand-nth [{:f :create :value a}
+                                  {:f :create :value b}
+                                  {:f :get :value {:id id :schedule? true}}
+                                  {:f :delete :value {:id id :schedule? true}}
+                                  {:f :search :value {:id id :schedule? true :search "schedule"}}])))))
+       (let [id (c/promise-id opts k)
+             pid (str "pid-" k)
+             hold (fn [f]
+                    (fn []
+                      (let [v (long (or (get @versions k) 0))
+                            timeout (later (:promise-timeout-ms opts 3600000))]
+                        (case f
+                          :task-create {:f :task-create :value (assoc (task-create opts k id) :pid pid :ttl 3600000)}
+                          :create {:f :create :value (task-create opts k id)}
+                          :fence {:f :fence :value {:id id :version v :timeout-at timeout
+                                                    :child (child-id opts k) :child-param (str "c" k)}}
+                          :suspend {:f :suspend :value {:id id :version v :awaited (child-id opts k)}}
+                          :halt {:f :halt :value {:id id}}
+                          :continue {:f :continue :value {:id id}}))))]
+         (gen/limit (long (:ops-per-key opts 20))
+                    (scripted
+                     [(hold :task-create) (hold :create) (hold :fence) (hold :suspend)
+                      (hold :halt) (hold :continue)]
+                     (fn [] (brutal-task-op opts versions k id pid)))))))))
+
+(defn brutal-final
+  [opts]
+  (gen/mix
+   (mapv (fn [k]
+           (if (schedule-key? opts k)
+             {:f :get
+              :value (ind/tuple k {:id (c/schedule-id k) :schedule? true :final? true})}
+             {:f :get
+              :value (ind/tuple k {:id (c/promise-id opts k) :final? true})}))
+         (range (long (:key-count opts 40))))))
+
+(defn brutal
+  [opts]
+  (let [versions (atom {})]
+    {:client (client/client versions)
+     :client-gen (brutal-client opts versions)
+     :final-gen (brutal-final opts)
+     :checker (checker/suite
+               {:model (model/brutal)
+                :required [:create :get :settle :listen :callback
+                           :task-create :acquire :release :fulfill :heartbeat
+                           :task-get :halt :continue :suspend :fence :delete]
+                :claim-text checker/linear-claim
+                :timeout-ms (:checker-timeout opts 30000)})}))
+
 (def by-name
   {:promise promise
    :task task
    :idempotence idempotence
    :schedule schedule
    :deadline deadline
-   :indefinite indefinite})
+   :indefinite indefinite
+   :brutal brutal})

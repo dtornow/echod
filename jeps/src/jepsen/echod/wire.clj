@@ -102,6 +102,29 @@
       :fulfill ["task.fulfill" (fulfill-data v)]
       :heartbeat ["task.heartbeat" (heartbeat-data v)]
       :task-get ["task.get" (id-data v)]
+      :callback ["promise.register_callback" {:awaited (:awaited v) :awaiter (:awaiter v)}]
+      :task-create ["task.create" {:pid (:pid v)
+                                   :ttl (c/n (:ttl v))
+                                   :action {:kind "promise.create"
+                                            :head {}
+                                            :data (create-data v)}}]
+      :halt ["task.halt" (id-data v)]
+      :continue ["task.continue" (id-data v)]
+      :suspend ["task.suspend" {:id (:id v)
+                                :version (c/n (:version v))
+                                :actions [{:kind "promise.register_callback"
+                                           :head {}
+                                           :data {:awaited (:awaited v)
+                                                  :awaiter (:id v)}}]}]
+      :fence ["task.fence" {:id (:id v)
+                            :version (c/n (:version v))
+                            :action {:kind "promise.create"
+                                     :head {}
+                                     :data (create-data {:id (:child v)
+                                                         :timeout-at (:timeout-at v)
+                                                         :param (:child-param v)
+                                                         :tags {"resonate:scope" "global"}})}}]
+      :search [(str (:search v) ".search") {}]
       nil))))
 
 (defn encode
