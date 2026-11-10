@@ -15,7 +15,7 @@ durable executions in V8. Built inside out, from the stored data up.
 | `rust/spec/echod/abstract/spec` | `echod-abstract-spec` (library `echod_abstract_spec`): the mathematical Resonate protocol model |
 | `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization, history translation, and model driving |
 | `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue and Echod concrete model |
-| `rust/spec/echod/concrete/refinement` | `echod-concrete-refinement` (library `echod_concrete_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
+| `rust/spec/echod/refinement` | `echod-refinement` (library `echod_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
 | `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
@@ -45,7 +45,7 @@ limit is reached; `create_occurrence` births an occurrence in its origin.
 Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
 `spec_sweep`, `spec_occurrence` — and those are the steps of the
 Echod concrete model, which
-`rust/spec/echod/concrete/refinement/src/simulation.rs` proves refines the
+`rust/spec/echod/refinement/src/simulation.rs` proves refines the
 abstract one.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
@@ -72,7 +72,7 @@ bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
 `clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete-spec -p echod-concrete-refinement` and
+-p echod-concrete-spec -p echod-refinement` and
 `-p echod-process` run Verus. Verus pins its own
 rustc, so the two are separate toolchains.
 

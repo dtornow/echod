@@ -87,9 +87,9 @@ echod/
 │       ├── abstract/
 │       │   ├── spec/     # independent Resonate model and properties
 │       │   └── exec/     # executable realization and history tooling
-│       └── concrete/
-│           ├── spec/     # mathematical concrete state and transitions
-│           └── refinement/ # interpretation, relation, simulation proof
+│       ├── concrete/
+│       │   └── spec/     # mathematical concrete state and transitions
+│       └── refinement/   # interpretation, relation, simulation proof
 │
 ├── test/
 │   ├── runtime/          # synchronous deterministic Effect interpreter
@@ -110,7 +110,7 @@ should avoid the reserved keyword:
 echod-abstract-spec  -> echod_abstract_spec
 echod-abstract-exec  -> echod_abstract_exec
 echod-concrete-spec  -> echod_concrete_spec
-echod-concrete-refinement -> echod_concrete_refinement
+echod-refinement     -> echod_refinement
 ```
 
 ## Layer responsibilities
@@ -198,7 +198,7 @@ Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
 exec-to-spec proofs live under `impl/process/src/concrete`; production code
 imports those local executable definitions.
 
-### `spec/echod/concrete/refinement`
+### `spec/echod/refinement`
 
 The model-specific proof boundary. It interprets concrete documents as the
 abstract store, proves request and internal-work agreement, defines the
@@ -231,7 +231,7 @@ remains the primary simulator.
 spec/rover/spec ---> spec/echod/abstract/spec ---> spec/echod/concrete/spec ---> impl/process ---> impl/runtime ---> impl/cli
       |               |                              |
       v               v                              v
-spec/rover/exec --> spec/echod/abstract/exec     spec/echod/concrete/refinement
+spec/rover/exec --> spec/echod/abstract/exec     spec/echod/refinement
                        |                              ^
                        +------------------------------+
 
@@ -305,14 +305,14 @@ impl/process::State::on_event
 spec/echod/concrete/spec::spec_logic_on_event
     which is the node step of
 Rover instantiated with the concrete model
-    is proved by spec/echod/concrete/refinement to refine
+    is proved by spec/echod/refinement to refine
 Rover instantiated with the abstract model
 ```
 
 The statement is `rover_spec::rover::refinement::refines` of
 `echod_concrete_spec::Spec` against
 `echod_abstract_spec::Spec`, exported as
-`echod_concrete_refinement::lemma_refines`: every
+`echod_refinement::lemma_refines`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,

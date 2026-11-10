@@ -101,7 +101,7 @@ shows the panels with data.
   it commits too.
 
 - **Echod concrete refinement.** `rust/spec/echod/concrete/spec` holds the
-  concrete semantics, and `rust/spec/echod/concrete/refinement` holds the
+  concrete semantics, and `rust/spec/echod/refinement` holds the
   verified interpretation, relation, and forward simulation. The kernel is
   proved equal to the concrete semantics. The earlier `concrete_refines_abstract` against
   the previous-generation `Model` left with `refine/`. What it established, and what

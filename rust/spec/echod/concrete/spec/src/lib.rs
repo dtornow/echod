@@ -3,7 +3,7 @@
 //! This crate contains mathematical `*V` state, `spec_*` transitions,
 //! passive protocol/store algebra, and its Rover adapter. The verified
 //! concrete-to-abstract interpretation and simulation live in
-//! `echod-concrete-refinement`. The sole executable concrete document/store
+//! `echod-refinement`. The sole executable concrete document/store
 //! implementation lives in `echod-process::concrete`.
 //! `echod-abstract-spec` remains a semantic dependency because the concrete
 //! Rover boundary uses its `Call`/`Output`/`Dispatch` protocol types and

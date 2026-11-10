@@ -1114,19 +1114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-concrete-refinement"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-spec",
- "echod-concrete-spec",
- "echod-types",
- "rover-spec",
- "verus_builtin",
- "verus_builtin_macros",
- "vstd",
-]
-
-[[package]]
 name = "echod-concrete-spec"
 version = "0.1.0"
 dependencies = [
@@ -1188,6 +1175,19 @@ dependencies = [
  "rover-spec",
  "serde",
  "serde_json",
+ "verus_builtin",
+ "verus_builtin_macros",
+ "vstd",
+]
+
+[[package]]
+name = "echod-refinement"
+version = "0.1.0"
+dependencies = [
+ "echod-abstract-spec",
+ "echod-concrete-spec",
+ "echod-types",
+ "rover-spec",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",

@@ -1,19 +1,19 @@
 [package]
-name = "echod-concrete-refinement"
+name = "echod-refinement"
 description = "Verified refinement from the Echod concrete model to the abstract specification."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "echod_concrete_refinement"
+name = "echod_refinement"
 path = "src/lib.rs"
 
 [dependencies]
-echod-types = { path = "../../../../comm/types" }
-rover-spec = { path = "../../../rover/spec" }
-echod-abstract-spec = { path = "../../abstract/spec" }
-echod-concrete-spec = { path = "../spec" }
+echod-types = { path = "../../../comm/types" }
+rover-spec = { path = "../../rover/spec" }
+echod-abstract-spec = { path = "../abstract/spec" }
+echod-concrete-spec = { path = "../concrete/spec" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"
