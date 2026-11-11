@@ -72,10 +72,11 @@ executable code alone.
 ## Development boxes
 
 The `box` binary opens the current directory at `/workspace` in an ephemeral
-Docker container. If the directory contains `box.nix`, `box` enters it with
-`nix-shell`; otherwise it opens Bash directly. The working directory is
-mounted read-write, while everything else in the container is discarded on
-exit.
+Docker container. It first applies `~/.box/.box.nix`, when present, and then
+the current directory's `box.nix`, using nested `nix-shell` environments
+before opening Bash. The global `~/.box` directory is mounted read-only; the
+working directory is mounted read-write, while everything else in the
+container is discarded on exit.
 
 ```sh
 cargo install --path rust/impl/box

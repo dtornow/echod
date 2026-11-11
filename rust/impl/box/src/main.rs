@@ -1,12 +1,13 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::Parser;
 
 const WORKSPACE: &str = "/workspace";
+const GLOBAL_CONFIG: &str = "/box/.box.nix";
 
 /// Start an ephemeral development box in the current directory.
 #[derive(Debug, Parser)]
@@ -36,7 +37,14 @@ fn main() -> ExitCode {
     };
 
     let terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
-    let args = docker_args(&directory, &cli.image, &cli.command, terminal);
+    let global_config = global_config_dir();
+    let args = docker_args(
+        &directory,
+        global_config.as_deref(),
+        &cli.image,
+        &cli.command,
+        terminal,
+    );
     match Command::new(&cli.runtime).args(args).status() {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(1, 255) as u8),
@@ -52,6 +60,7 @@ fn main() -> ExitCode {
 
 fn docker_args(
     directory: &Path,
+    global_config: Option<&Path>,
     image: &OsStr,
     command: &[String],
     terminal: bool,
@@ -65,42 +74,57 @@ fn docker_args(
         "--workdir".into(),
         WORKSPACE.into(),
         "--volume".into(),
-        volume_mount(directory),
+        volume_mount(directory, WORKSPACE, false),
+    ]);
+    if let Some(config) = global_config {
+        args.extend(["--volume".into(), volume_mount(config, "/box", true)]);
+    }
+    args.extend([
         "--entrypoint".into(),
         "/bin/sh".into(),
         image.into(),
         "-c".into(),
-        startup_script(command).into(),
+        startup_script(
+            global_config.is_some(),
+            directory.join("box.nix").is_file(),
+            command,
+        )
+        .into(),
     ]);
     args
 }
 
-fn volume_mount(directory: &Path) -> OsString {
-    let mut mount = directory.as_os_str().to_owned();
-    mount.push(format!(":{WORKSPACE}"));
+fn global_config_dir() -> Option<PathBuf> {
+    let directory = PathBuf::from(env::var_os("HOME")?).join(".box");
+    directory.join(".box.nix").is_file().then_some(directory)
+}
+
+fn volume_mount(source: &Path, target: &str, read_only: bool) -> OsString {
+    let mut mount = source.as_os_str().to_owned();
+    mount.push(format!(":{target}"));
+    if read_only {
+        mount.push(":ro");
+    }
     mount
 }
 
-fn startup_script(command: &[String]) -> String {
-    if command.is_empty() {
-        return format!(
-            "if [ -f {WORKSPACE}/box.nix ]; then\n\
-             \texec nix-shell {WORKSPACE}/box.nix\n\
-             else\n\
-             \texec bash -l\n\
-             fi"
-        );
+fn startup_script(global: bool, project: bool, args: &[String]) -> String {
+    let mut command = if args.is_empty() {
+        "exec bash -i".into()
+    } else {
+        format!("exec {}", shell_join(args))
+    };
+    let mut configs = Vec::new();
+    if global {
+        configs.push(GLOBAL_CONFIG);
     }
-
-    let command = shell_join(command);
-    let nix_command = shell_quote(&format!("exec {command}"));
-    format!(
-        "if [ -f {WORKSPACE}/box.nix ]; then\n\
-         \texec nix-shell {WORKSPACE}/box.nix --run {nix_command}\n\
-         else\n\
-         \texec {command}\n\
-         fi"
-    )
+    if project {
+        configs.push("/workspace/box.nix");
+    }
+    for config in configs.into_iter().rev() {
+        command = format!("exec nix-shell {config} --run {}", shell_quote(&command));
+    }
+    command
 }
 
 fn shell_join(args: &[String]) -> String {
@@ -129,28 +153,41 @@ mod tests {
     }
 
     #[test]
-    fn opens_nix_shell_when_box_file_exists() {
-        let script = startup_script(&[]);
-        assert!(script.contains("if [ -f /workspace/box.nix ]"));
-        assert!(script.contains("exec nix-shell /workspace/box.nix"));
-        assert!(script.contains("exec bash -l"));
+    fn applies_global_then_project_config_before_shell() {
+        let script = startup_script(true, true, &[]);
+        let project = format!(
+            "exec nix-shell /workspace/box.nix --run {}",
+            shell_quote("exec bash -i")
+        );
+        assert_eq!(
+            script,
+            format!(
+                "exec nix-shell /box/.box.nix --run {}",
+                shell_quote(&project)
+            )
+        );
     }
 
     #[test]
     fn runs_commands_inside_or_outside_nix_shell() {
-        let script = startup_script(&["printf".into(), "%s\n".into(), "hello; echo unsafe".into()]);
+        let args = ["printf".into(), "%s\n".into(), "hello; echo unsafe".into()];
+        let script = startup_script(false, true, &args);
         let run = "'printf' '%s\n' 'hello; echo unsafe'";
-        assert!(script.contains(&format!(
-            "exec nix-shell /workspace/box.nix --run {}",
-            shell_quote(&format!("exec {run}"))
-        )));
-        assert!(script.contains("exec 'printf' '%s\n' 'hello; echo unsafe'"));
+        assert_eq!(
+            script,
+            format!(
+                "exec nix-shell /workspace/box.nix --run {}",
+                shell_quote(&format!("exec {run}"))
+            )
+        );
+        assert_eq!(startup_script(false, false, &args), format!("exec {run}"));
     }
 
     #[test]
     fn creates_an_ephemeral_attached_container() {
         let args = docker_args(
             Path::new("/tmp/my project"),
+            Some(Path::new("/home/me/.box")),
             OsStr::new("nixos/nix:test"),
             &[],
             true,
@@ -171,9 +208,10 @@ mod tests {
                 "--workdir"
             ]
         );
+        assert!(strings.contains(&"/tmp/my project:/workspace".into()));
         assert!(strings
             .windows(2)
-            .any(|pair| pair == ["/tmp/my project:/workspace", "--entrypoint"]));
+            .any(|pair| pair == ["/home/me/.box:/box:ro", "--entrypoint"]));
         assert!(strings
             .windows(2)
             .any(|pair| pair == ["/bin/sh", "nixos/nix:test"]));
