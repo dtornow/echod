@@ -168,6 +168,8 @@ The executable realization of Rover specifications:
 The independent mathematical Resonate model. It owns the protocol transition
 functions, mathematical state, and conformance properties meaningful under
 Rover semantics. It contains no executable store, handlers, or Rover process.
+`property_claim.rs` keeps every named protocol property and the aggregate
+preservation claim; `property_proof.rs` contains the machine-checked proof.
 
 It must not import `impl/process`, `spec/echod/concrete/spec`, or `impl/runtime`.
 
@@ -189,6 +191,7 @@ and not a dependent of the process:
   nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
 - the Rover adapter over those concrete semantics
+- `property_claim.rs` for concrete integrity and `property_proof.rs` for its proof
 
 The dependency on `echod-abstract-spec` is semantic rather than a refinement
 proof dependency: concrete network messages use the shared

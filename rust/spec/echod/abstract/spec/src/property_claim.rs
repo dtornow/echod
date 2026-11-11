@@ -1,4 +1,4 @@
-//! Resonate conformance properties over Rover's abstract state.
+//! Resonate conformance property claims over Rover's abstract state.
 //!
 //! Upstream's catalogue has 93 entries. 82 are directly expressible against
 //! Rover's server state (38 state and 44 transition properties). The remaining
@@ -18,8 +18,7 @@
 //! while algebraic properties are equations between `on_event` compositions.
 //!
 //! The predicates below retain upstream names wherever their meaning survives.
-//! `on_event_preserves_catalogue` is the explicit, unassumed preservation
-//! obligation while handler proofs are ported.
+//! Proof code lives in `property_proof.rs`; this module contains claims only.
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
@@ -233,6 +232,15 @@ pub open spec fn well_formed_task_acquired_version_positive_at(
     task.state != TaskState::Acquired || task.version > 0
 }
 
+/// Tasks are created only as the runnable half of a promise object.
+pub open spec fn well_formed_task_has_matching_promise(
+    _now: Time,
+    state: Proc,
+) -> bool {
+    forall|id: Chars| state.store.tasks.contains_key(id) ==>
+        state.store.promises.contains_key(id)
+}
+
 pub open spec fn well_formed_schedule_created_at_lte_next_run_at_at(
     schedule: ScheduleV,
 ) -> bool {
@@ -267,7 +275,7 @@ pub open spec fn well_formed_store_schedule_ids_unique(_state: Proc) -> bool {
     true
 }
 
-pub open spec fn state_catalogue(now: Time, state: Proc) -> bool {
+pub open spec fn state_properties(now: Time, state: Proc) -> bool {
     &&& well_formed_promise_created_at_lte_timeout_at(now, state)
     &&& well_formed_promise_settled_at_lte_timeout_at(now, state)
     &&& well_formed_promise_created_at_lte_settled_at(now, state)
@@ -332,6 +340,7 @@ pub open spec fn state_catalogue(now: Time, state: Proc) -> bool {
         well_formed_task_resumes_unique_at(state.store.tasks[id])
     &&& forall|id: Chars| state.store.tasks.contains_key(id) ==>
         well_formed_task_acquired_version_positive_at(state.store.tasks[id])
+    &&& well_formed_task_has_matching_promise(now, state)
     &&& forall|id: Chars| state.store.schedules.contains_key(id) ==>
         well_formed_schedule_created_at_lte_next_run_at_at(
             state.store.schedules[id],
@@ -487,7 +496,7 @@ pub open spec fn monotone_promise_listeners_while_pending(
         ==> after.store.promises[id].listeners.contains(listener)
 }
 
-pub open spec fn transition_catalogue(
+pub open spec fn transition_properties(
     now: Time,
     before: Proc,
     after: Proc,
@@ -504,33 +513,41 @@ pub open spec fn transition_catalogue(
     &&& monotone_promise_listeners_while_pending(now, before, after)
 }
 
-pub open spec fn step_catalogue(
+pub open spec fn step_properties(
     now: Time,
     before: Proc,
     event: ProcessEvent<Pid, Message>,
     outcome: StepResultV<Proc, Pid, Message>,
 ) -> bool {
-    &&& state_catalogue(now, outcome.state)
-    &&& transition_catalogue(now, before, outcome.state)
+    &&& state_properties(now, outcome.state)
+    &&& transition_properties(now, before, outcome.state)
 }
 
 // ---------------------------------------------------------------------------
 // Preservation obligation
 // ---------------------------------------------------------------------------
 
-/// The exact obligation every allowed `on_event` outcome must discharge.
-pub open spec fn on_event_preserves_catalogue(config: Config) -> bool {
-    forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|
-        #![trigger before.on_event(config, now, event)[i]]
-        state_catalogue(now, before)
-        && 0 <= i
-        && i < before.on_event(config, now, event).len()
-        ==> step_catalogue(
-            now,
-            before,
-            event,
-            before.on_event(config, now, event)[i],
-        )
+/// The initial process is well formed, and every legal local process outcome
+/// preserves all state and transition properties.
+pub open spec fn property_claim(config: Config) -> bool {
+    &&& state_properties(
+        0,
+        Proc {
+            store: super::rover::empty_store(),
+            pending: Seq::empty(),
+        },
+    )
+    &&& forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|
+            #![trigger before.on_event(config, now, event)[i]]
+            state_properties(now, before)
+            && 0 <= i
+            && i < before.on_event(config, now, event).len()
+            ==> step_properties(
+                now,
+                before,
+                event,
+                before.on_event(config, now, event)[i],
+            )
 }
 
 } // verus!

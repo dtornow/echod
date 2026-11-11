@@ -17,6 +17,8 @@
 //! node.rs             document/node state and transitions
 //! store.rs            passive calls/outcomes and the mathematical store step
 //! model.rs            the Rover spec: nodes, one store, the initial world, one step
+//! property_claim.rs   concrete integrity statements
+//! property_proof.rs   their machine-checked proofs
 //! ```
 
 #![cfg_attr(
@@ -28,6 +30,11 @@
 pub mod node;
 pub mod store;
 pub mod model;
+pub mod property_claim;
+#[cfg(verus_keep_ghost)]
+mod property_proof;
 
 pub use model::{Config, Proc, Spec};
 pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+#[cfg(verus_keep_ghost)]
+pub use property_proof::property_proof;
