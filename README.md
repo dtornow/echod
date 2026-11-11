@@ -25,6 +25,7 @@ whole to the Resonate model under crashes, outages and lost acks.
 rust/impl/process     the pure State::on_event around the concrete document machine, proved to compute spec_on_event
 rust/impl/runtime     the production effect interpreter: store, clock, HTTP
 rust/impl/cli         the echod binary
+rust/impl/box         the box binary: an ephemeral Docker terminal configured by box.nix
 rust/spec/rover       the Rover world, replay, and refinement theorem
 rust/spec/abstract    the Resonate protocol as a Rover model
 rust/spec/concrete    the document machine the process runs, proved; the Rover model and its refinement
@@ -67,3 +68,30 @@ and echod in debug mode and drives both over HTTP. The model driver is
 `cargo verus` wants a Verus release (`cargo-verus`, `verus`, z3) on the
 path. `cargo build` is the other compiler for the same sources: it sees the
 executable code alone.
+
+## Development boxes
+
+The `box` binary opens the current directory at `/workspace` in an ephemeral
+Docker container. If the directory contains `box.nix`, `box` enters it with
+`nix-shell`; otherwise it opens Bash directly. The working directory is
+mounted read-write, while everything else in the container is discarded on
+exit.
+
+```sh
+cargo install --path rust/impl/box
+box
+box -- cargo test
+```
+
+`box.nix` is a normal Nix shell expression:
+
+```nix
+{ pkgs ? import <nixpkgs> {} }:
+pkgs.mkShell {
+  packages = with pkgs; [ git rustc cargo ];
+}
+```
+
+Docker and network access to pull `nixos/nix:latest` are required. Override
+the runtime or image with `--runtime` / `BOX_RUNTIME` and `--image` /
+`BOX_IMAGE`; for example, `BOX_RUNTIME=podman box`.

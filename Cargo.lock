@@ -1102,6 +1102,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "echod-box"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "echod-concrete"
 version = "0.1.0"
 dependencies = [

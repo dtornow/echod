@@ -1,0 +1,13 @@
+[package]
+name = "echod-box"
+description = "An ephemeral Docker development box with optional Nix setup."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "box"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }

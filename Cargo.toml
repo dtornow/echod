@@ -4,6 +4,7 @@ members = [
   "rust/impl/process",
   "rust/impl/runtime",
   "rust/impl/cli",
+  "rust/impl/box",
   "rust/spec/rover",
   "rust/comm/types",
   "rust/comm/cron",
