@@ -84,6 +84,19 @@ box
 box -- cargo test
 ```
 
+Credentials can be copied explicitly from the host environment. Their values
+are inherited by Docker rather than placed in its command line:
+
+```sh
+box --credential ANTHROPIC_API_KEY
+BOX_CREDENTIALS=ANTHROPIC_API_KEY,OPENAI_API_KEY box
+```
+
+This initial mode deliberately makes those credentials readable inside the
+container. The Strands credential and egress-gateway sources are vendored but
+inactive by default; `--features strands-proxy` compiles them for the later
+proxy-custody mode without changing runtime behavior yet.
+
 `box.nix` is a normal Nix shell expression:
 
 ```nix

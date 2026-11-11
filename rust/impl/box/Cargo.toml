@@ -9,5 +9,10 @@ license.workspace = true
 name = "box"
 path = "src/main.rs"
 
+[features]
+default = []
+strands-proxy = ["dep:strands-box-egress-gateway"]
+
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+strands-box-egress-gateway = { path = "vendor/strands-box/egress-gateway", optional = true }

@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "BOX_IMAGE", default_value = "nixos/nix:latest")]
     image: OsString,
 
+    /// Copy a named host environment variable into the box.
+    #[arg(long, env = "BOX_CREDENTIALS", value_delimiter = ',')]
+    credential: Vec<String>,
+
     /// Command to run instead of opening an interactive terminal.
     #[arg(last = true)]
     command: Vec<String>,
@@ -35,6 +39,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(name) = cli
+        .credential
+        .iter()
+        .find(|name| env::var_os(name).is_none())
+    {
+        eprintln!("box: credential {name} is not set in the host environment");
+        return ExitCode::FAILURE;
+    }
 
     let terminal = io::stdin().is_terminal() && io::stdout().is_terminal();
     let global_config = global_config_dir();
@@ -42,6 +54,7 @@ fn main() -> ExitCode {
         &directory,
         global_config.as_deref(),
         &cli.image,
+        &cli.credential,
         &cli.command,
         terminal,
     );
@@ -62,6 +75,7 @@ fn docker_args(
     directory: &Path,
     global_config: Option<&Path>,
     image: &OsStr,
+    credentials: &[String],
     command: &[String],
     terminal: bool,
 ) -> Vec<OsString> {
@@ -78,6 +92,9 @@ fn docker_args(
     ]);
     if let Some(config) = global_config {
         args.extend(["--volume".into(), volume_mount(config, "/box", true)]);
+    }
+    for credential in credentials {
+        args.extend(["--env".into(), credential.into()]);
     }
     args.extend([
         "--entrypoint".into(),
@@ -189,6 +206,7 @@ mod tests {
             Path::new("/tmp/my project"),
             Some(Path::new("/home/me/.box")),
             OsStr::new("nixos/nix:test"),
+            &["ANTHROPIC_API_KEY".into()],
             &[],
             true,
         );
@@ -209,9 +227,10 @@ mod tests {
             ]
         );
         assert!(strings.contains(&"/tmp/my project:/workspace".into()));
+        assert!(strings.contains(&"/home/me/.box:/box:ro".into()));
         assert!(strings
             .windows(2)
-            .any(|pair| pair == ["/home/me/.box:/box:ro", "--entrypoint"]));
+            .any(|pair| pair == ["--env", "ANTHROPIC_API_KEY"]));
         assert!(strings
             .windows(2)
             .any(|pair| pair == ["/bin/sh", "nixos/nix:test"]));

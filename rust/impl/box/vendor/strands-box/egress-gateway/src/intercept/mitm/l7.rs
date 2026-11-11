@@ -1,0 +1,871 @@
+//! The L7 interception path: run the request/response legs, forward.
+
+use std::borrow::Cow;
+use std::io;
+use std::net::TcpStream;
+
+use http_body_util::BodyExt;
+use zeroize::Zeroizing;
+
+use crate::audit::RequestId;
+
+use super::body::ResponseBody;
+use super::connect::{ConnectRequest, parse_authority, same_host};
+use super::{SharedState, http1};
+use crate::audit::Decision as AuditDecision;
+use crate::audit::EgressDecision;
+use crate::boundary::{HeaderMap, InterceptedRequest, Target};
+use crate::client::http::{ResponseCompletion, ResponseProgress, Upstream};
+use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
+use crate::error::{ProxyError, Result};
+use crate::mcp::{
+    McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
+};
+
+/// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
+pub(crate) async fn forward_tls(
+    mut parsed: http1::ParsedRequest,
+    upstream: TcpStream,
+    connect: &ConnectRequest,
+    state: &SharedState,
+    correlation: RequestId,
+    completion: &ResponseCompletion,
+) -> Result<WorkloadResponse> {
+    // Check the upstream's TLS name before any request effect.
+    let server_name =
+        rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
+            ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
+        })?;
+    let upstream = Upstream::new(upstream, Some(server_name), state, completion);
+    let correlation = correlation.with_headers(&parsed.headers);
+    // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
+    if let Err(error) =
+        validate_request_binding(connect, &parsed.method, &parsed.target, &parsed.headers)
+    {
+        let refusal = WorkloadResponse::refusal(error.http_status(), b"request authority rejected");
+        let request = (parsed.method.as_str(), parsed.target.as_str());
+        let reason = error.to_string();
+        return Ok(deny(state, connect, request, &reason, correlation, refusal));
+    }
+    let target = std::mem::take(&mut parsed.target);
+    let originally_empty_query = has_empty_query(&target);
+    let req = intercepted_request(connect, &target, parsed);
+
+    // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
+    // flag inside the shared core.
+    run_l7_legs(
+        connect,
+        req,
+        originally_empty_query,
+        upstream,
+        state,
+        correlation,
+        |method, target, headers| validate_request_binding(connect, method, target, headers),
+    )
+    .await
+}
+
+/// Run the request and response legs, and return the response for the workload. `revalidate`
+/// re-checks the CONNECT binding after the credential edit; plain HTTP passes a no-op.
+async fn run_l7_legs(
+    connect: &ConnectRequest,
+    mut req: InterceptedRequest,
+    originally_empty_query: bool,
+    upstream: Upstream<'_>,
+    state: &SharedState,
+    correlation: RequestId,
+    revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
+) -> Result<WorkloadResponse> {
+    let intercepted = upstream.is_tls();
+    let correlation = correlation.with_headers(&req.headers);
+    let correlation = if state.mcp_server_for(&connect.host).is_some() {
+        correlation.with_mcp(&req.body)
+    } else {
+        correlation
+    };
+    // Canonicalize the request path ONCE, before it is judged (`workload_path`), matched for
+    // credentials (`target`), or forwarded (`reconstruct_target`) — so the box judges, matches, and
+    // forwards the SAME bytes the origin will resolve. Percent-decodes only unreserved octets (never
+    // `%2F`, which would change segment structure) and removes dot-segments, closing the "judge one
+    // spelling, forward another" gap where `/%61dmin` or `/x/../admin` dodges a path `forbid` yet the
+    // origin routes to `/admin`. The query is left untouched — a `UrlPath` credential can live there,
+    // and it is deliberately kept out of the judged path.
+    req.target.path = match canonicalize_request_path(&req.target.path) {
+        Ok(path) => path,
+        Err(reason) => {
+            let refusal = WorkloadResponse::refusal(403, b"request path is not a valid address");
+            let request = (req.method.as_str(), req.target.path.as_str());
+            return Ok(deny(state, connect, request, &reason, correlation, refusal));
+        }
+    };
+
+    // The method, and the path as the workload sent it, captured BEFORE any credential mutation is
+    // applied.
+    //
+    // A `UrlPath` credential splices the secret into the path, so after the request edits
+    // `req.target.path` *is* the secret. Every authorization and decision input below reads this
+    // value instead, so an attempt or a durable record never carries credential material.
+    let method = req.method.clone();
+    let workload_path = req.target.path.clone();
+    // The target every credential matches, on the request and on its response.
+    let target = req.target.clone();
+    let refuse = |reason: &str, refusal: WorkloadResponse| {
+        let request = (method.as_str(), workload_path.as_str());
+        deny(
+            state,
+            connect,
+            request,
+            reason,
+            correlation.clone(),
+            refusal,
+        )
+    };
+
+    // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
+    if !intercepted && state.controls.matches_any(&target.as_destination()) {
+        return Ok(refuse(
+            "credential would attach on a plaintext request; refused — a secret must ride TLS",
+            WorkloadResponse::refusal(403, b"credential not permitted on a plaintext request"),
+        ));
+    }
+
+    if let Err(reason) = state.controls.apply_to_request(&mut req) {
+        return Ok(refuse(
+            &reason,
+            WorkloadResponse::refusal(403, b"blocked by egress control"),
+        ));
+    }
+
+    // A capability may annotate this allow — an advisory credential injection records that a secret
+    // was attached against an absent or unrecognised placeholder. Journalled on the allow decision
+    // below, so the injection is reconstructable (destination, reason, and requester correlation).
+    let allow_reason = req.advisory_note.take().unwrap_or_default();
+
+    // Serialize the fully mutated request before claiming its effect permit.
+    let fwd_target = reconstruct_target(&req.target, originally_empty_query);
+    if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
+        return Ok(refuse(
+            &error.to_string(),
+            WorkloadResponse::refusal(error.http_status(), b"request authority rejected"),
+        ));
+    }
+    // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
+    // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
+    // matched host's name), never read from the body, so an agent cannot borrow another server's
+    // identity. A frame the classifier refuses — unparseable, a batch, a client-sent response, or an
+    // act frame naming no item — is fail-closed here, before the request is authorized or forwarded.
+    // A protocol-floor frame (`ping`, `server/discover`) yields no target and stays a plain
+    // `http:request`.
+    let mcp_target: Option<(&str, McpTarget)> = match state.mcp_server_for(&connect.host) {
+        Some(server) => match McpTarget::of_http_request(&req.body) {
+            Ok(Some(target)) => Some((server, target)),
+            Ok(None) => None,
+            Err(error) => {
+                return Ok(refuse(
+                    &format!("MCP frame refused: {error}"),
+                    WorkloadResponse::refusal(403, b"MCP frame refused"),
+                ));
+            }
+        },
+        None => None,
+    };
+
+    // The serialized request carries the credential the request leg just attached, so the buffer is
+    // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
+    // not `Zeroize`-aware, a known residual).
+    // Forward the CANONICAL frame, not the raw one. The local door rewrites a
+    // `resources/read` uri at ingress so it judges and forwards ONE identity; the remote door must do
+    // the same, or a respelling this classifier judged as one identity would be FETCHED as another by
+    // the upstream server. Only `resources/read` whose canonical form differs is rewritten; every
+    // other frame (and an unparseable body) forwards byte-identical.
+    let forwarded_body: Cow<[u8]> = match &mcp_target {
+        Some((_, target)) if matches!(target.identity, McpTargetIdentity::Resource(_)) => {
+            canonicalize_mcp_frame(&req.body).map_or(Cow::Borrowed(&req.body), Cow::Owned)
+        }
+        _ => Cow::Borrowed(&req.body),
+    };
+    let prepared_request =
+        http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
+    let request_attempt = EffectAttempt::HttpRequest {
+        host: &connect.host,
+        port: connect.port,
+        method: &method,
+        path: &workload_path,
+        body_bytes: forwarded_body.len(),
+        intercepted,
+        mcp: mcp_target.as_ref().map(|(server, target)| {
+            let server = *server;
+            match &target.identity {
+                McpTargetIdentity::Tool(tool) => McpFrame::ToolCall {
+                    server,
+                    tool: tool.as_str(),
+                    arguments: target.arguments.as_str(),
+                },
+                McpTargetIdentity::Prompt(prompt) => McpFrame::PromptGet {
+                    server,
+                    prompt: prompt.as_str(),
+                },
+                McpTargetIdentity::Resource(uri) => McpFrame::ResourceRead {
+                    server,
+                    uri: uri.as_str(),
+                },
+                McpTargetIdentity::Method(method) => McpFrame::List {
+                    server,
+                    method: method.as_str(),
+                },
+            }
+        }),
+    };
+    let request_permit = match claim_effect(state, &request_attempt) {
+        Ok(permit) => permit,
+        Err(error) => {
+            let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
+            return Ok(refuse(
+                &format!("request effect interception failed: {error}"),
+                interceptor_error(&error, mcp_request),
+            ));
+        }
+    };
+    let request = (method.as_str(), workload_path.as_str());
+    emit_decision(
+        state,
+        connect,
+        request,
+        AuditDecision::Allow,
+        &allow_reason,
+        correlation.clone(),
+    );
+    // The request permit follows the upstream exchange through its terminal response.
+    let cursor = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/list")
+        .and_then(|_| list_cursor(&req.body));
+    let forwarded_body = match forwarded_body {
+        Cow::Owned(body) => body,
+        Cow::Borrowed(_) => std::mem::take(&mut req.body),
+    };
+    let (outcome, response) = upstream
+        .send(
+            state,
+            &method,
+            prepared_request,
+            Zeroizing::new(forwarded_body),
+        )
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            request_permit.record_outcome(outcome).map_err(|error| {
+                ProxyError::Io(format!("recording upstream request outcome: {error}"))
+            })?;
+            return Err(error);
+        }
+    };
+    let mut head = response.head;
+    let mut body = response.body;
+    body.track_request(request_permit, outcome)
+        .map_err(|error| ProxyError::Io(error.to_string()))?;
+    // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
+    // that set it would otherwise make a permitted answer read as a denial, with its own first body
+    // line as the reason.
+    head.headers.remove(crate::PROXY_ORIGIN_HEADER);
+
+    let controls = match state.controls.response_controls(&mut head.headers, &target) {
+        Ok(controls) => controls,
+        Err(_) => {
+            return Ok(WorkloadResponse::refusal(
+                403,
+                b"response blocked by egress control",
+            ));
+        }
+    };
+    if controls.requires_empty_body {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| ProxyError::Io(format!("upstream body: {error}")))?;
+            if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+                return Ok(WorkloadResponse::refusal(
+                    403,
+                    b"response blocked by egress control",
+                ));
+            }
+        }
+    }
+    let mut progress = Some(body.progress());
+    let mut body = ResponseBody::streaming(body, controls.redactors);
+
+    // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
+    // the response catalog into the authority so the server's per-tool actions reach runtime
+    // (docs/design/decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory).
+    // Best-effort: a staging failure warns and the catalog still returns.
+    if let Some((server, target)) = &mcp_target
+        && target.method() == "tools/list"
+    {
+        let captured = http1::collect(body, state.config.response_limits.max_body_bytes).await?;
+        if let Err(error) = state.effect_interceptor.stage_mcp_catalog(
+            server,
+            McpListReply {
+                session: req.headers.get("mcp-session-id"),
+                cursor: cursor.as_deref(),
+                body: &captured,
+            },
+        ) {
+            eprintln!(
+                "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
+            );
+        }
+        body = captured.into();
+        progress = None;
+    }
+
+    // Claim release before the workload can receive any processed upstream bytes.
+    let response_attempt = EffectAttempt::ResponseRelease {
+        host: &connect.host,
+        port: connect.port,
+        method: &method,
+        path: &workload_path,
+        status: head.status,
+    };
+    let response_permit = match claim_effect(state, &response_attempt) {
+        Ok(permit) => permit,
+        Err(error) => return Ok(interceptor_error(&error, None)),
+    };
+
+    Ok(WorkloadResponse {
+        status: head.status,
+        reason: None,
+        headers: head.headers,
+        body,
+        release: Some(response_permit),
+        header_case: head.header_case,
+        progress,
+    })
+}
+
+/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`.
+pub(crate) async fn forward_plain(
+    upstream: TcpStream,
+    connect: &ConnectRequest,
+    parsed: http1::ParsedRequest,
+    origin_target: String,
+    state: &SharedState,
+    correlation: RequestId,
+    completion: &ResponseCompletion,
+) -> Result<WorkloadResponse> {
+    let upstream = Upstream::new(upstream, None, state, completion);
+    let originally_empty_query = has_empty_query(&origin_target);
+    let mut req = intercepted_request(connect, &origin_target, parsed);
+
+    // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
+    // destination twice — in the absolute-form request line and in `Host` — and the workload controls
+    // both. The TLS path re-checks that they agree (`validate_request_binding`); the plain path has no
+    // CONNECT authority to bind against, so it normalizes instead: rewrite `Host` to the URL host, so
+    // the destination the box authorized is the one the upstream routes on (no vhost smuggling).
+    //
+    // The port is omitted only for 80 — plain HTTP's sole default. `http://host:443/` keeps `:443`,
+    // because 443 is not the default under the `http` scheme, and a dropped port would make `Host`
+    // name a different authority than the one authorized.
+    let host_value = if connect.port == 80 {
+        connect.host.clone()
+    } else {
+        format!("{}:{}", connect.host, connect.port)
+    };
+    req.headers.set("Host", host_value);
+
+    run_l7_legs(
+        connect,
+        req,
+        originally_empty_query,
+        upstream,
+        state,
+        correlation,
+        |_method, _target, _headers| Ok(()),
+    )
+    .await
+}
+
+/// The boundary request for `parsed`, sent to `connect` with the origin-form `target`.
+fn intercepted_request(
+    connect: &ConnectRequest,
+    target: &str,
+    parsed: http1::ParsedRequest,
+) -> InterceptedRequest {
+    let (path, query) = split_target(target);
+    InterceptedRequest {
+        target: Target {
+            host: connect.host.clone(),
+            port: connect.port,
+            path,
+            query,
+        },
+        method: parsed.method,
+        headers: parsed.headers,
+        body: parsed.body,
+        advisory_note: None,
+    }
+}
+
+/// The response to the workload: a gateway diagnostic, or the governed response.
+pub(crate) struct WorkloadResponse {
+    pub(crate) status: u16,
+    /// A reason phrase in place of the standard one.
+    pub(crate) reason: Option<&'static str>,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: ResponseBody,
+    /// The claimed release of a governed response, recorded once hyper has written it.
+    pub(crate) release: Option<ClaimedEffectPermit>,
+    /// The upstream's header case. Without it, hyper writes header names in lowercase.
+    pub(crate) header_case: hyper::http::Extensions,
+    pub(crate) progress: Option<ResponseProgress>,
+}
+
+impl WorkloadResponse {
+    /// A proxy-originated diagnostic, outside the response-release lifecycle.
+    fn refusal(status: u16, body: &[u8]) -> Self {
+        Self {
+            reason: None,
+            headers: proxy_originated_headers(),
+            body: body.to_vec().into(),
+            ..Self::bare(status)
+        }
+    }
+
+    /// A proxy-level refusal with no body, with the gateway's lowercase reason phrase.
+    pub(crate) fn bare(status: u16) -> Self {
+        let reason = match status {
+            400 => Some("bad request"),
+            407 => Some("proxy authentication required"),
+            502 => Some("bad gateway"),
+            _ => None,
+        };
+        Self {
+            status,
+            reason,
+            headers: HeaderMap::new(),
+            body: Vec::new().into(),
+            release: None,
+            header_case: hyper::http::Extensions::new(),
+            progress: None,
+        }
+    }
+
+    /// The CONNECT acknowledgement: the tunnel is open.
+    pub(crate) fn connected() -> Self {
+        Self {
+            reason: Some("Connection Established"),
+            ..Self::bare(200)
+        }
+    }
+}
+
+/// Claim one effect from the authorization authority.
+fn claim_effect(
+    state: &SharedState,
+    attempt: &EffectAttempt<'_>,
+) -> io::Result<ClaimedEffectPermit> {
+    state
+        .effect_interceptor
+        .intercept(attempt)
+        .map(ClaimedEffectPermit::new)
+}
+
+/// The response to an effect refusal or a static interceptor failure.
+pub(super) fn interceptor_error(error: &io::Error, mcp_request: Option<&[u8]>) -> WorkloadResponse {
+    if error.kind() != io::ErrorKind::PermissionDenied {
+        return WorkloadResponse::refusal(502, b"effect interceptor unavailable");
+    }
+    let message = super::diagnostic::denial_message(error);
+    if let Some(response) = mcp_request.and_then(|request| mcp_denial_response(request, &message)) {
+        let mut refusal = WorkloadResponse::refusal(403, response.as_bytes());
+        refusal
+            .headers
+            .set("Content-Type", "application/json".to_string());
+        refusal
+    } else {
+        WorkloadResponse::refusal(403, message.as_bytes())
+    }
+}
+
+/// The headers every response the gateway originates carries, and no relayed response does.
+fn proxy_originated_headers() -> crate::boundary::HeaderMap {
+    let mut headers = crate::boundary::HeaderMap::new();
+    headers.set(
+        crate::PROXY_ORIGIN_HEADER,
+        crate::PROXY_ORIGIN_VALUE.to_string(),
+    );
+    headers
+}
+
+/// Emit one final egress decision about `request`, its method and path, on `connect`.
+pub(crate) fn emit_decision(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    (method, path): (&str, &str),
+    decision: AuditDecision,
+    reason: &str,
+    correlation: RequestId,
+) {
+    state.emitter.emit(EgressDecision {
+        host: connect.host.clone(),
+        port: connect.port,
+        method: method.to_string(),
+        path: path.to_string(),
+        decision,
+        reason: reason.to_string(),
+        correlation,
+    });
+}
+
+/// Record the denial of `request` on `connect`, and return `refusal`, the response that answers it.
+fn deny(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    request: (&str, &str),
+    reason: &str,
+    correlation: RequestId,
+    refusal: WorkloadResponse,
+) -> WorkloadResponse {
+    emit_decision(
+        state,
+        connect,
+        request,
+        AuditDecision::Deny,
+        reason,
+        correlation,
+    );
+    refusal
+}
+
+/// The RFC 3986 normal form of an origin-form request path, `/` when it is empty, or why it is refused.
+fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> {
+    let normal = normalize_path(path)?;
+    Ok(if normal.is_empty() {
+        "/".to_string()
+    } else {
+        normal
+    })
+}
+
+/// The `params.cursor` a `tools/list` request names.
+fn list_cursor(body: &[u8]) -> Option<String> {
+    let request: serde_json::Value = serde_json::from_slice(body).ok()?;
+    request
+        .get("params")?
+        .get("cursor")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Split an origin-form request target into `(path, query)`.
+fn split_target(target: &str) -> (String, String) {
+    match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (target.to_string(), String::new()),
+    }
+}
+
+/// Keep an explicitly empty query distinct from an absent query before [`split_target`] runs.
+fn has_empty_query(target: &str) -> bool {
+    target
+        .split_once('?')
+        .is_some_and(|(_, query)| query.is_empty())
+}
+
+/// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
+fn reconstruct_target(target: &Target, originally_empty_query: bool) -> String {
+    if !target.query.is_empty() {
+        format!("{}?{}", target.path, target.query)
+    } else if originally_empty_query && !target.path.contains('?') {
+        // Preserve the workload's empty delimiter, including across header or path edits. A path
+        // rewrite can itself supply a query; do not append a second delimiter to that replacement.
+        // Stripping the last parameter from an originally nonempty query still removes its `?`.
+        format!("{}?", target.path)
+    } else {
+        target.path.clone()
+    }
+}
+
+/// Require the inner HTTP request to name the authority admitted by CONNECT.
+fn validate_request_binding(
+    connect: &ConnectRequest,
+    method: &str,
+    target: &str,
+    headers: &HeaderMap,
+) -> Result<()> {
+    if target == "*" {
+        if !method.eq_ignore_ascii_case("OPTIONS") {
+            return Err(ProxyError::ControlDenied(
+                "asterisk-form request target is only valid for OPTIONS".to_string(),
+            ));
+        }
+    } else if !target.starts_with('/') || target.starts_with("//") {
+        return Err(ProxyError::ControlDenied(
+            "intercepted TLS requires an origin-form request target".to_string(),
+        ));
+    }
+
+    let mut hosts = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("host"));
+    let Some((_, host_value)) = hosts.next() else {
+        return Err(ProxyError::ControlDenied(
+            "intercepted HTTP/1 request is missing Host".to_string(),
+        ));
+    };
+    if hosts.next().is_some() || host_value.contains(',') {
+        return Err(ProxyError::ControlDenied(
+            "intercepted HTTP/1 request has multiple Host authorities".to_string(),
+        ));
+    }
+
+    let Some((host, port)) = parse_authority(host_value, Some(443)) else {
+        return Err(ProxyError::ControlDenied(
+            "intercepted HTTP/1 request has a malformed Host authority".to_string(),
+        ));
+    };
+    if port != connect.port || !same_host(&host, &connect.host) {
+        return Err(ProxyError::ControlDenied(
+            "intercepted HTTP/1 Host does not match CONNECT authority".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
+    /// denial, so a refusal this gateway writes must name itself.
+    #[test]
+    fn a_gateway_refusal_carries_the_marker() {
+        let response = interceptor_error(
+            &io::Error::new(io::ErrorKind::PermissionDenied, "refused"),
+            None,
+        );
+        assert_eq!(
+            response.headers.get(crate::PROXY_ORIGIN_HEADER),
+            Some(crate::PROXY_ORIGIN_VALUE),
+            "the gateway's own refusal names itself"
+        );
+    }
+
+    #[test]
+    fn interceptor_diagnostics_bound_and_escape_denials_without_exposing_failures() {
+        let frame = br#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
+        for request in [None, Some(frame.as_slice())] {
+            let error = io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("refused\n\u{1b}\u{202e}{}", "🦀".repeat(5000)),
+            );
+            let response = interceptor_error(&error, request);
+            assert_eq!(response.status, 403);
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            let body = std::str::from_utf8(&bytes).unwrap();
+            let decoded: serde_json::Value;
+            let message = if request.is_some() {
+                decoded = serde_json::from_str(body).unwrap();
+                decoded["error"]["message"].as_str().unwrap()
+            } else {
+                body
+            };
+            assert!(message.starts_with(r"refused\n\u{1b}\u{202e}"));
+            assert!(message.ends_with("..."));
+            assert!(message.len() <= 8192);
+            assert!(!message.chars().any(char::is_control));
+            assert!(!message.contains('\u{202e}'));
+
+            let response = interceptor_error(&io::Error::other("private backend failure"), request);
+            assert_eq!(response.status, 502);
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, b"effect interceptor unavailable");
+        }
+    }
+
+    /// FIX B (finding 1): the judged path is percent-decoded (unreserved only) so `/%61dmin` cannot
+    /// dodge a `forbid "/admin*"` while the origin routes to `/admin`.
+    #[test]
+    fn canonicalize_decodes_unreserved_percent_escapes() {
+        assert_eq!(canonicalize_request_path("/%61dmin"), "/admin");
+        assert_eq!(canonicalize_request_path("/%61%64min"), "/admin");
+    }
+
+    /// The canonical path of a spelling the test expects to be valid.
+    fn canonicalize_request_path(path: &str) -> String {
+        super::canonicalize_request_path(path).unwrap()
+    }
+
+    #[test]
+    fn canonicalize_request_path_is_idempotent() {
+        for spelling in crate::mcp::generated_spellings() {
+            for path in [spelling.clone(), format!("/{spelling}")] {
+                if let Ok(once) = super::canonicalize_request_path(&path) {
+                    assert_eq!(
+                        super::canonicalize_request_path(&once),
+                        Ok(once.clone()),
+                        "{path:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_that_is_not_rfc_3986_is_refused() {
+        for path in ["/%", "/%4", "/%zz", "/a%%41", "/a#b", "/a b", "/\u{e9}"] {
+            assert!(super::canonicalize_request_path(path).is_err(), "{path:?}");
+        }
+    }
+
+    /// FIX B: dot-segments are removed, so `/tmp/../etc/passwd` cannot dodge a `forbid` on `/etc/*`.
+    #[test]
+    fn canonicalize_removes_dot_segments() {
+        assert_eq!(
+            canonicalize_request_path("/tmp/../etc/passwd"),
+            "/etc/passwd"
+        );
+        assert_eq!(canonicalize_request_path("/a/./b"), "/a/b");
+        assert_eq!(canonicalize_request_path("/a/b/../../c"), "/c");
+    }
+
+    /// FIX B: a reserved octet stays encoded — `%2F` must NOT become `/`, or segment structure would
+    /// change and open a different gap.
+    #[test]
+    fn canonicalize_keeps_reserved_octets_encoded() {
+        assert_eq!(canonicalize_request_path("/a%2Fb"), "/a%2Fb");
+        // hex is normalized to uppercase, but the octet stays encoded.
+        assert_eq!(canonicalize_request_path("/a%2fb"), "/a%2Fb");
+    }
+
+    /// FIX B: canonicalization is path-only; the query rides through `split_target`/`reconstruct`
+    /// untouched (a credential may live in the query — kept out of the judged path).
+    #[test]
+    fn canonicalize_is_path_only_query_untouched() {
+        let (path, query) = split_target("/x?%61=%62");
+        assert_eq!(canonicalize_request_path(&path), "/x");
+        assert_eq!(query, "%61=%62", "the query is not canonicalized");
+        let mut target = Target::new("h".to_string(), 443);
+        target.path = canonicalize_request_path(&path);
+        target.query = query;
+        assert_eq!(
+            reconstruct_target(&target, false),
+            "/x?%61=%62",
+            "the forwarded target keeps the canonical path and the verbatim query"
+        );
+    }
+
+    #[test]
+    fn forwarding_preserves_empty_and_absent_queries_through_request_edits() {
+        use crate::boundary::Mutation;
+
+        let header = || Mutation::SetHeader {
+            name: "Authorization".into(),
+            value: Zeroizing::new("fixture".into()),
+        };
+        let strip = || Mutation::StripQueryParam { name: "key".into() };
+        let add = || Mutation::AddQueryParam {
+            name: "key".into(),
+            value: Zeroizing::new("value".into()),
+        };
+        let rewrite = |path: &str| Mutation::RewritePath {
+            path: Zeroizing::new(path.into()),
+        };
+        for (original, mutations, expected) in [
+            ("/report?", vec![], "/report?"),
+            ("/report", vec![], "/report"),
+            ("/report??", vec![], "/report??"),
+            ("/report?format=text", vec![], "/report?format=text"),
+            ("/report?", vec![header()], "/report?"),
+            ("/report?", vec![strip()], "/report?"),
+            ("/report?key=placeholder", vec![strip()], "/report"),
+            ("/report?", vec![add()], "/report?key=value"),
+            (
+                "/report?key=placeholder",
+                vec![strip(), add()],
+                "/report?key=value",
+            ),
+            ("/report?", vec![rewrite("/replacement")], "/replacement?"),
+            (
+                "/report?",
+                vec![rewrite("/replacement?token")],
+                "/replacement?token",
+            ),
+        ] {
+            let (path, query) = split_target(original);
+            let mut target = Target::new("notes", 443);
+            target.path = path;
+            target.query = query;
+            let mut headers = HeaderMap::default();
+            for mutation in mutations {
+                mutation.apply(&mut headers, &mut target);
+            }
+            assert_eq!(
+                reconstruct_target(&target, has_empty_query(original)),
+                expected,
+                "forwarded target after edits to {original}"
+            );
+        }
+    }
+
+    fn connect(host: &str, port: u16) -> ConnectRequest {
+        ConnectRequest {
+            host: host.to_string(),
+            port,
+        }
+    }
+
+    fn headers(values: &[&str]) -> HeaderMap {
+        HeaderMap::from_pairs(
+            values
+                .iter()
+                .map(|value| ("Host".to_string(), (*value).to_string())),
+        )
+    }
+
+    #[test]
+    fn request_binding_accepts_case_default_port_and_bracketed_ipv6() {
+        assert!(
+            validate_request_binding(
+                &connect("Api.Example.com", 443),
+                "GET",
+                "/v1",
+                &headers(&["api.example.COM"]),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_request_binding(
+                &connect("2001:db8::1", 8443),
+                "GET",
+                "/v1",
+                &headers(&["[2001:db8::1]:8443"]),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn request_binding_rejects_authority_pivots() {
+        let bound = connect("api.example.com", 443);
+        for (target, hosts) in [
+            ("/", vec!["metadata.google.internal"]),
+            ("/", vec!["api.example.com", "metadata.google.internal"]),
+            (
+                "http://169.254.169.254/latest/meta-data",
+                vec!["api.example.com"],
+            ),
+            (
+                "//169.254.169.254/latest/meta-data",
+                vec!["api.example.com"],
+            ),
+        ] {
+            assert!(
+                validate_request_binding(&bound, "GET", target, &headers(&hosts)).is_err(),
+                "target={target:?}, hosts={hosts:?}"
+            );
+        }
+    }
+}
