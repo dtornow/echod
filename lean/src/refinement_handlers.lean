@@ -1003,94 +1003,6 @@ theorem promiseCreate_sim (req : PromiseCreateReq) (now : Nat) {origin : String}
   unfold Abstract.promiseCreate Concrete.Decision.promiseCreate
   sim
 
-theorem forM_sim {key : DocumentKey} {fa : γ → Abstract.Handler Unit}
-    {fc : γ → DocumentHandler key Unit} :
-    ∀ l : List γ, (∀ x ∈ l, HandlerSim key (fa x) (fc x)) →
-      HandlerSim key (l.forM fa) (l.forM fc)
-  | [], _ => Sim.pure rfl (fun _ _ => trivial)
-  | x :: rest, h =>
-      Sim.seq (h x (by simp)) (forM_sim rest fun y hy => h y (by simp [hy]))
-
-theorem mapM_sim {key : DocumentKey} {f : β → α} {fa : γ → Abstract.Handler α}
-    {fc : γ → DocumentHandler key β} :
-    ∀ l : List γ,
-      (∀ x ∈ l, Sim key (fun _ => True) (fun a c => a = f c) (fun _ _ => True)
-        (fa x) (fc x)) →
-      Sim key (fun _ => True) (fun as cs => as = cs.map f) (fun _ _ => True)
-        (l.mapM fa) (l.mapM fc)
-  | [], _ => Sim.pure rfl (fun _ _ => trivial)
-  | x :: rest, h => by
-      simp only [List.mapM_cons]
-      refine Sim.bind (h x (by simp)) fun a c hac => ?_
-      refine Sim.bind (mapM_sim rest fun y hy => h y (by simp [hy])) fun as cs has => ?_
-      exact Sim.pure (by simp [hac, has]) (fun _ _ => trivial)
-
-theorem settleResume_sim (awaited awaiter : Ident) (now : Nat) {origin : String}
-    (h : awaiter.origin = origin) :
-    HandlerSim (.origin origin) (Abstract.settleResume awaited awaiter now)
-      (Concrete.Decision.settleResume (origin := origin) awaited awaiter now) := by
-  subst h
-  unfold Abstract.settleResume Concrete.Decision.settleResume
-  sim
-
-theorem settleCallback_sim (req : PromiseRegisterCallbackReq) (now : Nat)
-    (h : req.awaiter.origin = req.awaited.origin) :
-    HandlerSim (.origin req.awaited.origin) (Abstract.settleCallback req now)
-      (Concrete.Decision.settleCallback (origin := req.awaited.origin) req now) := by
-  unfold Abstract.settleCallback Concrete.Decision.settleCallback
-  simp only [Ident.sameOrigin, h, beq_self_eq_true, Bool.not_true, Bool.false_eq_true,
-    ↓reduceIte, Concrete.pure_bind]
-  sim
-
-theorem settleListener_sim (req : PromiseRegisterListenerReq) (now : Nat) :
-    HandlerSim (.origin req.awaited.origin) (Abstract.settleListener req now)
-      (Concrete.Decision.settleListener (origin := req.awaited.origin) req now) := by
-  unfold Abstract.settleListener Concrete.Decision.settleListener
-  sim
-
-theorem wasDue_sim (id : Ident) (now : Nat) {origin : String} (h : id.origin = origin) :
-    HandlerSim (.origin origin) (Abstract.wasDue id now)
-      (Concrete.Decision.wasDue (origin := origin) id now) := by
-  subst h
-  unfold Abstract.wasDue Concrete.Decision.wasDue
-  sim
-
-theorem offerIfNew_sim (awaiter : Ident) (due : Bool) (now : Nat) {origin : String}
-    (h : awaiter.origin = origin) :
-    HandlerSim (.origin origin) (Abstract.offerIfNew awaiter due now)
-      (Concrete.Decision.offerIfNew (origin := origin) awaiter due now) := by
-  subst h
-  unfold Abstract.offerIfNew Concrete.Decision.offerIfNew
-  sim
-
-theorem resumeRegistered_sim (id : Ident) (callbacks : List Ident) (listeners : List String)
-    (now : Nat) {origin : String} (h : id.origin = origin) :
-    HandlerSim (.origin origin) (Abstract.resumeRegistered id callbacks listeners now)
-      (Concrete.Decision.resumeRegistered (origin := origin) id callbacks listeners now) := by
-  subst h
-  unfold Abstract.resumeRegistered Concrete.Decision.resumeRegistered
-  have hmine : ∀ awaiter ∈ callbacks.filter (·.sameOrigin id), awaiter.origin = id.origin := by
-    intro awaiter hmem
-    simp only [List.mem_filter, Ident.sameOrigin, beq_iff_eq] at hmem
-    exact hmem.2
-  refine Sim.bind
-    (mapM_sim (f := fun b => b) _ fun awaiter hmem =>
-      wasDue_sim awaiter now (hmine awaiter hmem))
-    fun dues _ hdues => ?_
-  subst hdues
-  simp only [List.map_id']
-  refine Sim.seq
-    (forM_sim _ fun awaiter hmem =>
-      settleCallback_sim { awaited := id, awaiter } now (hmine awaiter hmem)) ?_
-  refine Sim.seq
-    (forM_sim listeners fun address _ =>
-      settleListener_sim { awaited := id, address } now) ?_
-  refine forM_sim _ fun pair hmem => ?_
-  obtain ⟨awaiter, due⟩ := pair
-  have hawaiter : awaiter ∈ callbacks.filter (·.sameOrigin id) :=
-    (List.of_mem_zip hmem).1
-  exact offerIfNew_sim awaiter due now (hmine awaiter hawaiter)
-
 theorem promiseSettle_sim (req : PromiseSettleReq) (now : Nat) {origin : String}
     (h : req.id.origin = origin) :
     HandlerSim (.origin origin) (Abstract.promiseSettle req now)
@@ -1179,6 +1091,28 @@ theorem taskCreate_sim (req : TaskCreateReq) (now : Nat) :
   sim
 
 /-! ## Lists of steps -/
+
+theorem forM_sim {key : DocumentKey} {fa : γ → Abstract.Handler Unit}
+    {fc : γ → DocumentHandler key Unit} :
+    ∀ l : List γ, (∀ x ∈ l, HandlerSim key (fa x) (fc x)) →
+      HandlerSim key (l.forM fa) (l.forM fc)
+  | [], _ => Sim.pure rfl (fun _ _ => trivial)
+  | x :: rest, h =>
+      Sim.seq (h x (by simp)) (forM_sim rest fun y hy => h y (by simp [hy]))
+
+theorem mapM_sim {key : DocumentKey} {f : β → α} {fa : γ → Abstract.Handler α}
+    {fc : γ → DocumentHandler key β} :
+    ∀ l : List γ,
+      (∀ x ∈ l, Sim key (fun _ => True) (fun a c => a = f c) (fun _ _ => True)
+        (fa x) (fc x)) →
+      Sim key (fun _ => True) (fun as cs => as = cs.map f) (fun _ _ => True)
+        (l.mapM fa) (l.mapM fc)
+  | [], _ => Sim.pure rfl (fun _ _ => trivial)
+  | x :: rest, h => by
+      simp only [List.mapM_cons]
+      refine Sim.bind (h x (by simp)) fun a c hac => ?_
+      refine Sim.bind (mapM_sim rest fun y hy => h y (by simp [hy])) fun as cs has => ?_
+      exact Sim.pure (by simp [hac, has]) (fun _ _ => trivial)
 
 theorem readObject_map_sim (id : Ident) (now : Nat) {origin : String}
     (h : id.origin = origin) :

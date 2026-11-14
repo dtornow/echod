@@ -9,8 +9,8 @@
 
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::DocumentBody;
+use echod_abstract::trusted::copy;
+use echod_concrete::DocumentBody;
 
 use crate::verified::flight::{self, Decided, Job};
 use crate::verified::text::{copy_string, text};
@@ -31,22 +31,22 @@ use crate::state::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{pend_v, spec_body_deadline, DocumentBodyV};
+use echod_concrete::node::{pend_v, spec_body_deadline, DocumentBodyV};
 
 verus! {
 
 /// The store answered a load of schedule `id`, read in full: not cached.
 #[verifier::opaque]
-pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreRes) -> (S, Result<WorkingSpec, Seq<char>>) {
+pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreOutcome) -> (S, Result<WorkingSpec, Seq<char>>) {
     let key = spec_sched_key(s.keys.prefix, id);
     let target = crate::target::spec_name(crate::target::TargetSpec::Schedule(id));
     match outcome {
-        StoreRes::Get { result: Ok(None) } => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
-        StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::spec_decode_schedule(bytes@) {
+        StoreOutcome::Got(None) => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
+        StoreOutcome::Got(Some((bytes, etag))) => match document::spec_decode_schedule(bytes@) {
             Ok(loaded) => (s, Ok(spec_working(target, key, loaded, Some(etag.deep_view())))),
             Err(e) => (s, Err(e)),
         },
-        StoreRes::Get { result: Err(e) } => (s, Err(spec_error_text(e.deep_view()))),
+        StoreOutcome::Failed(e) => (s, Err(spec_error_text(e.deep_view()))),
         _ => (s, Err(spec_error_text(spec_unexpected()))),
     }
 }
@@ -203,7 +203,7 @@ pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>
         r.deep_view() == spec_schedule_row(doc@),
 {
     proof {
-        crate::concrete::lemma_doc_view(doc);
+        echod_concrete::lemma_doc_view(doc);
     }
     match doc {
         DocumentBody::Schedule(Some(row)) => Some(copy(row)),
@@ -213,7 +213,7 @@ pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>
 
 impl State {
     /// The store answered a load of schedule `id`, read in full: not cached.
-    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreRes) -> (r: Result<Working, String>)
+    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> (r: Result<Working, String>)
         ensures
             (final(self).deep_view(), r.deep_view()) == spec_loaded_schedule(old(self).deep_view(), id@, outcome),
     {
@@ -223,15 +223,15 @@ impl State {
         let key = self.keys.sched_key(id);
         let target = Target::Schedule(text(id)).name();
         match outcome {
-            StoreRes::Get { result: Ok(None) } => {
+            StoreOutcome::Got(None) => {
                 let loaded = Loaded::empty_schedule(text(id));
                 Ok(Working { target, key, loaded, etag: None })
             },
-            StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::decode_schedule(bytes.as_slice()) {
+            StoreOutcome::Got(Some((bytes, etag))) => match document::decode_schedule(bytes.as_slice()) {
                 Ok(loaded) => Ok(Working { target, key, loaded, etag: Some(etag) }),
                 Err(e) => Err(e),
             },
-            StoreRes::Get { result: Err(e) } => Err(error_text(&e)),
+            StoreOutcome::Failed(e) => Err(error_text(&e)),
             _ => Err(error_text(&unexpected())),
         }
     }
@@ -295,7 +295,7 @@ impl State {
             None => self.fire_idle(f, ws, t1, fired),
             Some((row, pending)) => {
                 proof {
-                    crate::concrete::lemma_pending_view(&pending);
+                    echod_concrete::lemma_pending_view(&pending);
                 }
                 let next = match schedule_row(&advanced) {
                     Some(c) => c.next_run_at,
@@ -399,7 +399,7 @@ impl State {
         let deadline = document::deadline(&after);
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::FireBegin { flight, origin: copy_string(&ctx.origin), now: t, row: Box::new(copy(&ctx.row)), at: ctx.pending.at, promise_id: copy_string(&ctx.pending.promise), next: ctx.next });
         let mut commit = self.commit_new(wo, after, deadline, t, None);
@@ -437,7 +437,7 @@ impl State {
         };
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::AdvanceBegin { flight, schedule: id, now: t, at: ctx.pending.at, next: ctx.next });
         let FireCtx { ws, row: _, advanced, pending: _, t1: _, origin: _, next: _ } = ctx;

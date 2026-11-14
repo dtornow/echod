@@ -144,7 +144,7 @@ mod tests {
     use super::Config;
 
     #[test]
-    fn retry_timeout_must_be_safe() {
+    fn retry_timeout_must_be_safe_for_bounded_logical_time() {
         let mut cfg = Config::memory("127.0.0.1:0");
 
         cfg.retry_timeout = 0;
@@ -155,5 +155,8 @@ mod tests {
 
         cfg.retry_timeout = echod_logic::verified::MAX_TIME;
         assert!(cfg.validate().is_ok());
+        assert!(echod_logic::verified::MAX_TIME
+            .checked_add(cfg.retry_timeout)
+            .is_some());
     }
 }

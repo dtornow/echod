@@ -53,6 +53,12 @@ impl Config {
                 echod_types::MAX_TIME
             ));
         }
+        if echod_types::MAX_TIME
+            .checked_add(self.retry_timeout)
+            .is_none()
+        {
+            return Err("retry deadline can overflow bounded logical time".to_string());
+        }
         Ok(())
     }
 
@@ -80,7 +86,7 @@ mod tests {
     use super::Config;
 
     #[test]
-    fn retry_timeout_respects_protocol_bounds() {
+    fn retry_timeout_respects_protocol_time_headroom() {
         let mut cfg = Config::memory("node");
         cfg.retry_timeout = 0;
         assert!(cfg.validate().is_err());
@@ -90,5 +96,8 @@ mod tests {
 
         cfg.retry_timeout = echod_types::MAX_TIME;
         assert!(cfg.validate().is_ok());
+        assert!(echod_types::MAX_TIME
+            .checked_add(cfg.retry_timeout)
+            .is_some());
     }
 }

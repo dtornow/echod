@@ -1,9 +1,8 @@
 //! echod-logic: the decision core of a node, with no I/O in it.
 //!
-//! The core is a state machine: `State`, operational `Event`s in, `Effect`s
-//! out. Startup is inferred from the first delivered event; shutdown belongs
-//! to the impure shell. Every request on the store leaves as an
-//! `Effect::Store` under an op id and comes back as `Event::Store`
+//! The core is a state machine: `State`, `Event` in, `Effect`s out,
+//! `on_event` the only step. Every call on the store leaves as an
+//! `Effect::Store` under an op id and comes back as `Event::Completed`
 //! under the same id; every answer to a client leaves as `Effect::Reply`;
 //! the clock is read by whoever drives the core and handed in on every
 //! event. Nothing here waits, sleeps, locks or spawns, so the same events
@@ -38,8 +37,8 @@
 //! `cargo build` compiles the same sources with the ghost code erased.
 //! What is assumed is listed in `verified/mod.rs`.
 //!
-//! The concrete Rover model decides: a request is `crate::concrete::handle`,
-//! a sweep `crate::concrete::sweep`, a schedule's run `run_due` and
+//! The concrete Rover model decides: a request is `echod_concrete::handle`,
+//! a sweep `echod_concrete::sweep`, a schedule's run `run_due` and
 //! `create_occurrence`, each proved there to compute its specification.
 //! The handlers turn a document's rows into the model's `DocumentBody`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::
@@ -55,7 +54,6 @@
 
 // Every module is inside `verus!`: cargo compiles the code, cargo-verus
 // checks that `State::on_event` computes `spec_on_event`.
-pub mod concrete;
 pub mod cache;
 pub mod config;
 pub mod debug;
