@@ -149,7 +149,7 @@ pub fn show(trace: &Trace, upto: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echod_abstract_spec::Dispatch;
+    use echod_types::Dispatch;
     use echod_types::{PromiseGetReq, Request};
 
     #[test]

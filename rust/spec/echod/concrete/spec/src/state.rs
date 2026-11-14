@@ -18,7 +18,7 @@ use crate::rover::{LogicV, Pid};
 #[cfg(verus_keep_ghost)]
 use echod_types::{origin, same_origin_spec, spec_deadline_bounded, AValue};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::Call;
+use echod_types::Call;
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::{Time, ProcessEvent};
 #[cfg(verus_keep_ghost)]

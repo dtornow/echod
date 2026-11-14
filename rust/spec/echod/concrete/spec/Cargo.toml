@@ -12,8 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 echod-types = { path = "../../../../comm/types" }
 rover-spec = { path = "../../../rover/spec" }
-# The concrete Rover boundary uses the protocol's Call/Output/Dispatch types,
-# and schedule transitions share the protocol's trusted cron/expansion algebra.
+# Schedule transitions share the abstract model's trusted cron/expansion algebra.
 echod-abstract-spec = { path = "../../abstract/spec" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"

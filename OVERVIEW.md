@@ -42,8 +42,10 @@ jeps                  Jepsen, from outside the process: a pass means the pipelin
 The process's document steps live under `rust/impl/process/src/concrete`,
 each proved equal to `rust/spec/echod/concrete/spec`'s specification; the process itself is proved to compute `spec_on_event`,
 its bookkeeping and the sequence of store calls around each step included.
-Concrete depends on the abstract model only for shared boundary protocol
-types and trusted cron/occurrence algebra; it does not depend on the process.
+Shared boundary payloads live in `echod-types`; both models specialize Rover's
+boundary events with unit routing identity. Their observations exclude clocks
+and internal traffic. Concrete still depends on the abstract model for trusted
+cron/occurrence algebra; it does not depend on the process.
 What the process assumes — the text of keys, the bytes of documents — is
 stated as specifications and listed in `src/verified/mod.rs`; its tests feed
 it events by hand. The runtime performs what it asks. The simulator is the

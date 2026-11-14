@@ -9,7 +9,7 @@ use crate::collections::*;
 use crate::runtime::*;
 #[cfg(verus_keep_ghost)]
 use crate::projection::{group_views as group_exec_views, outs_v, sends, works};
-use echod_abstract_spec::protocol::Dispatch;
+use echod_types::Dispatch;
 use echod_abstract_spec::state::*;
 
 verus! {

@@ -194,10 +194,11 @@ and not a dependent of the process:
 - `state.rs` for node and store state and transitions, in separate commented sections
 - `property_claim.rs` for concrete integrity and `property_proof.rs` for its proof
 
-The dependency on `echod-abstract-spec` is semantic rather than a refinement
-proof dependency: concrete network messages use the shared
-`Call`/`Output`/`Dispatch` boundary types, and schedule transitions use the
-trusted cron and occurrence-expansion functions.
+Shared `Call`/`Output`/`Dispatch` payloads live in `echod-types`. Both models
+use Rover boundary events specialized to unit routing identity and shared
+messages; observation still excludes clocks and internal traffic. The remaining
+dependency on `echod-abstract-spec` supplies trusted functions, including cron
+and occurrence expansion, rather than boundary types.
 
 Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
 exec-to-spec proofs live under `impl/process/src/concrete`; production code
@@ -245,8 +246,8 @@ spec/rover/exec --> spec/echod/abstract/exec     spec/echod/refinement
 impl + spec -----------------> test/*
 ```
 
-Concrete depends on the Rover world and the abstract model's shared semantic
-boundary. Refinement depends on both models. The process depends on concrete,
+Concrete depends on the Rover world, shared payloads in `echod-types`, and the
+abstract model's trusted functions. Refinement depends on both models. The process depends on concrete,
 because a handler's `ensures` names `spec_promise_create`. Concrete and
 refinement depend on neither the process nor the runtime. Production code must
 never depend on test code. The ghost half of the concrete crate erases

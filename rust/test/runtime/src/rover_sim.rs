@@ -24,7 +24,8 @@ use echod_types::{Request, Response};
 use echod_abstract_exec::Spec as AbstractExec;
 use echod_model_test::history_rank;
 use echod_abstract_spec::rover::Pid as AbstractPid;
-use echod_abstract_spec::{Call, Config as AbstractConfig, Message as AbstractMessage, Output};
+use echod_abstract_spec::Config as AbstractConfig;
+use echod_types::{Call, Message as AbstractMessage, Output};
 use echod_concrete_spec::rover::RETRY_TIMEOUT;
 use echod_concrete_spec::{
     Config as ConcreteConfig, Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreReq,

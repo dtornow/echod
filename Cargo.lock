@@ -1294,6 +1294,7 @@ dependencies = [
 name = "echod-types"
 version = "0.1.0"
 dependencies = [
+ "rover-spec",
  "serde",
  "verus_builtin",
  "verus_builtin_macros",
