@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use echod_abstract_spec::rover::Pid;
-use echod_abstract_spec::protocol::{Call, Dispatch, Message, Output};
+use echod_types::{Call, Dispatch, Message, Output};
 use echod_types::{Request, Response};
 use rover_exec::Action as ExecAction;
 use rover_spec::rover::comm::{BoundaryEvent as RoverBoundaryEvent, ProcessEvent, Time};

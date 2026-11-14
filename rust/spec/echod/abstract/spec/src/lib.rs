@@ -15,7 +15,6 @@
 )]
 
 pub mod state;
-pub mod protocol;
 pub mod rover;
 pub mod property_claim;
 #[cfg(verus_keep_ghost)]
@@ -24,7 +23,6 @@ pub mod axioms;
 
 pub use state::Config;
 pub use rover::{Proc, Spec};
-pub use protocol::{BoundaryEvent, Call, Dispatch, Message, Output};
 pub use echod_types as types;
 #[cfg(verus_keep_ghost)]
 pub use property_proof::property_proof;

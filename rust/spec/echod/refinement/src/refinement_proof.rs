@@ -1480,12 +1480,12 @@ use echod_abstract_spec::state::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::rover::{Pid as APid, spec_run_timeout};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::protocol::Message as AMessage;
+use echod_types::{Message as AMessage, Dispatch, Output};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{InternalV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
-    Config as AbstractConfig, Dispatch, Output, Proc as AProc, Spec as AModel,
+    Config as AbstractConfig, Proc as AProc, Spec as AModel,
 };
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::comm::Envelope;
@@ -1977,7 +1977,7 @@ pub(crate) open spec fn inv(fleet: ConcreteConfig, world: State<CModel>) -> bool
 /// `request` was injected at the service.
 pub(crate) open spec fn service_request(
     network: Seq<Envelope<APid, AMessage>>,
-    request: echod_abstract_spec::Call,
+    request: echod_types::Call,
 ) -> bool {
     exists|j: int|
         #![trigger network[j]]
@@ -4394,16 +4394,16 @@ use echod_abstract_spec::rover::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{
-    DispatchV, InOutV, InternalV, lemma_lift_dispatch, lemma_min_key as a_lemma_min_key,
+    InOutV, InternalV, lemma_lift_dispatch, lemma_min_key as a_lemma_min_key,
     lift_dispatch, PromiseV, sat_add, ScheduleV, spec_keys, spec_min_key as a_min_key,
     spec_sorted as a_sorted, StoreV as AStore, TaskV,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::protocol::Message as AMessage;
+use echod_types::{Message as AMessage, Dispatch, DispatchV, Output};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::{pset_seq, spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::{Config as AbstractConfig, Dispatch, Output};
+use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::StepResultV;
 #[cfg(verus_keep_ghost)]
@@ -6338,14 +6338,14 @@ use echod_abstract_spec::rover::{
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::rover::Pid as APid;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::protocol::Message as AMessage;
+use echod_types::{Message as AMessage, BoundaryEvent, Call, Output};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::{
-    BoundaryEvent, Call, Config as AbstractConfig, Output, Proc as AProc, Spec as AModel,
+    Config as AbstractConfig, Proc as AProc, Spec as AModel,
 };
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::refinement::{
@@ -9173,8 +9173,8 @@ pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, 
 {
     let send = spec_send(request, response, Seq::empty());
     let output = Output::Response { client: request.client, id: request.id, response };
-    assert(Seq::<echod_abstract_spec::state::DispatchV>::empty().map_values(
-        |dispatch: echod_abstract_spec::state::DispatchV| (
+    assert(Seq::<echod_types::DispatchV>::empty().map_values(
+        |dispatch: echod_types::DispatchV| (
             APid::Outside,
             AMessage::Output(Output::Dispatch(echod_abstract_spec::state::lift_dispatch(dispatch))),
         ),
@@ -9301,7 +9301,7 @@ pub(crate) proof fn lemma_request_served(
     let aa = lemma_service_step(config, ab, at, event, 0);
     let step_result = outcomes[0];
     assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
-    assert(outs[0].send =~= Seq::<echod_abstract_spec::state::DispatchV>::empty());
+    assert(outs[0].send =~= Seq::<echod_types::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
     assert(finite_store(astate(aa).store));
@@ -10643,7 +10643,7 @@ pub(crate) proof fn lemma_input(
             lemma_single_present(ab);
             assert(abstract_model().injectable(config, amessage));
             assert(ab.step(abstract_model(), config, alabel, aa));
-            let visible = seq![BoundaryEvent::Input { at, call: request }];
+            let visible = seq![BoundaryEvent::Input { recipient: (), at, message: AMessage::Request(request) }];
             assert(abstract_model().observe(alabel) =~= visible);
             assert(concrete_model().observe(label) =~= visible);
             lemma_matched_step(config, ab, alabel, aa, visible);
@@ -10715,7 +10715,7 @@ pub(crate) proof fn lemma_outside(
             let alabel = Label::<APid, AMessage>::Outside { sender: APid::Service, at, message: AMessage::Output(output) };
             let aa = observe_outside(ab, at);
             assert(ab.step(abstract_model(), config, alabel, aa));
-            let visible = seq![BoundaryEvent::Output { at, output }];
+            let visible = seq![BoundaryEvent::Output { sender: (), at, message: AMessage::Output(output) }];
             assert(abstract_model().observe(alabel) =~= visible);
             assert(concrete_model().observe(label) =~= visible);
             lemma_matched_step(config, ab, alabel, aa, visible);

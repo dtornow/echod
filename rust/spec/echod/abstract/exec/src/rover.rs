@@ -7,7 +7,7 @@ use echod_types::{Request, Response};
 use crate::projection::group_views as group_exec_views;
 use crate::runtime::copy;
 use crate::state::{unavailable, Handlers, InOut, Out, Store, Work};
-use echod_abstract_spec::protocol::{Call, Dispatch, Message, Output};
+use echod_types::{Call, Dispatch, DispatchV, Message, Output};
 use echod_abstract_spec::state::Config;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::pset_seq;

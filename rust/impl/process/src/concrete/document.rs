@@ -36,7 +36,7 @@ use crate::verified::runtime::copy;
 use echod_abstract_spec::axioms::{axiom_string_ext, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{lemma_tags_ext, lemma_value_ext};
-use echod_abstract_spec::{Call, Dispatch, Output};
+use echod_types::{Call, Dispatch, Output};
 use rover_spec::rover::comm::ProcessEvent;
 #[cfg(verus_keep_ghost)]
 use rover_spec::rover::RoverSpec::StepResultV;

@@ -4,7 +4,7 @@ use vstd::prelude::*;
 use rover_spec::rover::comm::Sched;
 use echod_types::Schedule;
 use crate::state::{InOut, Out, Promise, Store, Task, Work};
-use echod_abstract_spec::protocol::Dispatch;
+use echod_types::{Dispatch, DispatchV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::axiom_pset_seq;
 use echod_abstract_spec::state::*;

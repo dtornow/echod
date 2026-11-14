@@ -7,7 +7,7 @@ use rover_spec::rover::comm::ProcessEvent;
 use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 
 use super::property_claim::*;
-use super::protocol::{Call, Message};
+use echod_types::{Call, Message};
 use super::state::*;
 use super::rover::*;
 use super::axioms::{axiom_next_cron_after, origin};
