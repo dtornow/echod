@@ -34,15 +34,12 @@ pub enum DebugOp {
 pub struct Decoded {
     pub kind: String,
     pub corr: String,
-    pub target: Target,
+    pub target: Option<Target>,
     pub request: rows::Request,
     pub action_kind: Option<String>,
     /// The instant offered to the step. `pinned` says the request named it.
     pub now: u64,
     pub pinned: bool,
-    /// A second request, on another document, once the first has
-    /// committed: a detached create's fence check on the task's origin.
-    pub then: Option<(Target, rows::Request)>,
 }
 
 /// Admit `req` at `now`. Debug operations are accepted only in debug mode;
@@ -107,23 +104,8 @@ fn parse_action<T: DeserializeOwned + Validate>(data: &serde_json::Value) -> Res
     Ok(v)
 }
 
-/// Parse and validate a fence. The reference's validator keeps every action
-/// in the task's origin, but a create of a root; here any create may cross
-/// origins (a detached workflow, committed on its own document first), and a
-/// settle that does is refused by `decode` in the reference's words.
 fn parse_fence(data: &serde_json::Value) -> Result<w::TaskFenceData, String> {
-    let v: w::TaskFenceData = serde_json::from_value(data.clone()).map_err(|e| format!("Invalid request: {e}"))?;
-    match v.validate() {
-        Ok(()) => Ok(v),
-        Err(errors) => {
-            let only_origin = errors.errors().values().all(|kind| matches!(kind, validator::ValidationErrorsKind::Field(es) if es.iter().all(|e| e.code == "origin_mismatch")));
-            if only_origin {
-                Ok(v)
-            } else {
-                Err(w::format_validation_errors(&errors))
-            }
-        }
-    }
+    parse::<w::TaskFenceData>(data)
 }
 
 /// The document a request is about. `None` for a request that has none.
@@ -142,6 +124,11 @@ pub fn origin_of_request(req: &RequestEnvelope) -> Result<Option<String>, String
         "schedule.get" | "schedule.create" | "schedule.delete" => id("id"),
         _ => return Ok(None),
     };
+    if req.kind == "task.heartbeat"
+        && d.get("tasks").and_then(|tasks| tasks.as_array()).is_some_and(Vec::is_empty)
+    {
+        return Ok(None);
+    }
     match origin {
         Some(o) if !o.is_empty() => Ok(Some(o)),
         _ => Err("Request data does not name an id".to_string()),
@@ -166,9 +153,6 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
             }
         };
     }
-    // A fence whose create targets another origin: the create goes first,
-    // on its own document, then the fence's check on the task's.
-    let mut detached: Option<(String, rows::Request)> = None;
     let (q, schedule, action_kind): (rows::Request, Option<String>, Option<String>) = match kind.as_str() {
         "promise.get" => {
             let d = parsed!(w::PromiseGetData);
@@ -276,14 +260,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 },
                 _ => return err(400, "Invalid fence action kind"),
             };
-            // A fence and its action commit as one write on one document, so
-            // a settle must live in the task's origin. A create in another
-            // origin is a detached workflow: it commits first, on its own
-            // document, and the fence's check follows on the task's.
             match action {
                 rows::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
-                    detached = Some((origin_of(&c.id).to_string(), rows::Request::TaskFenceCheck(rows::TaskFenceCheckReq { id: d.id.clone(), version })));
-                    (rows::Request::PromiseCreate(c), None, Some(d.action.kind))
+                    return err(400, "Action must belong to the task's origin");
                 }
                 rows::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
                     return err(400, "Action must belong to the task's origin");
@@ -292,7 +271,21 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
             }
         }
         "task.heartbeat" => {
-            let d = parsed!(w::TaskHeartbeatData);
+            // The imported protocol schema predates document-free heartbeats
+            // and rejects an empty `tasks` array. Keep its validation for
+            // ordinary heartbeats, but admit the empty form after validating
+            // the only remaining semantic field.
+            let d: w::TaskHeartbeatData = match serde_json::from_value(req.data.clone()) {
+                Ok(d) => d,
+                Err(e) => return err(400, &format!("Invalid request: {e}")),
+            };
+            if d.tasks.is_empty() {
+                if d.pid.is_empty() {
+                    return err(400, "Process ID is required");
+                }
+            } else if let Err(e) = d.validate() {
+                return err(400, &w::format_validation_errors(&e));
+            }
             let mut tasks = Vec::with_capacity(d.tasks.len());
             for t in d.tasks {
                 match codec::nat(t.version, "version") {
@@ -357,11 +350,11 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
     };
     // A request about a schedule is served on its document; the rest on
     // their id's origin.
-    let (target, then) = match (schedule, origin, detached) {
-        (Some(id), _, _) => (Target::Schedule(id), None),
-        (None, Some(task_origin), Some((create_origin, check))) => (Target::Origin(create_origin), Some((Target::Origin(task_origin), check))),
-        (None, Some(o), None) => (Target::Origin(o), None),
-        (None, None, _) => return err(400, "Request data does not name an id"),
+    let target = match (schedule, origin) {
+        (Some(id), _) => Some(Target::Schedule(id)),
+        (None, Some(o)) => Some(Target::Origin(o)),
+        (None, None) if matches!(&q, rows::Request::TaskHeartbeat(h) if h.tasks.is_empty()) => None,
+        (None, None) => return err(400, "Request data does not name an id"),
     };
-    Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned, then })
+    Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned })
 }

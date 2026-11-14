@@ -100,10 +100,10 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Echod concrete refinement.** `rust/spec/echod/concrete/spec` holds the
-  concrete semantics, and `rust/spec/echod/refinement` holds the
-  verified interpretation, relation, and forward simulation. The kernel is
-  proved equal to the concrete semantics. The earlier `concrete_refines_abstract` against
+- **Rover concrete refinement, open.** `rust/spec/concrete` holds the
+  catalogue and the handler specifications, and the kernel is proved equal
+  to them. It depends on the abstract model and not on the process. The
+  simulation that `on_event` refines that model is not written yet. The earlier `concrete_refines_abstract` against
   the previous-generation `Model` left with `refine/`. What it established, and what
   the Rover proof has to establish again: every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a
@@ -133,10 +133,10 @@ shows the panels with data.
   kernel's (both read before the first `:`), and the simulator's worker
   address is a URL. The model's side is now checked code: every handler
   in the abstract model's `exec.rs` is verified to compute its twin in `spec.rs`,
-  and `echod_abstract_exec::Spec` is verified, so the checker's
-  verdicts and this theorem speak about the same functions, under the
-  model's own axioms (a value is its view; a set's elements come out in one
-  order, `pset_seq`). What the proof moved: the kernel refuses an acquire
+  and the model's `Model` impl is verified, so the checker's verdicts and
+  this theorem speak about the same functions, under the model's own
+  axioms (a value is its view; a set's elements come out in one order,
+  `pset_seq`). What the proof moved: the kernel refuses an acquire
   at `u32::MAX` (`MAX_VERSION`), as the servers do, where it refused at
   `MAX_TIME`; a task record's resume count saturates as the wire's does;
   the store machine's plan mirrors the validators' doors on a delay, a
@@ -146,12 +146,22 @@ shows the panels with data.
 
 ## Smaller items
 
-- **Checker time on long histories.** Client histories now feed Rover's
-  executable search directly. Inputs are tried at their arrival instant,
-  expected responses guide outcome order, and an explicit beam bounds
-  concurrent alternatives. Exhausting the step/node bounds is reported as
-  `undecided`, never as a refutation. The next lever is a persistent,
-  model-independent state key for deduplicating equivalent beam entries.
+- **Checker time on long histories.** The black-box trace leaves the
+  checker a choice per open write per clock instant: a settle in flight
+  across three instants may have landed at any of them, each a different
+  `settled_at`, until its return says. Several open writes on one origin
+  multiply, and a seed with many concurrent clients on few origins can
+  exceed the profile's width or the budget (`--budget`), which turn the
+  blowup into a report rather than a hang. The clock moves only to the
+  instants the nodes stamp at, clients back off, the checker is told which
+  calls never return and stale schedule work is a no-op, which keeps it
+  narrower: eleven of fifteen seeds decide in seconds, the rest give up
+  undecided, none refuted. The next lever is a client's knowledge that a
+  failed call is over: the node answered unavailable or the connection
+  dropped at an instant, after which the call's effect can land only
+  within the store's latency; told so, the checker would stop placing it
+  at every later instant. Fewer clients per origin or coarser clocks would
+  keep it narrower still.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate

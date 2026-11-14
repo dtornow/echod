@@ -37,8 +37,8 @@ Produce an inventory containing exact paths for the following.
 
 ### Rover
 
-- Rust `RoverSpec::{Spec, Proc, State}` and `RoverExec::{Spec, Proc}`,
-  world semantics, checker, certificate replay, and generic refinement theorem.
+- Rust `RoverModel`, world semantics, checker, certificate replay, and generic
+  refinement theorem.
 - Standalone Resonate protocol, abstract model, property catalogue, tests,
   benchmark, and fuzz driver.
 - Lean `Rover.World`, Resonate abstract/concrete models, trace checker, and
@@ -81,18 +81,17 @@ echod/
 │
 ├── spec/
 │   ├── rover/
-│   │   ├── spec/         # generic Rover world and refinement
-│   │   └── exec/         # checker and certificates
-│   └── echod/
-│       ├── abstract/
-│       │   ├── spec/     # independent Resonate model and properties
-│       │   └── exec/     # executable realization and coverage instrumentation
-│       ├── concrete/
-│       │   └── spec/     # mathematical concrete state and transitions
-│       └── refinement/   # interpretation, relation, simulation proof
+│   │   ├── rust/         # generic world/checker/certificates/refinement
+│   │   └── lean/         # generic Rover world and theorems
+│   ├── abstract/
+│   │   ├── rust/         # independent Resonate model and properties
+│   │   └── lean/         # mirrored abstract model and catalogue
+│   └── concrete/
+│       ├── rust/         # process views/twins, relation, simulation proof
+│       └── lean/         # concrete model/refinement where still useful
 │
 ├── test/
-│   ├── runtime/          # synchronous deterministic Effect interpreter
+│   ├── runtime/          # deterministic Effect interpreter
 │   ├── sim/              # seeded simulation and trace capture
 │   ├── diff/             # differential validation
 │   ├── integration/      # real S3/HTTP tests
@@ -107,10 +106,8 @@ Filesystem directories may be named `abstract` and `concrete`. Rust packages
 should avoid the reserved keyword:
 
 ```text
-echod-abstract-spec  -> echod_abstract_spec
-echod-abstract-exec  -> echod_abstract_exec
-echod-concrete-spec  -> echod_concrete_spec
-echod-refinement     -> echod_refinement
+echod-abstract  -> echod_abstract
+echod-concrete  -> echod_concrete
 ```
 
 ## Layer responsibilities
@@ -144,76 +141,45 @@ Reply Effect -> complete client response
 
 It contains no protocol decisions.
 
-### `spec/rover/spec`
+### `spec/rover`
 
 Domain-independent formal machinery:
 
 - append-only network world
-- ordered pid/process entries over a stateful `RoverSpec::Proc`
-- generic process selection, message/timeout delivery, and routing
+- process slots and routing
 - clean boundary observation
+- certificates and verified replay
+- bounded trace search
 - generic forward-simulation-to-trace-refinement theorem
 
-### `spec/rover/exec`
+### `spec/abstract`
 
-The executable realization of Rover specifications:
+The independent, executable Resonate reference model and its mathematical
+twin. It owns the protocol conformance properties that remain meaningful under
+Rover's world semantics.
 
-- deterministic single-path execution with a strategy-selected action
-- bounded trace and history search
-- certificates and verified replay
-- coverage labels from selected executable outcomes
+It must not import `impl/process`, `spec/concrete`, or `impl/runtime`.
 
-### `spec/echod/abstract/spec`
-
-The independent mathematical Resonate model. It owns the protocol transition
-functions, mathematical state, and conformance properties meaningful under
-Rover semantics. It contains no executable store, handlers, or Rover process.
-`property_claim.rs` keeps every named protocol property and the aggregate
-preservation claim; `property_proof.rs` contains the machine-checked proof.
-
-It must not import `impl/process`, `spec/echod/concrete/spec`, or `impl/runtime`.
-
-### `spec/echod/abstract/exec`
-
-The executable realization of the abstract model: persistent store types,
-verified handler bodies, the executable Echod abstract process, and coverage
-marks. Client history translation and model-driven workloads live in
-`test/model`.
-
-### `spec/echod/concrete/spec`
+### `spec/concrete`
 
 The specification the kernel is proved against, not another implementation
 and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Echod concrete model in `model.rs`: one `Proc` process enum (`Node` or `Store`),
-  nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
-  each enum variant to its local step
-- the Rover adapter over those concrete semantics
-- `property_claim.rs` for concrete integrity and `property_proof.rs` for its proof
+- the Rover model in `model.rs`: nodes and one store, `spec_world` the initial world, `spec_step` the shell around `spec_logic_on_event`
+- the abstract model, which that step refines
 
-The dependency on `echod-abstract-spec` is semantic rather than a refinement
-proof dependency: concrete network messages use the shared
-`Call`/`Output`/`Dispatch` boundary types, and schedule transitions use the
-trusted cron and occurrence-expansion functions.
+Still open, and the reason concrete depends on the abstract model:
 
-Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
-exec-to-spec proofs live under `impl/process/src/concrete`; production code
-imports those local executable definitions.
-
-### `spec/echod/refinement`
-
-The model-specific proof boundary. It interprets concrete documents as the
-abstract store, proves request and internal-work agreement, defines the
-simulation relation, and exports `concrete_refines_abstract` and `refinement_proof`.
-The claim is the crate root; all proof machinery is consolidated privately in
-`refinement_proof.rs`. It depends only on Rover,
-the two specification crates, protocol types, and Verus.
+- the handler arms of `spec_logic_on_event` (`spec_start`, `spec_request`, `spec_completed`, `spec_tick`, `spec_stop`)
+- concrete/abstract world relation
+- per-step forward simulation
+- final `concrete_refines_abstract` theorem
 
 ### `test/runtime`
 
-A synchronous deterministic interpreter for the same Effects:
+A deterministic interpreter for the same Effects:
 
 ```text
 Store Effect -> simulated object store
@@ -226,28 +192,16 @@ faults       -> crash, loss, delay, reordering, failed acknowledgement
 The production and test runtimes must drive the exact same
 `impl/process::State::on_event`.
 
-`test/runtime/src/rover_sim.rs` is an isolated experiment: generic
-`RoverExec::exec` drives production-backed concrete processes, projects their
-boundary trace, and asks `echod_abstract_exec::Spec` to certify it. The existing DST
-remains the primary simulator.
-
 ## Dependency direction
 
 ```text
-spec/rover/spec ---> spec/echod/abstract/spec ---> spec/echod/concrete/spec ---> impl/process ---> impl/runtime ---> impl/cli
-      |               |                              |
-      v               v                              v
-spec/rover/exec --> spec/echod/abstract/exec     spec/echod/refinement
-                       |                              ^
-                       +------------------------------+
+spec/rover ---> spec/abstract ---> spec/concrete ---> impl/process ---> impl/runtime ---> impl/cli
 
 impl + spec -----------------> test/*
 ```
 
-Concrete depends on the Rover world and the abstract model's shared semantic
-boundary. Refinement depends on both models. The process depends on concrete,
-because a handler's `ensures` names `spec_promise_create`. Concrete and
-refinement depend on neither the process nor the runtime. Production code must
+Concrete depends on the Rover world and on the abstract model. The process depends on concrete,
+because a handler's `ensures` names `spec_promise_create`. Concrete depends on neither the process nor the runtime. Production code must
 never depend on test code. The ghost half of the concrete crate erases
 under `cargo build`.
 
@@ -266,11 +220,11 @@ certificates. A process's identity belongs in its state or configuration.
 
 ### Boundary hides all internal topology
 
-Every `RoverSpec::Spec` owns:
+Every `RoverModel` owns:
 
 ```rust
 type Boundary;
-spec fn observe(label) -> Seq<Self::Boundary>;
+spec fn spec_observe(label) -> Seq<Self::Boundary>;
 ```
 
 Only traffic crossing `outside` (conceptually PID 0) is observable. Concrete
@@ -308,18 +262,15 @@ insufficient. Acceptance is sound only after verified certificate replay.
 ```text
 impl/process::State::on_event
     implements
-spec/echod/concrete/spec::spec_logic_on_event
+spec/concrete::spec_logic_on_event
     which is the node step of
 Rover instantiated with the concrete model
-    is proved by spec/echod/refinement to refine
+    refines
 Rover instantiated with the abstract model
 ```
 
-The statement is `rover_spec::rover::refinement::refines` of
-`echod_concrete_spec::Spec` against
-`echod_abstract_spec::Spec`, exported as
-`echod_refinement::concrete_refines_abstract` and proved by
-`echod_refinement::refinement_proof`: every
+The statement is `echod_rover::rover::refinement::refines` of
+`echod_concrete::Model` against `resonate::abstract_model::Model`: every
 boundary trace of the concrete world is a boundary trace of the abstract
 world. `concrete_refines_abstract` proves it from a relation on the two
 initial worlds and a forward simulation, at one boundary,
@@ -368,7 +319,7 @@ deterministic test runtime
     records clean Boundary events
               |
               v
-Echod abstract checker
+abstract Rover checker
     searches for an abstract execution
               |
               v

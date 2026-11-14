@@ -18,18 +18,11 @@ pub fn pairs(m: &HashMap<String, String>) -> Vec<(String, String)> {
     v
 }
 
-/// The tags a promise is created with.
-///
-/// One concession to the SDKs as they are: a sleep is created as a timer
-/// *with* a target, because older servers armed only targeted promises and
-/// the worker dropped the task that came with it. The specification arms a
-/// timer on its own and refuses a targeted timer, so the target is dropped
-/// here: the sleep is an external promise, armed, with no task.
+/// The tags a promise is created with, unchanged and in canonical order.
+/// Protocol-invalid combinations are rejected by the verified handler rather
+/// than normalized at the shell boundary.
 pub fn create_tags(m: &HashMap<String, String>) -> Vec<(String, String)> {
-    let timer = m.get("resonate:timer").map(String::as_str) == Some("true");
-    let mut v: Vec<(String, String)> = m.iter().filter(|(k, _)| !(timer && k.as_str() == "resonate:target")).map(|(a, b)| (a.clone(), b.clone())).collect();
-    v.sort();
-    v
+    pairs(m)
 }
 
 pub fn map(v: &[(String, String)]) -> HashMap<String, String> {
