@@ -9,8 +9,8 @@
 
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::DocumentBody;
+use echod_abstract::trusted::copy;
+use echod_concrete::DocumentBody;
 
 use crate::verified::flight::{self, Decided, Job};
 use crate::verified::text::{copy_string, text};
@@ -31,7 +31,7 @@ use crate::state::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{pend_v, spec_body_deadline, DocumentBodyV};
+use echod_concrete::node::{pend_v, spec_body_deadline, DocumentBodyV};
 
 verus! {
 
@@ -203,7 +203,7 @@ pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>
         r.deep_view() == spec_schedule_row(doc@),
 {
     proof {
-        crate::concrete::lemma_doc_view(doc);
+        echod_concrete::lemma_doc_view(doc);
     }
     match doc {
         DocumentBody::Schedule(Some(row)) => Some(copy(row)),
@@ -295,7 +295,7 @@ impl State {
             None => self.fire_idle(f, ws, t1, fired),
             Some((row, pending)) => {
                 proof {
-                    crate::concrete::lemma_pending_view(&pending);
+                    echod_concrete::lemma_pending_view(&pending);
                 }
                 let next = match schedule_row(&advanced) {
                     Some(c) => c.next_run_at,
@@ -399,7 +399,7 @@ impl State {
         let deadline = document::deadline(&after);
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::FireBegin { flight, origin: copy_string(&ctx.origin), now: t, row: Box::new(copy(&ctx.row)), at: ctx.pending.at, promise_id: copy_string(&ctx.pending.promise), next: ctx.next });
         let mut commit = self.commit_new(wo, after, deadline, t, None);
@@ -437,7 +437,7 @@ impl State {
         };
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::AdvanceBegin { flight, schedule: id, now: t, at: ctx.pending.at, next: ctx.next });
         let FireCtx { ws, row: _, advanced, pending: _, t1: _, origin: _, next: _ } = ctx;

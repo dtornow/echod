@@ -14,31 +14,74 @@ namespace Resonate.Abstract
 open Rover
 open ServerModel
 
+/-- One workflow request transition: drain old due work, run the public
+handler, then drain work made due by that handler. -/
+def completeOrigin (origin : String) (now : Time)
+    (action : Handler α) : Handler α := do
+  sweepOrigin origin now
+  let result ← action
+  sweepOrigin origin now
+  return result
+
 /-- The handler for each of the 21 public operations. -/
 def handler (request : Request) (now : Time) : Handler Response :=
   match request with
-  | .promiseGet req => .promiseGet <$> promiseGet req now
-  | .promiseCreate req => .promiseCreate <$> promiseCreate req now
-  | .promiseSettle req => .promiseSettle <$> promiseSettle req now
+  | .promiseGet req =>
+      .promiseGet <$> completeOrigin req.id.origin now (promiseGet req now)
+  | .promiseCreate req =>
+      .promiseCreate <$> completeOrigin req.id.origin now (promiseCreate req now)
+  | .promiseSettle req =>
+      .promiseSettle <$> completeOrigin req.id.origin now (promiseSettle req now)
   | .promiseRegisterCallback req =>
-      .promiseRegisterCallback <$> promiseRegisterCallback req now
+      if req.awaited.sameOrigin req.awaiter then
+        .promiseRegisterCallback <$>
+          completeOrigin req.awaited.origin now (promiseRegisterCallback req now)
+      else
+        .promiseRegisterCallback <$> promiseRegisterCallback req now
   | .promiseRegisterListener req =>
-      .promiseRegisterListener <$> promiseRegisterListener req now
+      .promiseRegisterListener <$>
+        completeOrigin req.awaited.origin now (promiseRegisterListener req now)
   | .promiseSearch req => pure (.promiseSearch (promiseSearch req now))
   | .scheduleGet req => .scheduleGet <$> scheduleGet req now
   | .scheduleCreate req => .scheduleCreate <$> scheduleCreate req now
   | .scheduleDelete req => .scheduleDelete <$> scheduleDelete req now
   | .scheduleSearch req => pure (.scheduleSearch (scheduleSearch req now))
-  | .taskGet req => .taskGet <$> taskGet req now
-  | .taskCreate req => .taskCreate <$> taskCreate req now
-  | .taskAcquire req => .taskAcquire <$> taskAcquire req now
-  | .taskFence req => .taskFence <$> taskFence req now
-  | .taskHeartbeat req => .taskHeartbeat <$> taskHeartbeat req now
-  | .taskSuspend req => .taskSuspend <$> taskSuspend req now
-  | .taskFulfill req => .taskFulfill <$> taskFulfill req now
-  | .taskRelease req => .taskRelease <$> taskRelease req now
-  | .taskHalt req => .taskHalt <$> taskHalt req now
-  | .taskContinue req => .taskContinue <$> taskContinue req now
+  | .taskGet req =>
+      .taskGet <$> completeOrigin req.id.origin now (taskGet req now)
+  | .taskCreate req =>
+      .taskCreate <$> completeOrigin req.action.id.origin now (taskCreate req now)
+  | .taskAcquire req =>
+      .taskAcquire <$> completeOrigin req.id.origin now (taskAcquire req now)
+  | .taskFence req =>
+      if req.action.targetId != req.id ∧ req.action.targetId.sameOrigin req.id then
+        .taskFence <$> completeOrigin req.id.origin now (taskFence req now)
+      else
+        .taskFence <$> taskFence req now
+  | .taskHeartbeat req =>
+      match req.tasks with
+      | [] => .taskHeartbeat <$> taskHeartbeat req now
+      | first :: _ =>
+          if sameOriginRefs first.id.origin req.tasks then
+            .taskHeartbeat <$>
+              completeOrigin first.id.origin now (taskHeartbeat req now)
+          else
+            .taskHeartbeat <$> taskHeartbeat req now
+  | .taskSuspend req =>
+      if req.actions.any (fun action => !action.awaited.sameOrigin req.id) then
+        .taskSuspend <$> taskSuspend req now
+      else
+        .taskSuspend <$> completeOrigin req.id.origin now (taskSuspend req now)
+  | .taskFulfill req =>
+      if req.action.id.sameOrigin req.id then
+        .taskFulfill <$> completeOrigin req.id.origin now (taskFulfill req now)
+      else
+        .taskFulfill <$> taskFulfill req now
+  | .taskRelease req =>
+      .taskRelease <$> completeOrigin req.id.origin now (taskRelease req now)
+  | .taskHalt req =>
+      .taskHalt <$> completeOrigin req.id.origin now (taskHalt req now)
+  | .taskContinue req =>
+      .taskContinue <$> completeOrigin req.id.origin now (taskContinue req now)
   | .taskSearch req => pure (.taskSearch (taskSearch req now))
 
 /-- Run the request's handler: its response, the next state, and the

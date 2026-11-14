@@ -12,89 +12,11 @@ def promiseGet (req : PromiseGetReq) (now : Nat) : Handler PromiseGetRes := do
 
 def promiseCreate (req : PromiseCreateReq) (now : Nat) :
     Handler PromiseCreateRes := do
-  if req.tags.timerTargeted then
+  if req.timeoutAt > MAX_TIME ∨ req.tags.timerTargeted then
     return { status := 400, promise := none }
   let o ← readOrCreate req now
+  dispatchIfDue o now
   return { status := 200, promise := some (o.promise.toRecord o.id) }
-
-/-- Wake `awaiter` because `awaited` settled. -/
-def settleResume (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
-  match ← readTask awaiter now with
-  | none => pure ()
-  | some (object, task) =>
-      match task.state with
-      | .suspended =>
-          setObject { object with
-            task := some { task with
-              state := .pending
-              resumes := [awaited]
-              retryTimeoutAt := some now } }
-      | .pending | .acquired | .halted =>
-          if !(task.resumes.contains awaited) then
-            setObject { object with
-              task := some { task with resumes := task.resumes ++ [awaited] } }
-      | .fulfilled => pure ()
-
-/-- Drop one callback and resume its task. A pending promise has not settled. -/
-def settleCallback (req : PromiseRegisterCallbackReq) (now : Nat) : Handler Unit := do
-  match ← readObject req.awaited now with
-  | none => pure ()
-  | some awaited =>
-      if awaited.promise.state == .pending then pure ()
-      else if awaited.promise.callbacks.contains req.awaiter then
-        setObject { awaited with
-          promise.callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
-        settleResume req.awaited req.awaiter now
-
-/-- Drop one listener and tell it. -/
-def settleListener (req : PromiseRegisterListenerReq) (now : Nat) : Handler Unit := do
-  match ← readObject req.awaited now with
-  | none => pure ()
-  | some awaited =>
-      if awaited.promise.state == .pending then pure ()
-      else if awaited.promise.listeners.contains req.address then
-        setObject { awaited with
-          promise.listeners := awaited.promise.listeners.filter (· != req.address) }
-        setMessage req.address (.unblock (awaited.promise.toRecord req.awaited))
-
-def wasDue (id : Ident) (now : Nat) : Handler Bool := do
-  match ← readObject id now with
-  | none => return false
-  | some object => return retryDue object.promise object.task now
-
-/-- Offer a task this settlement woke. A retry that was already due stays. -/
-def offerIfNew (awaiter : Ident) (due : Bool) (now : Nat) : Handler Unit := do
-  if due then
-    pure ()
-  else
-    match ← readTask awaiter now with
-    | none => pure ()
-    | some (object, task) =>
-        match task.retryTimeoutAt with
-        | none => pure ()
-        | some due =>
-            if task.state == .pending ∧ due ≤ now ∧ object.promise.state == .pending then
-              let env ← ask
-              setObject { object with
-                task := some { task with retryTimeoutAt := some (now + env.config.retryTimeout) } }
-              setMessage
-                ((object.promise.tags.get? "resonate:target").getD "")
-                (.execute awaiter task.version)
-            else
-              pure ()
-
-/-- Resume the tasks registered on `id`, tell its listeners, and offer a task
-this resume made due. -/
-def resumeRegistered (id : Ident) (callbacks : List Ident) (listeners : List String)
-    (now : Nat) : Handler Unit := do
-  let mine := callbacks.filter (·.sameOrigin id)
-  let dues ← mine.mapM (wasDue · now)
-  mine.forM fun awaiter =>
-    settleCallback { awaited := id, awaiter } now
-  listeners.forM fun address =>
-    settleListener { awaited := id, address } now
-  (mine.zip dues).forM fun (awaiter, due) =>
-    offerIfNew awaiter due now
 
 def promiseSettle (req : PromiseSettleReq) (now : Nat) :
     Handler PromiseSettleRes := do
@@ -109,7 +31,6 @@ def promiseSettle (req : PromiseSettleReq) (now : Nat) :
           value := req.value
           settledAt := some now }
         setSettled o p now
-        resumeRegistered req.id p.callbacks p.listeners now
         return { status := 200, promise := some (p.toRecord req.id) }
       return { status := 200, promise := some (o.promise.toRecord req.id) }
 
@@ -155,7 +76,8 @@ def taskGet (req : TaskGetReq) (now : Nat) : Handler TaskGetRes := do
 
 def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
   let action := req.action
-  if action.tags.otype != .runnable ∨ action.tags.timerTargeted then
+  if req.ttl == 0 ∨ req.ttl > MAX_TIME ∨ action.timeoutAt > MAX_TIME ∨
+      action.tags.otype != .runnable ∨ action.tags.timerTargeted then
     return { status := 400 }
   let o ← readOrCreate action now
   if o.promise.otype != .runnable then return { status := 422 }
@@ -166,6 +88,7 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
         return { status := 200, task := some (t.toRecord action.id),
                  promise := some (o.promise.toRecord action.id) }
       else if t.state == .pending then
+        if t.version ≥ MAX_VERSION then return { status := 409 }
         let next := t.acquire req.pid req.ttl now
         setObject { o with task := some next }
         return { status := 200, task := some (next.toRecord action.id),
@@ -173,11 +96,13 @@ def taskCreate (req : TaskCreateReq) (now : Nat) : Handler TaskCreateRes := do
       return { status := 409 }
 
 def taskAcquire (req : TaskAcquireReq) (now : Nat) : Handler TaskAcquireRes := do
+  if req.ttl == 0 ∨ req.ttl > MAX_TIME then return { status := 400 }
   match ← readTask req.id now with
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .pending then return { status := 409 }
       if t.version != req.version then return { status := 409 }
+      if t.version ≥ MAX_VERSION then return { status := 409 }
       let next := t.acquire req.pid req.ttl now
       setObject { o with task := some next }
       return { status := 200, task := some (next.toRecord req.id),
@@ -269,7 +194,7 @@ def taskRelease (req : TaskReleaseReq) (now : Nat) : Handler TaskReleaseRes := d
   | some (o, t) =>
       if t.state != .acquired then return { status := 409 }
       if t.version != req.version then return { status := 409 }
-      setObject { o with task := some (t.unlease .pending (some now)) }
+      dispatchTask o (t.unlease .pending none) now
       return { status := 200 }
 
 def taskHalt (req : TaskHaltReq) (now : Nat) : Handler TaskHaltRes := do
@@ -286,7 +211,7 @@ def taskContinue (req : TaskContinueReq) (now : Nat) : Handler TaskContinueRes :
   | none => return { status := 404 }
   | some (o, t) =>
       if t.state != .halted then return { status := 409 }
-      setObject { o with task := some { t with state := .pending, retryTimeoutAt := some now } }
+      dispatchTask o { t with state := .pending } now
       return { status := 200 }
 
 def taskSearch (_req : TaskSearchReq) (_now : Nat) : TaskSearchRes :=
@@ -300,7 +225,8 @@ def scheduleGet (req : ScheduleGetReq) (_now : Nat) : Handler ScheduleGetRes := 
 
 def scheduleCreate (req : ScheduleCreateReq) (now : Nat) :
     Handler ScheduleCreateRes := do
-  if req.promiseTags.timerTargeted then return { status := 400 }
+  if req.promiseTimeout > MAX_TIME ∨ req.promiseTags.timerTargeted then
+    return { status := 400 }
   match ← getSchedule req.id with
   | some schedule =>
       return { status := 200, schedule := some schedule }

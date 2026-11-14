@@ -23,16 +23,6 @@ abbrev PromiseObject := AbstractModel.PromiseObject
 abbrev TaskObject := AbstractModel.TaskObject
 abbrev ServerConfig := AbstractModel.ServerConfig
 
-/-- A pending task whose retry is due. The promise it runs is still pending. -/
-def retryDue (promise : PromiseObject) (task : Option TaskObject) (now : Nat) : Bool :=
-  match task with
-  | some t =>
-    promise.state == .pending && t.state == .pending &&
-      match t.retryTimeoutAt with
-      | some due => decide (due ≤ now)
-      | none => false
-  | none => false
-
 /-- Pure environment value supplied to document decision functions. -/
 structure HandlerEnv where
   config : ServerConfig := {}
@@ -127,6 +117,11 @@ configuration, not an abstract transition. -/
 structure Config extends ServerConfig where
   deriving Repr
 
+/-- Largest client-visible time/duration and task fencing version carried by
+the wire protocol. -/
+def MAX_TIME : Nat := 2 ^ 62
+def MAX_VERSION : Nat := 2 ^ 32 - 1
+
 /-- One promise and the task that executes it, addressed by its id. -/
 structure Object where
   id : Ident
@@ -183,6 +178,9 @@ def State.init : State := {}
 
 def sameOriginRefs (origin : String) (refs : List TaskRef) : Bool :=
   refs.all (·.id.origin == origin)
+
+def sortStrings (values : List String) : List String :=
+  values.mergeSort fun left right => decide (left ≤ right)
 
 /-- Publicly observable emissions: correlated replies and boundary messages. -/
 inductive Output where
