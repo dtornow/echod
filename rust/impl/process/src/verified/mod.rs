@@ -42,7 +42,7 @@
 //! - Copies: `runtime::copy` returns its argument;
 //!   `flight::copy_error` the same for a `StoreError`.
 //! - The store: `StoreRes` is what the store answered. Whether S3
-//!   answers as `echod_concrete_spec::store::spec_apply` says is the store's
+//!   answers as `echod_concrete_spec::state::spec_apply` says is the store's
 //!   fidelity, outside the proof; the simulator exercises it.
 //! - The runtime: the clock handed in on every event, the effects
 //!   performed in the order they leave, and each store answer returned

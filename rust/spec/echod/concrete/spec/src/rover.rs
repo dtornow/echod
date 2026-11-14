@@ -17,12 +17,12 @@ use RoverSpec::StepResultV;
 use echod_types::Response;
 
 #[cfg(verus_keep_ghost)]
-use crate::node::{spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
-pub use crate::node::NodeV;
+use crate::state::{spec_request, spec_store_reply, spec_timeout, spec_wake, NoteV};
+pub use crate::state::NodeV;
 #[cfg(verus_keep_ghost)]
-use crate::store::spec_apply;
-pub use crate::store::{EntryV, StoreV};
-use crate::store::{Etag, Read, StoreReq, StoreError, StoreRes};
+use crate::state::spec_apply;
+pub use crate::state::{EntryV, StoreV};
+use crate::state::{Etag, Read, StoreReq, StoreError, StoreRes};
 
 verus! {
 

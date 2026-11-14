@@ -9,8 +9,6 @@ use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
 use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::work::*;
-#[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::*;
 use echod_abstract_spec::protocol::Dispatch;
 use echod_abstract_spec::state::{Config, Id, Time};

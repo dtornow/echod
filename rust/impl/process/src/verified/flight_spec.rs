@@ -16,7 +16,7 @@ use crate::concrete::document::{
     spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
 use crate::concrete::store::{StoreError, StoreReq, StoreRes};
-use echod_concrete_spec::model::{Message, Pid};
+use echod_concrete_spec::rover::{Message, Pid};
 use echod_types::Response;
 
 use super::commit_spec::*;
@@ -99,7 +99,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBod
     match after.flight {
         Some(open) => {
             match flight.etag {
-                Some(chars) => echod_concrete_spec::model::lemma_string_realised(chars),
+                Some(chars) => echod_concrete_spec::rover::lemma_string_realised(chars),
                 None => {},
             }
         },

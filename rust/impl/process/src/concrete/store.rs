@@ -6,11 +6,11 @@
 use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
-pub use echod_concrete_spec::store::{Etag, Read, StoreReq, StoreError, StoreRes};
-pub use echod_concrete_spec::store::*;
-use echod_concrete_spec::model::Pid;
+pub use echod_concrete_spec::state::{Etag, Read, StoreReq, StoreError, StoreRes};
+pub use echod_concrete_spec::state::*;
+use echod_concrete_spec::rover::Pid;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::model::{spec_bytes, spec_string};
+use echod_concrete_spec::rover::{spec_bytes, spec_string};
 
 verus! {
 
@@ -568,7 +568,7 @@ impl Store {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
                     proof {
-                        echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
+                        echod_concrete_spec::rover::lemma_bytes_realised(entry.body@);
                         echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
                     StoreRes::Get { result: Ok(Some((body, etag(&entry.body)))) }
@@ -587,7 +587,7 @@ impl Store {
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
-                            echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
+                            echod_concrete_spec::rover::lemma_bytes_realised(entry.body@);
                             echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
                         StoreRes::GetIfNoneMatch { result: Ok(Read::Body(body, have)) }
@@ -632,7 +632,7 @@ impl Store {
                             't', 'h', 'i', 's', ' ', 's', 't', 'o', 'r', 'e', ' ', 'd', 'o', 'e', 's', ' ',
                             'n', 'o', 't', ' ', 'a', 'p', 'p', 'e', 'n', 'd',
                         ]);
-                        echod_concrete_spec::model::lemma_string_of(text);
+                        echod_concrete_spec::rover::lemma_string_of(text);
                     }
                     StoreRes::AppIfMatch { result: Err(StoreError::Unavailable(text)) }
                 } else {

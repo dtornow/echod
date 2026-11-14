@@ -187,10 +187,11 @@ and not a dependent of the process:
 
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
-- the Echod concrete model in `model.rs`: one `Proc` process enum (`Node` or `Store`),
+- the Echod concrete adapter in `rover.rs`: one `Proc` process enum (`Node` or `Store`),
   nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
   each enum variant to its local step
 - the Rover adapter over those concrete semantics
+- `state.rs` for node and store state and transitions, in separate commented sections
 - `property_claim.rs` for concrete integrity and `property_proof.rs` for its proof
 
 The dependency on `echod-abstract-spec` is semantic rather than a refinement

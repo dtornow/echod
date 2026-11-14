@@ -10,7 +10,7 @@ use crate::document::{
     ProtocolEffectV, StoredDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use crate::state::{
     spec_committed_notes, spec_execute_notes, spec_keyed_notes, spec_note_key,
     spec_request_commits, spec_request_transition, spec_sorted_present, spec_stored_body,
     spec_stored_committed_at, spec_unavailable, spec_unblock_notes, spec_unblock_notes_for,

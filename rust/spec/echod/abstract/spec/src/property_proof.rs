@@ -8,10 +8,8 @@ use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 
 use super::property_claim::*;
 use super::protocol::{Call, Message};
-use super::requests::*;
-use super::rover::*;
 use super::state::*;
-use super::work::*;
+use super::rover::*;
 use super::axioms::{axiom_next_cron_after, origin};
 
 verus! {

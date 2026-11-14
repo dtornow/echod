@@ -369,7 +369,7 @@ pub open spec fn promise_well_formed(
     &&& forall|i: int| 0 <= i < promise.callbacks.len() ==>
         origin(promise.callbacks[i]) == origin(id)
     &&& (promise.callbacks.len() > 0 || promise.listeners.len() > 0) ==>
-        crate::node::spec_awaitable(promise.tags)
+        crate::state::spec_awaitable(promise.tags)
     &&& promise.state != PromiseState::Pending ==>
         promise.callbacks.len() == 0 && promise.listeners.len() == 0
 }
@@ -379,7 +379,7 @@ pub open spec fn task_well_formed(
     object: ObjV,
     committed_at: u64,
 ) -> bool {
-    (object.task is Some) == crate::node::spec_targeted(object.promise.tags)
+    (object.task is Some) == crate::state::spec_targeted(object.promise.tags)
         && match object.task {
             None => true,
             Some(task) => {
@@ -421,7 +421,7 @@ pub open spec fn callback_targets_well_formed(
         let awaiter = #[trigger] object.promise.callbacks[i];
         objects.contains_key(awaiter)
             && objects[awaiter].task is Some
-            && crate::node::spec_targeted(objects[awaiter].promise.tags)
+            && crate::state::spec_targeted(objects[awaiter].promise.tags)
     }
 }
 
@@ -484,8 +484,8 @@ pub open spec fn schedule_body_well_formed(
                 Some(last) => row.created_at <= last < row.next_run_at,
                 None => true,
             }
-            &&& !(crate::node::spec_targeted(row.promise_tags)
-                && crate::node::spec_timer(row.promise_tags))
+            &&& !(crate::state::spec_targeted(row.promise_tags)
+                && crate::state::spec_timer(row.promise_tags))
         },
         None => true,
     }
@@ -517,7 +517,7 @@ pub open spec fn workflow_well_formed(workflow: WorkflowDocumentV) -> bool {
     }
     // Deferred until descendant settlement semantics are decided:
     // &&& descendants_well_formed(workflow.objects)
-    &&& workflow.next_wake_at == match crate::node::spec_body_deadline(
+    &&& workflow.next_wake_at == match crate::state::spec_body_deadline(
         DocumentBodyV::Workflow(workflow.objects),
     ) {
         Some(at) => Some(at as u64),
@@ -538,12 +538,12 @@ pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
                 Some(last) => row.created_at <= last < row.next_run_at,
                 None => true,
             }
-            &&& !(crate::node::spec_targeted(row.promise_tags)
-                && crate::node::spec_timer(row.promise_tags))
+            &&& !(crate::state::spec_targeted(row.promise_tags)
+                && crate::state::spec_timer(row.promise_tags))
         },
         None => true,
     }
-    &&& schedule.next_wake_at == match crate::node::spec_body_deadline(
+    &&& schedule.next_wake_at == match crate::state::spec_body_deadline(
         DocumentBodyV::Schedule(schedule.schedule),
     ) {
         Some(at) => Some(at as u64),

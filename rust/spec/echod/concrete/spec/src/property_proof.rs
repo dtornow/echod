@@ -10,17 +10,17 @@ use echod_abstract_spec::Call;
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec::Proc as _;
 
-use crate::model::{
+use crate::rover::{
     spec_node, spec_nodes, spec_store, spec_world, Config, Message, Pid, Proc,
 };
-use crate::node::{
+use crate::state::{
     spec_begin, spec_cached, spec_commit, spec_decide, spec_earliest_from,
     spec_earliest_key, spec_fail, spec_forget, spec_body_is_empty, spec_keep,
     spec_min_key, spec_owns, spec_remember, spec_request, spec_sorted,
     spec_store_reply, spec_timeout, CachedV, DocumentBodyV, FlightV, NodeV,
 };
 use crate::property_claim::*;
-use crate::store::{
+use crate::state::{
     spec_apply, spec_before, spec_bump, spec_find, spec_insert_at, spec_put,
     spec_remove_at, EntryV, StoreReq, StoreRes, StoreV,
 };
@@ -277,8 +277,8 @@ proof fn lemma_process_layout(config: Config)
     lemma_nodes_layout(config, 0);
     let nodes = spec_nodes(config, 0);
     let world = spec_world(config);
-    assert(world == nodes + seq![(Pid::Store, crate::model::Proc::Store(
-        crate::store::StoreV {
+    assert(world == nodes + seq![(Pid::Store, crate::rover::Proc::Store(
+        crate::state::StoreV {
             entries: Seq::empty(),
             appendable: config.appendable,
             seen: Seq::empty(),
@@ -422,7 +422,7 @@ proof fn lemma_keep_integrity(
     if spec_body_is_empty(doc) && etag is None {
         lemma_forget_integrity(node, key, 0);
     } else {
-        lemma_remember_integrity(node, key, crate::node::spec_encode_body(doc), etag, 0);
+        lemma_remember_integrity(node, key, crate::state::spec_encode_body(doc), etag, 0);
     }
 }
 
@@ -449,8 +449,8 @@ proof fn lemma_earliest_from_cached(
     decreases docs.len() - i,
 {
     if i < docs.len() {
-        match crate::node::spec_earliest_in(
-            crate::node::spec_read(docs[i].key, docs[i].body),
+        match crate::state::spec_earliest_in(
+            crate::state::spec_read(docs[i].key, docs[i].body),
             now,
         ) {
             Some(at) if spec_owns(node, docs[i].key) => {
@@ -494,7 +494,7 @@ proof fn lemma_earliest_owned(node: NodeV, now: Time)
     }
 }
 
-proof fn lemma_commit_integrity(node: NodeV, flight: FlightV, tag: crate::store::Etag)
+proof fn lemma_commit_integrity(node: NodeV, flight: FlightV, tag: crate::state::Etag)
     requires
         state_properties(Proc::Node(node)),
         spec_owns(node, flight.key),
@@ -527,21 +527,21 @@ proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocumentBodyV
         }),
 {
     let (next_doc, reply, born, notify) = match flight.job {
-        crate::node::JobV::External(request) => {
-            let (next, response) = crate::node::spec_handle(doc, request, flight.now);
+        crate::state::JobV::External(request) => {
+            let (next, response) = crate::state::spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        crate::node::JobV::Due => crate::node::spec_run_due(doc, flight.now, node.retry_timeout),
-        crate::node::JobV::Occurrence(pending) => (
-            crate::node::spec_occurrence(doc, pending, flight.now),
+        crate::state::JobV::Due => crate::state::spec_run_due(doc, flight.now, node.retry_timeout),
+        crate::state::JobV::Occurrence(pending) => (
+            crate::state::spec_occurrence(doc, pending, flight.now),
             None,
             Seq::empty(),
             Seq::empty(),
         ),
     };
     let previous = match spec_cached(node, flight.key) {
-        Some(cached) => crate::node::spec_read(flight.key, cached.body),
-        None => crate::node::spec_empty_body(flight.key),
+        Some(cached) => crate::state::spec_read(flight.key, cached.body),
+        None => crate::state::spec_empty_body(flight.key),
     };
     if next_doc == previous && born.len() == 0 {
         lemma_keep_integrity(node, flight.key, next_doc, flight.etag);
@@ -553,7 +553,7 @@ proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocumentBodyV
 proof fn lemma_begin_integrity(
     node: NodeV,
     key: Seq<char>,
-    job: crate::node::JobV,
+    job: crate::state::JobV,
     now: Time,
     caller: Option<(Seq<char>, u64)>,
 )
@@ -573,8 +573,8 @@ proof fn lemma_begin_integrity(
         Some(cached) => {
             lemma_decide_integrity(
                 node,
-                crate::node::spec_flight(0, key, cached.etag, now, caller, job),
-                crate::node::spec_read(key, cached.body),
+                crate::state::spec_flight(0, key, cached.etag, now, caller, job),
+                crate::state::spec_read(key, cached.body),
             );
         },
         None => {
@@ -595,12 +595,12 @@ proof fn lemma_request_integrity(node: NodeV, now: Time, request: Call)
             &&& node.next_op <= next.next_op
         }),
 {
-    match crate::node::spec_key(request.request) {
+    match crate::state::spec_key(request.request) {
         Some(key) if spec_owns(node, key) => {
             lemma_begin_integrity(
                 node,
                 key,
-                crate::node::JobV::External(request.request),
+                crate::state::JobV::External(request.request),
                 now,
                 Some((request.client@, request.id)),
             );
@@ -624,12 +624,12 @@ proof fn lemma_timeout_integrity(node: NodeV, now: Time)
     if node.pending.len() > 0 {
         let pending = node.pending[0];
         let without = NodeV { pending: node.pending.skip(1), ..node };
-        let key = crate::node::spec_origin_key(echod_types::origin(pending.promise));
+        let key = crate::state::spec_origin_key(echod_types::origin(pending.promise));
         if spec_owns(without, key) {
             lemma_begin_integrity(
                 without,
                 key,
-                crate::node::JobV::Occurrence(pending),
+                crate::state::JobV::Occurrence(pending),
                 now,
                 None,
             );
@@ -638,7 +638,7 @@ proof fn lemma_timeout_integrity(node: NodeV, now: Time)
         lemma_earliest_owned(node, now);
         match spec_earliest_key(node, now) {
             Some(key) => {
-                lemma_begin_integrity(node, key, crate::node::JobV::Due, now, None);
+                lemma_begin_integrity(node, key, crate::state::JobV::Due, now, None);
             },
             None => {},
         }
@@ -667,10 +667,10 @@ proof fn lemma_store_reply_integrity(
                     StoreRes::Get { result: Ok(got) } => {
                         let (doc, etag) = match got {
                             Some((body, tag)) => (
-                                crate::node::spec_read(flight.key, body@),
+                                crate::state::spec_read(flight.key, body@),
                                 Some(tag.0@),
                             ),
-                            None => (crate::node::spec_empty_body(flight.key), None),
+                            None => (crate::state::spec_empty_body(flight.key), None),
                         };
                         lemma_decide_integrity(
                             NodeV { flight: None, ..node },
@@ -1083,7 +1083,7 @@ proof fn lemma_apply_put_match(
     store: StoreV,
     key: String,
     body: Vec<u8>,
-    etag: crate::store::Etag,
+    etag: crate::state::Etag,
 )
     requires
         state_properties(Proc::Store(store)),
@@ -1099,7 +1099,7 @@ proof fn lemma_apply_put_match(
     let request = StoreReq::PutIfMatch { key, body, etag };
     let next = spec_apply(store, request).0;
     match spec_find(store.entries, key@, 0) {
-        Some(i) if crate::store::spec_etag(store.entries[i].body) == etag => {
+        Some(i) if crate::state::spec_etag(store.entries[i].body) == etag => {
             assert(spec_bump(store.entries[i].version) >= store.entries[i].version);
             assert(spec_bump(store.entries[i].version) > 0);
             let entry = EntryV {
@@ -1125,7 +1125,7 @@ proof fn lemma_apply_append(
     key: String,
     offset: u64,
     body: Vec<u8>,
-    etag: crate::store::Etag,
+    etag: crate::state::Etag,
 )
     requires
         state_properties(Proc::Store(store)),
@@ -1142,7 +1142,7 @@ proof fn lemma_apply_append(
     let next = spec_apply(store, request).0;
     if store.appendable {
         match spec_find(store.entries, key@, 0) {
-            Some(i) if crate::store::spec_etag(store.entries[i].body) == etag
+            Some(i) if crate::state::spec_etag(store.entries[i].body) == etag
                 && store.entries[i].body.len() == offset => {
                 assert(spec_bump(store.entries[i].version) >= store.entries[i].version);
                 assert(spec_bump(store.entries[i].version) > 0);
@@ -1301,7 +1301,7 @@ proof fn lemma_store_step_integrity(
 
 proof fn lemma_initial_node(config: Config, id: u64)
     ensures
-        state_properties(Proc::Node(crate::model::spec_initial_node(config, id))),
+        state_properties(Proc::Node(crate::rover::spec_initial_node(config, id))),
 {
 }
 
@@ -1320,13 +1320,13 @@ proof fn lemma_initial_nodes(config: Config, id: u64)
         let tail = spec_nodes(config, (id + 1) as u64);
         assert(nodes == seq![(
             Pid::Node(id),
-            Proc::Node(crate::model::spec_initial_node(config, id)),
+            Proc::Node(crate::rover::spec_initial_node(config, id)),
         )] + tail);
         assert forall|i: int| 0 <= i < nodes.len()
             implies state_properties(#[trigger] nodes[i].1) by {
             if i == 0 {
                 assert(nodes[0].1
-                    == Proc::Node(crate::model::spec_initial_node(config, id)));
+                    == Proc::Node(crate::rover::spec_initial_node(config, id)));
             } else {
                 assert(nodes[i] == tail[i - 1]);
             }

@@ -6,17 +6,17 @@
 use vstd::prelude::*;
 
 pub use echod_concrete_spec::Config;
-pub use echod_concrete_spec::model::{Message, Pid};
-use echod_concrete_spec::model::LogicV;
+pub use echod_concrete_spec::rover::{Message, Pid};
+use echod_concrete_spec::rover::LogicV;
 use echod_concrete_spec::Proc as SpecProc;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::model::{spec_store, spec_world};
+use echod_concrete_spec::rover::{spec_store, spec_world};
 #[cfg(test)]
 use echod_concrete_spec::Spec as SpecModel;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::node::NodeV;
+use echod_concrete_spec::state::NodeV;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::StoreV;
+use echod_concrete_spec::state::StoreV;
 use rover_spec::rover::comm::ProcessEvent;
 #[cfg(test)]
 use rover_spec::rover::comm::Time;
