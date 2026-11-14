@@ -1,24 +1,20 @@
 # echod
 
 A Resonate server whose only durable state is objects in an S3 bucket, with
-the state machine it runs verified in Verus, from one document up through
-the whole process.
+Verus specifications and proof code for its document and process transitions.
+The inherited trust limitations below prevent a formal correctness claim.
 
 The server speaks the Resonate protocol, one `POST /` and one envelope. Every
 origin is one document in the bucket, committed with a conditional write;
 deadlines are keys; nodes find each other in the bucket. What the server does
-to a document is `echod_logic::concrete`'s document machine, each step proved
-to compute `echod_concrete_spec`'s specification, and
-`echod_refinement` proves that model refines the abstract Resonate
-model. The process around it, `echod_logic`, is proved
-whole: `State::on_event`, the one step of the node — a request, a store
-answer, the heartbeat, the wheel — ensures it computes `spec_on_event`, and
-every function beneath it ensures its own specification, the membership, the
-cache, the deadline keys, and the order of the store calls that commit a step
-— key, document, previous key, fired key — included. What the proof assumes,
-the text of keys, the bytes of documents, hashing, and S3 itself, is listed in
-`rust/impl/process/src/verified/mod.rs`; a deterministic simulator holds the
-whole to the Resonate model under crashes, outages and lost acks.
+to a document is `echod_logic::concrete`'s document machine, specified by
+`echod_concrete_spec`; `echod_refinement` contains the concrete-to-abstract
+refinement proof code. The process contract relates `State::on_event` to
+`spec_on_event`, including membership, cache, deadline keys, and store-call
+ordering. These checks depend on trusted assumptions, including declarations
+in `rust/impl/process/src/verified/mod.rs` and the limitations below.
+The deterministic simulator supplies runtime evidence under crashes, outages,
+and lost acknowledgements.
 
 ## Layout
 
@@ -73,6 +69,28 @@ the process's concrete document module; its mathematical counterpart is
 `spec_request_transition`.
 
 These local transitions do not establish global document invariants.
+
+## Verification scope and deferred trust repair
+
+Runtime tests and successful Verus runs are separate evidence. The inherited
+`axiom_next_cron_after` in `rust/spec/echod/abstract/spec/src/axioms.rs` asserts
+that a `u64` result exceeds every `u64` input, which is inconsistent at
+`u64::MAX`; executable cron wrappers also promise this unconditionally.
+String, byte-vector, and dispatch realization contracts assume that arbitrary
+mathematical views have Rust representatives. They need representability
+premises and propagation through callers; a character-count bound alone does
+not establish UTF-8 byte capacity.
+
+Repair is deferred to the retained `prove-trust-contracts` work. No partial
+contract tightening is included here. Until those assumptions and their
+callers are repaired, passing Verus checks must not be treated as soundness or
+formal correctness validation.
+
+The simulator's Rover certificates target the finer-grained abstract model:
+raw request handlers with separate internal work steps. They do not establish
+the production request's atomic pre/post-closure contract. A bounded search
+that finds no certificate reports `Unknown`, not a correctness verdict.
+Verified atomic-checker alignment and representation redesign remain deferred.
 
 ## Build, verify, soak
 
