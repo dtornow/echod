@@ -56,10 +56,25 @@ def setMessage {key : DocumentKey} (address : String)
     (message : ServerModel.Message) : Handler key Unit :=
   emit { address, message }
 
-/-- Settle a promise; a settled promise also finishes its task. -/
-def setSettled {origin : String} (object : OriginObject origin)
-    (promise : PromiseObject) : Handler (.origin origin) Unit :=
-  setObject { object with promise, task := object.task.map (·.project promise) }
+/-- Emit the current task offer and arm its next retry in the same write. -/
+def dispatchTask {origin : String} (object : OriginObject origin)
+    (task : TaskObject) (now : Nat) : Handler (.origin origin) Unit := do
+  let env ← ask
+  let next := { task with
+    retryTimeoutAt := some (now + env.config.retryTimeout) }
+  setObject { object with task := some next }
+  setMessage
+    ((object.promise.tags.get? "resonate:target").getD "")
+    (.execute object.id task.version)
+
+/-- Dispatch a runnable task exactly when its retry clock is due. -/
+def dispatchIfDue {origin : String} (object : OriginObject origin) (now : Nat) :
+    Handler (.origin origin) Unit := do
+  match object.task with
+  | some task =>
+      if task.state == .pending ∧ task.retryTimeoutAt.any (· ≤ now) then
+        dispatchTask object task now
+  | none => pure ()
 
 /-- A new promise, with a task if it is runnable. A promise created at or
 past its deadline is created settled. -/
@@ -69,12 +84,8 @@ def newObject {origin : String} (suffix : String) (timeoutAt now : Nat)
     let promise : PromiseObject :=
       { state := .pending, param, tags, timeoutAt, createdAt := now }
     if promise.otype == .runnable then
-      let due :=
-        match promise.tags.get? "resonate:delay" with
-        | some delay => max (parseNat delay) now
-        | none => now
       { suffix, promise,
-        task := some { state := .pending, version := 0, retryTimeoutAt := some due } }
+        task := some { state := .pending, version := 0, retryTimeoutAt := some now } }
     else { suffix, promise }
   else
     let state :=
@@ -104,6 +115,55 @@ def readTask {origin : String} (suffix : String) (now : Nat) :
   match ← readObject suffix now with
   | some object => return object.task.map (object, ·)
   | none => return none
+
+/-- Resume one awaiter. Suspended work is offered immediately; work that is
+already queued or running only records the resume. -/
+def resumeOne (awaited awaiter : Ident) (now : Nat) :
+    Handler (.origin awaited.origin) Unit := do
+  if !awaited.sameOrigin awaiter then return ()
+  match ← readTask awaiter.suffix now with
+  | none => pure ()
+  | some (object, task) =>
+      match task.state with
+      | .suspended =>
+          dispatchTask object
+            { task with
+              state := .pending
+              pid := none
+              ttl := none
+              leaseTimeoutAt := none
+              resumes := [awaited] }
+            now
+      | .pending | .acquired | .halted =>
+          if !(task.resumes.contains awaited) then
+            setObject { object with
+              task := some { task with resumes := task.resumes ++ [awaited] } }
+      | .fulfilled => pure ()
+
+def resumeAll (awaited : Ident) (now : Nat) :
+    List Ident → Handler (.origin awaited.origin) Unit
+  | [] => pure ()
+  | awaiter :: rest => do
+      resumeOne awaited awaiter now
+      resumeAll awaited now rest
+
+def notifyAll {origin : String} (promise : PromiseObject) (id : Ident) :
+    List String → Handler (.origin origin) Unit
+  | [] => pure ()
+  | address :: rest => do
+      setMessage address (.unblock (promise.toRecord id))
+      notifyAll promise id rest
+
+/-- Settlement is one document transition: store the settled row, synchronously
+drain every callback and listener, and include their effects in this handler. -/
+def setSettled {origin : String} (object : OriginObject origin)
+    (promise : PromiseObject) (now : Nat) : Handler (.origin origin) Unit := do
+  let settled := { promise with callbacks := [], listeners := [] }
+  setObject { object with
+    promise := settled
+    task := object.task.map (·.project settled) }
+  resumeAll object.id now promise.callbacks
+  notifyAll settled object.id promise.listeners
 
 /-- The object at `req.id`, created from `req` if there is none. -/
 def readOrCreate {origin : String} (req : PromiseCreateReq) (now : Nat) :

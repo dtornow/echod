@@ -1,6 +1,6 @@
 //! The process-facing, verified facade of the shared document module.
 //!
-//! `crate::concrete::document` owns WorkflowDocument, ScheduleDocument,
+//! `echod_concrete::document` owns WorkflowDocument, ScheduleDocument,
 //! Partial, their values, and their serde codec. This module states that codec
 //! once for the process verifier and provides the small body projections used
 //! by the pure business machine. Store keys, ETags, and CAS stay outside.
@@ -17,16 +17,16 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::{
+use echod_concrete::{
     body_deadline, keys_within, same_body, stored_body, stored_committed_at, DocumentBody,
     StoredDocument,
 };
-pub use crate::concrete::LoadedDocument as Loaded;
+pub use echod_concrete::LoadedDocument as Loaded;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::lemma_doc_view;
+use echod_concrete::lemma_doc_view;
 
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{DocumentBodyV, LoadedDocumentV};
+use echod_concrete::node::{DocumentBodyV, LoadedDocumentV};
 
 verus! {
 
@@ -34,15 +34,15 @@ verus! {
 pub type LoadedSpec = LoadedDocumentV;
 
 pub open spec fn spec_loaded_body(loaded: LoadedSpec) -> DocumentBodyV {
-    crate::concrete::document::spec_stored_body(loaded.document)
+    echod_concrete::node::spec_stored_body(loaded.document)
 }
 
 pub open spec fn spec_loaded_version(loaded: LoadedSpec) -> u64 {
-    crate::concrete::document::spec_stored_version(loaded.document)
+    echod_concrete::node::spec_stored_version(loaded.document)
 }
 
 pub open spec fn spec_loaded_committed_at(loaded: LoadedSpec) -> u64 {
-    crate::concrete::document::spec_stored_committed_at(loaded.document)
+    echod_concrete::node::spec_stored_committed_at(loaded.document)
 }
 
 pub fn loaded_body(loaded: &Loaded) -> (r: DocumentBody)
@@ -54,7 +54,7 @@ pub fn loaded_body(loaded: &Loaded) -> (r: DocumentBody)
 pub fn loaded_version(loaded: &Loaded) -> (r: u64)
     ensures r == spec_loaded_version(loaded.deep_view()),
 {
-    crate::concrete::stored_version(&loaded.document)
+    echod_concrete::stored_version(&loaded.document)
 }
 
 pub fn loaded_committed_at(loaded: &Loaded) -> (r: u64)
@@ -65,7 +65,7 @@ pub fn loaded_committed_at(loaded: &Loaded) -> (r: u64)
 
 pub open spec fn spec_empty_workflow(document: Seq<char>) -> LoadedSpec {
     LoadedSpec {
-        document: crate::concrete::document::spec_empty_stored_workflow(document),
+        document: echod_concrete::node::spec_empty_stored_workflow(document),
         change_count: 0,
         bytes: 0,
     }
@@ -73,7 +73,7 @@ pub open spec fn spec_empty_workflow(document: Seq<char>) -> LoadedSpec {
 
 pub open spec fn spec_empty_schedule(document: Seq<char>) -> LoadedSpec {
     LoadedSpec {
-        document: crate::concrete::document::spec_empty_stored_schedule(document),
+        document: echod_concrete::node::spec_empty_stored_schedule(document),
         change_count: 0,
         bytes: 0,
     }
@@ -82,7 +82,7 @@ pub open spec fn spec_empty_schedule(document: Seq<char>) -> LoadedSpec {
 /// The nearest deadline of a document.
 pub fn deadline(doc: &DocumentBody) -> (r: Option<u64>)
     ensures
-        crate::concrete::document::nat_v(r) == crate::concrete::document::spec_body_deadline(doc@),
+        echod_concrete::node::nat_v(r) == echod_concrete::node::spec_body_deadline(doc@),
 {
     body_deadline(doc)
 }
@@ -146,12 +146,12 @@ pub uninterp spec fn spec_decode_workflow(bytes: Seq<u8>) -> Result<LoadedSpec, 
 /// What the bytes of a schedule's object say.
 pub uninterp spec fn spec_decode_schedule(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
 /// One compacted partial containing the complete document.
-pub uninterp spec fn spec_encode_body(document: crate::concrete::document::StoredDocumentV) -> Seq<u8>;
+pub uninterp spec fn spec_encode(document: echod_concrete::node::StoredDocumentV) -> Seq<u8>;
 /// One partial containing the changes from `before` to `after`, and how many
 /// changes that is.
 pub uninterp spec fn spec_encode_delta(
-    before: crate::concrete::document::StoredDocumentV,
-    after: crate::concrete::document::StoredDocumentV,
+    before: echod_concrete::node::StoredDocumentV,
+    after: echod_concrete::node::StoredDocumentV,
 ) -> (Seq<u8>, usize);
 
 pub assume_specification [codec::decode_workflow](bytes: &[u8]) -> (r: Result<Loaded, String>)
@@ -164,7 +164,7 @@ pub assume_specification [codec::decode_schedule](bytes: &[u8]) -> (r: Result<Lo
 
 pub assume_specification [codec::encode](document: &StoredDocument) -> (r: Vec<u8>)
     ensures
-        r@ == spec_encode_body(document@);
+        r@ == spec_encode(document@);
 
 pub assume_specification [codec::encode_delta](before: &StoredDocument, after: &StoredDocument) -> (r: (Vec<u8>, usize))
     ensures
@@ -186,7 +186,7 @@ pub fn decode_schedule(bytes: &[u8]) -> (r: Result<Loaded, String>)
 
 pub fn encode(document: &StoredDocument) -> (r: Vec<u8>)
     ensures
-        r@ == spec_encode_body(document@),
+        r@ == spec_encode(document@),
 {
     codec::encode(document)
 }
@@ -203,14 +203,14 @@ pub fn encode_delta(before: &StoredDocument, after: &StoredDocument) -> (r: (Vec
 /// Plain Rust delegates to the shared document codec stated above.
 #[cfg(not(verus_keep_ghost))]
 pub mod codec {
-    use crate::concrete::StoredDocument;
+    use echod_concrete::StoredDocument;
 
     use super::Loaded;
 
-    pub use crate::concrete::values::{promises, Promise, Task};
+    pub use echod_concrete::document::{promises, Promise, Task};
 
     pub fn decode_workflow(bytes: &[u8]) -> Result<Loaded, String> {
-        let (document, change_count) = crate::concrete::values::codec::decode_workflow(bytes)?;
+        let (document, change_count) = echod_concrete::document::codec::decode_workflow(bytes)?;
         Ok(Loaded {
             document: StoredDocument::Workflow(document),
             change_count,
@@ -219,7 +219,7 @@ pub mod codec {
     }
 
     pub fn decode_schedule(bytes: &[u8]) -> Result<Loaded, String> {
-        let (document, change_count) = crate::concrete::values::codec::decode_schedule(bytes)?;
+        let (document, change_count) = echod_concrete::document::codec::decode_schedule(bytes)?;
         Ok(Loaded {
             document: StoredDocument::Schedule(document),
             change_count,
@@ -228,12 +228,12 @@ pub mod codec {
     }
 
     pub fn encode(document: &StoredDocument) -> Vec<u8> {
-        crate::concrete::values::codec::encode(document)
+        echod_concrete::document::codec::encode(document)
             .expect("a stored document serialises")
     }
 
     pub fn encode_delta(before: &StoredDocument, after: &StoredDocument) -> (Vec<u8>, usize) {
-        crate::concrete::values::codec::encode_delta(before, after)
+        echod_concrete::document::codec::encode_delta(before, after)
             .expect("a document delta serialises")
     }
 }
@@ -241,7 +241,7 @@ pub mod codec {
 /// Under Verus the bytes are stated, never built: serde is absent there.
 #[cfg(verus_keep_ghost)]
 pub mod codec {
-    use crate::concrete::StoredDocument;
+    use echod_concrete::StoredDocument;
 
     use super::Loaded;
 
@@ -253,13 +253,13 @@ pub mod codec {
         unimplemented!()
     }
 
-    pub fn encode(_document: &crate::concrete::StoredDocument) -> Vec<u8> {
+    pub fn encode(_document: &echod_concrete::StoredDocument) -> Vec<u8> {
         unimplemented!()
     }
 
     pub fn encode_delta(
-        _before: &crate::concrete::StoredDocument,
-        _after: &crate::concrete::StoredDocument,
+        _before: &echod_concrete::StoredDocument,
+        _after: &echod_concrete::StoredDocument,
     ) -> (Vec<u8>, usize) {
         unimplemented!()
     }
@@ -267,8 +267,11 @@ pub mod codec {
 
 #[cfg(all(test, not(verus_keep_ghost)))]
 mod tests {
-    use crate::concrete::{ScheduleDocument, StoredDocument};
-    use echod_types::{Schedule, Value};
+    use echod_concrete::{
+        Obj, Objects, Prom, ScheduleDocument, StoredDocument,
+        WorkflowDocument,
+    };
+    use echod_types::{PromiseState, Schedule, Value};
 
     use super::codec;
 
@@ -306,7 +309,7 @@ mod tests {
         assert_eq!(changed, 1);
         bytes.extend(delta);
 
-        let partials = crate::concrete::values::codec::decode_partials::<Schedule>(&bytes).unwrap();
+        let partials = echod_concrete::document::codec::decode_partials::<Schedule>(&bytes).unwrap();
         assert_eq!(partials.len(), 2);
 
         let loaded = codec::decode_schedule(&bytes).unwrap();
@@ -323,7 +326,7 @@ mod tests {
     fn compacted_schedule_is_one_partial_with_same_document() {
         let document = document(7, 10, 20);
         let bytes = codec::encode(&document);
-        let partials = crate::concrete::values::codec::decode_partials::<Schedule>(&bytes).unwrap();
+        let partials = echod_concrete::document::codec::decode_partials::<Schedule>(&bytes).unwrap();
         assert_eq!(partials.len(), 1);
 
         let loaded = codec::decode_schedule(&bytes).unwrap();
@@ -332,5 +335,101 @@ mod tests {
         };
         assert_eq!(loaded.schedule, Some(schedule(20)));
         assert_eq!(loaded.version, 7);
+    }
+
+    #[test]
+    fn full_write_round_trip_counts_changes_not_partials() {
+        for version in 1..16 {
+            let document = document(version, version * 10, version * 10 + 5);
+            let bytes = codec::encode(&document);
+            let loaded = codec::decode_schedule(&bytes).unwrap();
+            assert_eq!(loaded.document, document);
+            assert_eq!(loaded.change_count, 1);
+            assert_eq!(loaded.bytes, bytes.len() as u64);
+        }
+
+        let empty_schedule = StoredDocument::Schedule(ScheduleDocument {
+            document: "empty".to_string(),
+            version: 1,
+            committed_at: 10,
+            next_wake_at: None,
+            schedule: None,
+        });
+        let bytes = codec::encode(&empty_schedule);
+        let loaded = codec::decode_schedule(&bytes).unwrap();
+        assert_eq!(loaded.document, empty_schedule);
+        assert_eq!(loaded.change_count, 0);
+        assert_eq!(loaded.bytes, bytes.len() as u64);
+
+        let mut empty_workflow =
+            echod_concrete::node::empty_stored_workflow(
+                "workflow".to_string(),
+            );
+        let StoredDocument::Workflow(workflow) = &mut empty_workflow else {
+            unreachable!();
+        };
+        workflow.version = 1;
+        workflow.committed_at = 10;
+        let bytes = codec::encode(&empty_workflow);
+        let loaded = codec::decode_workflow(&bytes).unwrap();
+        assert_eq!(loaded.document, empty_workflow);
+        assert_eq!(loaded.change_count, 0);
+        assert_eq!(loaded.bytes, bytes.len() as u64);
+
+        let promise = |timeout_at| Obj {
+            promise: Prom {
+                state: PromiseState::Pending,
+                param: Value::default(),
+                value: Value::default(),
+                tags: Vec::new(),
+                timeout_at,
+                created_at: 1,
+                settled_at: None,
+                callbacks: Vec::new(),
+                listeners: Vec::new(),
+            },
+            task: None,
+        };
+        let first_id = "workflow:first".to_string();
+        let second_id = "workflow:second".to_string();
+        let objects = Objects::empty()
+            .put(&first_id, promise(100))
+            .put(&second_id, promise(200));
+        let workflow = StoredDocument::Workflow(WorkflowDocument {
+            document: "workflow".to_string(),
+            version: 1,
+            committed_at: 10,
+            next_wake_at: Some(100),
+            objects,
+        });
+        let bytes = codec::encode(&workflow);
+        let loaded = codec::decode_workflow(&bytes).unwrap();
+        assert_eq!(loaded.document, workflow);
+        assert_eq!(loaded.change_count, 2);
+        assert_eq!(loaded.bytes, bytes.len() as u64);
+    }
+
+    #[test]
+    fn appended_delta_round_trip_preserves_fold_and_accounting() {
+        for version in 1..16 {
+            let before =
+                document(version, version * 10, version * 10 + 5);
+            let after = document(
+                version + 1,
+                (version + 1) * 10,
+                (version + 1) * 10 + 5,
+            );
+            let mut bytes = codec::encode(&before);
+            let before_loaded = codec::decode_schedule(&bytes).unwrap();
+            let (delta, changed) = codec::encode_delta(&before, &after);
+            bytes.extend_from_slice(&delta);
+            let loaded = codec::decode_schedule(&bytes).unwrap();
+            assert_eq!(loaded.document, after);
+            assert_eq!(
+                loaded.change_count,
+                before_loaded.change_count + changed,
+            );
+            assert_eq!(loaded.bytes, bytes.len() as u64);
+        }
     }
 }

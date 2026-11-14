@@ -11,25 +11,9 @@ stored settled. -/
 def processPromiseTimeout (id : Ident) (now : Nat) : Handler Unit := do
   match ← readObject id now with
   | none => pure ()
-  | some object => setObject object
-
-/-- Wake the awaiter's task because `awaited` settled. -/
-def resumeOne (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
-  match ← readTask awaiter now with
-  | none => pure ()
-  | some (object, task) =>
-      match task.state with
-      | .suspended =>
-          setObject { object with
-            task := some { task with
-              state := .pending
-              resumes := [awaited]
-              retryTimeoutAt := some now } }
-      | .pending | .acquired | .halted =>
-          if !(task.resumes.contains awaited) then
-            setObject { object with
-              task := some { task with resumes := task.resumes ++ [awaited] } }
-      | .fulfilled => pure ()
+  | some object =>
+      if object.promise.state == .pending then setObject object
+      else setSettled object object.promise now
 
 /-- Read the awaited promise, drop the callback, and resume the awaiter. -/
 def processCallback (req : PromiseRegisterCallbackReq) (now : Nat) :
@@ -62,7 +46,7 @@ def processLeaseTimeout (id : Ident) (now : Nat) : Handler Unit := do
       | none => pure ()
       | some deadline =>
           if task.state == .acquired ∧ deadline ≤ now then
-            setObject { object with task := some (task.unlease .pending (some now)) }
+            dispatchTask object (task.unlease .pending none) now
 
 def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
   match ← readTask id now with
@@ -72,12 +56,24 @@ def processRetryTimeout (id : Ident) (now : Nat) : Handler Unit := do
       | none => pure ()
       | some due =>
           if task.state == .pending ∧ due ≤ now then
-            let env ← ask
-            setObject { object with
-              task := some { task with retryTimeoutAt := some (now + env.config.retryTimeout) } }
-            setMessage
-              ((object.promise.tags.get? "resonate:target").getD "")
-              (.execute id task.version)
+            dispatchTask object task now
+
+/-- One complete due-work pass for an object. Each operation has its own due
+guard; settlement and lease expiry synchronously emit all newly due effects. -/
+def sweepObject (id : Ident) (now : Nat) : Handler Unit := do
+  processPromiseTimeout id now
+  processLeaseTimeout id now
+  processRetryTimeout id now
+
+def originSuffixes (store : Store) (origin : String) : List String :=
+  sortStrings <|
+    (store.objects.filter (·.id.origin == origin)).map (·.id.suffix)
+
+/-- Drain every currently stored object in one workflow document. -/
+def sweepOrigin (origin : String) (now : Nat) : Handler Unit := do
+  let store ← getStore
+  (originSuffixes store origin).forM fun suffix =>
+    sweepObject { origin, suffix } now
 
 /-- Advance the schedule and return the occurrences it fired. Each occurrence
 creates its promise in a later step. -/
@@ -115,8 +111,6 @@ def processWork (item : WorkItem) (now : Nat) : Handler (List WorkflowEntry) :=
 whether it does anything. -/
 def objectWork (object : Object) : List WorkItem :=
   [.promiseTimeout object.id, .taskLeaseTimeout object.id,
-    .taskRetryTimeout object.id] ++
-  object.promise.callbacks.map (fun awaiter => .callback { awaited := object.id, awaiter }) ++
-  object.promise.listeners.map (fun address => .listener { awaited := object.id, address })
+    .taskRetryTimeout object.id]
 
 end Resonate.Abstract

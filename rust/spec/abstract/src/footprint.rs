@@ -1,0 +1,410 @@
+//! The glue between the verified model and the checker: plain Rust, outside
+//! Verus. It says which keys a request touches and which origin a key belongs
+//! to, and holds the cron engine the spec trusts. `timeout_work` is the list
+//! of steps a timeout may run; the handler decides which of them do anything.
+
+use vstd::prelude::*;
+
+use echod_rover::{Footprint, Partitioned, Sched, Touches};
+use echod_types::{Request, TaskFenceAction};
+
+use super::machine::*;
+
+/// What a footprint names: a promise with its task, a schedule, or a whole
+/// origin (what a schedule's future occurrences will touch).
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Key {
+    Object(Id),
+    Schedule(Id),
+    Origin(String),
+}
+
+impl Key {
+    fn group(&self) -> String {
+        match self {
+            Key::Object(id) | Key::Schedule(id) => origin(id).to_string(),
+            Key::Origin(o) => o.clone(),
+        }
+    }
+}
+
+pub(crate) fn origin(id: &str) -> &str {
+    echod_types::origin_of(id)
+}
+
+fn workflow_origin(request: &Request) -> Option<&str> {
+    let id = match request {
+        Request::PromiseCreate(q) => &q.id,
+        Request::PromiseGet(q) => &q.id,
+        Request::PromiseSettle(q) => &q.id,
+        Request::PromiseRegisterCallback(q) => &q.awaited,
+        Request::PromiseRegisterListener(q) => &q.awaited,
+        Request::TaskGet(q) => &q.id,
+        Request::TaskCreate(q) => &q.action.id,
+        Request::TaskAcquire(q) => &q.id,
+        Request::TaskRelease(q) => &q.id,
+        Request::TaskFulfill(q) => &q.id,
+        Request::TaskSuspend(q) => &q.id,
+        Request::TaskFence(q) => &q.id,
+        Request::TaskFenceCheck(q) => &q.id,
+        Request::TaskHalt(q) => &q.id,
+        Request::TaskContinue(q) => &q.id,
+        Request::TaskHeartbeat(q) => return q.tasks.first().map(|task| origin(&task.id)),
+        Request::ScheduleCreate(_) | Request::ScheduleGet(_) | Request::ScheduleDelete(_) => {
+            return None;
+        }
+    };
+    Some(origin(id))
+}
+
+fn belongs_to_workflow(want: &str, work: &Work) -> bool {
+    match work {
+        Work::PromiseTimeout(id)
+        | Work::TaskLeaseTimeout(id)
+        | Work::TaskRetryTimeout(id)
+        | Work::Listener { awaited: id, .. } => origin(id) == want,
+        Work::Callback { awaited, .. } => origin(awaited) == want,
+        Work::ScheduleTimeout { .. } | Work::Occurrence { .. } => false,
+    }
+}
+
+fn close_workflow(
+    config: &ServerConfig,
+    mut state: Store,
+    workflow: &str,
+    now: Time,
+    limit: usize,
+) -> Option<(Store, Vec<Work>, Vec<Dispatch>, Vec<&'static str>)> {
+    let mut deferred = Vec::new();
+    let mut effects = Vec::new();
+    let mut marks = Vec::new();
+    for _ in 0..limit {
+        let Some(step) = timeout_work_plain(config, &state, now)
+            .into_iter()
+            .find(|step| belongs_to_workflow(workflow, step.req()))
+        else {
+            return Some((state, deferred, effects, marks));
+        };
+        let outcome = config.process_work(step.req(), &state, now);
+        if outcome.not_due {
+            return None;
+        }
+        state = outcome.next;
+        deferred.extend(outcome.work);
+        effects.extend(outcome.send);
+        marks.extend(outcome.marks);
+    }
+    if timeout_work_plain(config, &state, now)
+        .iter()
+        .any(|step| belongs_to_workflow(workflow, step.req()))
+    {
+        None
+    } else {
+        Some((state, deferred, effects, marks))
+    }
+}
+
+fn effect_relevant(state: &Store, effect: &Dispatch) -> bool {
+    match effect {
+        Dispatch::Execute { id, version } => state
+            .tasks
+            .get(id)
+            .is_some_and(|task| task.state == echod_types::TaskState::Pending && task.version == *version),
+        Dispatch::Unblock { .. } => true,
+    }
+}
+
+fn same_effect_key(a: &Dispatch, b: &Dispatch) -> bool {
+    match (a, b) {
+        (Dispatch::Execute { id: x, .. }, Dispatch::Execute { id: y, .. }) => x == y,
+        (
+            Dispatch::Unblock { address: xa, promise: xp },
+            Dispatch::Unblock { address: ya, promise: yp },
+        ) => xa == ya && xp.id == yp.id,
+        _ => false,
+    }
+}
+
+fn keyed_effects(state: &Store, effects: Vec<Dispatch>) -> Vec<Dispatch> {
+    let mut kept = Vec::new();
+    for effect in effects {
+        if effect_relevant(state, &effect)
+            && !kept.iter().any(|present| same_effect_key(present, &effect))
+        {
+            kept.push(effect);
+        }
+    }
+    kept
+}
+
+impl ServerConfig {
+    /// One authoritative external transition.
+    ///
+    /// Workflow requests close everything due at `now`, run the raw handler,
+    /// and close newly due work before returning. Schedule requests retain
+    /// their independent internal timer processing. Either finite closure
+    /// failing leaves the original state and effects untouched and returns
+    /// the request-shaped 503.
+    pub fn request_transition(
+        &self,
+        request: &Request,
+        state: &Store,
+        now: Time,
+        limit: usize,
+    ) -> Vec<Out> {
+        let Some(workflow) = workflow_origin(request) else {
+            return self.handler(request, state, now);
+        };
+        let Some((before, before_work, before_effects, before_marks)) =
+            close_workflow(self, state.clone(), workflow, now, limit)
+        else {
+            return vec![Out {
+                resp: unavailable(request),
+                next: state.clone(),
+                work: Vec::new(),
+                send: Vec::new(),
+                marks: Vec::new(),
+            }];
+        };
+        self.handler(request, &before, now)
+            .into_iter()
+            .map(|handled| {
+                let Some((next, mut after_work, mut after_effects, after_marks)) =
+                    close_workflow(self, handled.next, workflow, now, limit)
+                else {
+                    return Out {
+                        resp: unavailable(request),
+                        next: state.clone(),
+                        work: Vec::new(),
+                        send: Vec::new(),
+                        marks: Vec::new(),
+                    };
+                };
+                let mut work = before_work.clone();
+                work.append(&mut after_work);
+                let mut effects = before_effects.clone();
+                effects.append(&mut handled.send.clone());
+                effects.append(&mut after_effects);
+                let mut marks = before_marks.clone();
+                marks.extend(handled.marks);
+                marks.extend(after_marks);
+                Out {
+                    resp: handled.resp,
+                    send: keyed_effects(&next, effects),
+                    next,
+                    work,
+                    marks,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The origin every occurrence of a schedule's promise template expands to,
+/// if it is one: `None` when the template's origin part carries the
+/// timestamp, so each occurrence lands in an origin of its own.
+fn template_origin(template: &str, schedule: &str) -> Option<String> {
+    let t = template.replace("{{.id}}", schedule);
+    let o = origin(&t);
+    if o.contains("{{.timestamp}}") {
+        None
+    } else {
+        Some(o.to_string())
+    }
+}
+
+/// Any absolute URL: a scheme, a colon, and a non-empty rest with no whitespace.
+/// Stands in for C#'s `Uri.TryCreate(.., Absolute)` plus its scheme regex.
+pub(crate) fn address_valid(addr: &str) -> bool {
+    let a = addr.trim();
+    let Some((scheme, rest)) = a.split_once(':') else { return false };
+    let mut cs = scheme.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && cs.all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+        && !rest.is_empty()
+        && !rest.chars().any(char::is_whitespace)
+}
+
+pub(crate) fn cron_valid(cron: &str) -> bool {
+    echod_cron::valid(cron)
+}
+
+pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
+    echod_cron::next_run_at(cron, after_ms)
+}
+
+pub(crate) fn expand(template: &str, id: &str, at: u64) -> String {
+    template.replace("{{.id}}", id).replace("{{.timestamp}}", &at.to_string())
+}
+
+// ------------------------------------------------------------------ the traits
+
+impl Default for ServerConfig {
+    /// Lean's `ServerConfig.retryTimeout`: 5000. Schedules fire at the instant.
+    fn default() -> Self {
+        ServerConfig { retry_timeout: 5_000 }
+    }
+}
+
+impl Footprint for ServerConfig {
+    type Key = Key;
+
+    fn external_touches(&self, op: &Request) -> Touches<Key> {
+        let ks = |v: &[&Id]| Touches::Only(v.iter().map(|k| Key::Object((*k).clone())).collect());
+        match op {
+            Request::PromiseCreate(c) => ks(&[&c.id]),
+            Request::PromiseSettle(st) => ks(&[&st.id]),
+            Request::TaskCreate(t) => ks(&[&t.action.id]),
+            Request::PromiseGet(q) => ks(&[&q.id]),
+            Request::TaskGet(q) => ks(&[&q.id]),
+            Request::TaskAcquire(q) => ks(&[&q.id]),
+            Request::TaskRelease(q) => ks(&[&q.id]),
+            Request::TaskFulfill(q) => ks(&[&q.id]),
+            Request::TaskHalt(q) => ks(&[&q.id]),
+            Request::TaskContinue(q) => ks(&[&q.id]),
+            Request::TaskFenceCheck(q) => ks(&[&q.id]),
+            Request::TaskHeartbeat(h) => {
+                let v: Vec<&Id> = h.tasks.iter().map(|t| &t.id).collect();
+                ks(&v)
+            }
+            // A request refused for crossing origins is refused on the ids alone and
+            // reads nothing, so its footprint stays in one origin.
+            Request::PromiseRegisterCallback(c) if origin(&c.awaited) != origin(&c.awaiter) => ks(&[&c.awaited]),
+            Request::PromiseRegisterCallback(c) => ks(&[&c.awaited, &c.awaiter]),
+            Request::PromiseRegisterListener(c) => ks(&[&c.awaited]),
+            Request::TaskSuspend(s) if s.actions.iter().any(|a| origin(&a.awaited) != origin(&s.id)) => ks(&[&s.id]),
+            Request::TaskSuspend(s) => {
+                let mut v: Vec<&Id> = s.actions.iter().map(|a| &a.awaited).collect();
+                v.push(&s.id);
+                ks(&v)
+            }
+            Request::TaskFence(f) => match &f.action {
+                TaskFenceAction::Settle(st) if origin(&st.id) != origin(&f.id) => ks(&[&f.id]),
+                TaskFenceAction::Settle(st) => ks(&[&f.id, &st.id]),
+                TaskFenceAction::Create(c) => ks(&[&f.id, &c.id]),
+            },
+            // A schedule's occurrences will touch the origin its template names.
+            Request::ScheduleCreate(c) => match template_origin(&c.promise_id, &c.id) {
+                Some(o) => Touches::Only(vec![Key::Schedule(c.id.clone()), Key::Origin(o)]),
+                None => Touches::Everything,
+            },
+            Request::ScheduleGet(q) => Touches::one(Key::Schedule(q.id.clone())),
+            Request::ScheduleDelete(q) => Touches::one(Key::Schedule(q.id.clone())),
+        }
+    }
+
+    fn internal_touches(&self, step: &Work) -> Touches<Key> {
+        match step {
+            Work::PromiseTimeout(id) | Work::TaskLeaseTimeout(id) | Work::TaskRetryTimeout(id) | Work::Listener { awaited: id, .. } => {
+                Touches::one(Key::Object(id.clone()))
+            }
+            Work::Callback { awaited, awaiter } => Touches::Only(vec![Key::Object(awaited.clone()), Key::Object(awaiter.clone())]),
+            Work::ScheduleTimeout { id, promise } => Touches::Only(vec![Key::Schedule(id.clone()), Key::Object(promise.clone())]),
+            Work::Occurrence { promise, .. } => Touches::one(Key::Object(promise.clone())),
+        }
+    }
+
+    fn state_spans(&self, s: &Store) -> Vec<Touches<Key>> {
+        s.schedules
+            .iter()
+            .map(|(id, c)| match template_origin(&c.promise_id, id) {
+                Some(o) => Touches::Only(vec![Key::Schedule(id.clone()), Key::Origin(o)]),
+                None => Touches::Everything,
+            })
+            .collect()
+    }
+
+    fn dispatch_touches(&self, msg: &Dispatch) -> Touches<Key> {
+        match msg {
+            Dispatch::Execute { id, .. } => Touches::one(Key::Object(id.clone())),
+            Dispatch::Unblock { promise, .. } => Touches::one(Key::Object(promise.id.clone())),
+        }
+    }
+}
+
+impl Partitioned for ServerConfig {
+    type Group = String;
+
+    /// Ids of different origins never interact, except a schedule whose
+    /// template names another origin. That footprint spans origins and merges
+    /// the partitions; the checker splits them again once the candidates are
+    /// independent. A fence that names another origin is refused.
+    fn group(&self, key: &Key) -> String {
+        key.group()
+    }
+
+    fn restrict(&self, s: &Store, keep: &dyn Fn(&String) -> bool) -> Store {
+        let mine = |k: &Id| keep(&origin(k).to_string());
+        Store {
+            promises: s.promises.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            tasks: s.tasks.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+            schedules: s.schedules.iter().filter(|(k, _)| mine(k)).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        }
+    }
+
+    fn join(&self, a: &Store, b: &Store) -> Store {
+        let mut n = a.clone();
+        for (k, v) in b.promises.iter() {
+            n.promises.insert(k.clone(), v.clone());
+        }
+        for (k, v) in b.tasks.iter() {
+            n.tasks.insert(k.clone(), v.clone());
+        }
+        for (k, v) in b.schedules.iter() {
+            n.schedules.insert(k.clone(), v.clone());
+        }
+        n
+    }
+}
+
+// The checker calls this from inside `verus!`; Verus sees the signature alone.
+verus! {
+
+/// The steps an object or schedule offers, keeping those the handler will
+/// perform. Occurrences are not here: a schedule step queues those, and the
+/// queue is the only one. The handler is the guard.
+pub uninterp spec fn spec_timeout_work(
+    m: ServerConfig,
+    s: Store,
+    now: Time,
+) -> Seq<Sched<Work>>;
+
+#[verifier::external_body]
+pub fn timeout_work(m: &ServerConfig, s: &Store, now: Time) -> (r: Vec<Sched<Work>>)
+    ensures
+        r@ == spec_timeout_work(*m, *s, now),
+{
+    timeout_work_plain(m, s, now)
+}
+
+} // verus!
+
+fn timeout_work_plain(m: &ServerConfig, s: &Store, now: Time) -> Vec<Sched<Work>> {
+    let mut v = Vec::new();
+    for (id, p) in s.promises.iter() {
+        runs(m, s, now, &mut v, Sched::Timer(p.timeout_at, Work::PromiseTimeout(id.clone())));
+        for awaiter in p.callbacks.to_vec() {
+            runs(m, s, now, &mut v, Sched::Later(Work::Callback { awaited: id.clone(), awaiter }));
+        }
+        for address in p.listeners.to_vec() {
+            runs(m, s, now, &mut v, Sched::Later(Work::Listener { awaited: id.clone(), address }));
+        }
+    }
+    for (id, t) in s.tasks.iter() {
+        runs(m, s, now, &mut v, Sched::Timer(t.lease_timeout_at(), Work::TaskLeaseTimeout(id.clone())));
+        if let Some(r) = t.retry_timeout_at {
+            runs(m, s, now, &mut v, Sched::Timer(r, Work::TaskRetryTimeout(id.clone())));
+        }
+    }
+    for (id, c) in s.schedules.iter() {
+        let promise = expand(&c.promise_id, id, c.next_run_at);
+        runs(m, s, now, &mut v, Sched::Timer(c.next_run_at, Work::ScheduleTimeout { id: id.clone(), promise }));
+    }
+    v
+}
+
+fn runs(m: &ServerConfig, s: &Store, now: Time, v: &mut Vec<Sched<Work>>, step: Sched<Work>) {
+    if !m.process_work(step.req(), s, now).not_due {
+        v.push(step);
+    }
+}

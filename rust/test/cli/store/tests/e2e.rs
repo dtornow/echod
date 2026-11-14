@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::routing::post;
 use axum::{Json, Router};
-use echod::store::{MemoryStore, ObjectStoreStore, S3Store, Store};
+use echod::store::{MemoryStore, ObjectStoreStore, Store};
 use echod::{gateway, Config, Node as Server};
 use resonate_core::ResonateServer;
 use serde_json::{json, Value};
@@ -249,17 +249,14 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     let m = worker.expect(Duration::from_secs(4), is_unblock("c:1")).await;
     assert_eq!(m["data"]["promise"]["state"], "rejected_timedout");
 
-    // a sleep, as the SDK creates one: a timer with a target. No task, and the
-    // deadline resolves it
+    // A timer with a target is invalid rather than being normalized by the
+    // shell into another request.
     let (status, _, data) = node.send("promise.create", json!({ "id": "c:2", "timeoutAt": now() + 400, "tags": { "resonate:timer": "true", "resonate:target": worker.url } })).await;
-    assert_eq!(status, 200, "{data}");
-    assert!(data["promise"]["tags"].get("resonate:target").is_none());
+    assert_eq!(status, 400, "{data}");
     let (status, _, _) = node.send("task.get", json!({ "id": "c:2" })).await;
     assert_eq!(status, 404);
     let (status, _, _) = node.send("promise.register_listener", json!({ "awaited": "c:2", "address": worker.url })).await;
-    assert_eq!(status, 200);
-    let m = worker.expect(Duration::from_secs(4), is_unblock("c:2")).await;
-    assert_eq!(m["data"]["promise"]["state"], "resolved");
+    assert_eq!(status, 404);
     let (status, _, data) = node.send("promise.get", json!({ "id": "c:9" })).await;
     assert_eq!(status, 404);
     assert!(data.is_string(), "an error carries a reason: {data}");
@@ -316,9 +313,6 @@ async fn one_node(store: Arc<dyn Store>, compact: u32, prefix: &str) {
     assert!(sample(&text, r#"echod_store_operations_total{op="put",object="node",outcome="ok"} "#) >= 1.0, "the node announced itself");
     assert!(sample(&text, r#"echod_store_operation_duration_seconds_count{op="list",object="node"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_document_writes_total{mode="create"} "#) >= 1.0);
-    if store.supports_append() && compact > 0 {
-        assert!(sample(&text, r#"echod_document_writes_total{mode="append"} "#) >= 1.0, "a store that appends was appended to: {text}");
-    }
     assert!(sample(&text, r#"echod_commits_total{outcome="committed"} "#) >= 1.0);
     assert!(sample(&text, r#"echod_cache_lookups_total{result="revalidated"} "#) >= 1.0, "the cache was revalidated and used");
     assert!(sample(&text, r#"echod_messages_total{kind="execute",outcome="delivered"} "#) >= 1.0);
@@ -350,27 +344,8 @@ async fn one_node_rewriting() {
 async fn one_node_appending() {
     let store = Arc::new(MemoryStore::appendable());
     one_node(Arc::clone(&store) as Arc<dyn Store>, 64, "").await;
-    a_document_is_a_log(&(store as Arc<dyn Store>), "").await;
-}
-
-/// The same, through the AWS SDK on a directory bucket, when
-/// `ECHOD_EXPRESS_BUCKET` names one (`ECHOD_ENDPOINT` for an emulator).
-/// The SDK client has no prefix of its own, so the node is given one.
-#[tokio::test]
-async fn one_node_appending_on_s3_express() {
-    let Ok(bucket) = std::env::var("ECHOD_EXPRESS_BUCKET") else { return };
-    let endpoint = std::env::var("ECHOD_ENDPOINT").ok();
-    let region = std::env::var("ECHOD_REGION").ok();
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let store: Arc<dyn Store> = Arc::new(S3Store::open(&bucket, region.as_deref(), endpoint.as_deref(), true).await);
-    let prefix = format!("e2e/express-{nonce:x}/");
-    one_node(Arc::clone(&store), 64, &prefix).await;
-    a_document_is_a_log(&store, &prefix).await;
-}
-
-/// With a store that appends, the document is a log: more rows than promises.
-async fn a_document_is_a_log(store: &Arc<dyn Store>, prefix: &str) {
-    let (bytes, _) = store.get(&format!("{prefix}wf/a")).await.unwrap().unwrap();
+    // the document is a log: more rows than promises
+    let (bytes, _) = store.get("wf/a").await.unwrap().unwrap();
     let loaded = echod_logic::document::decode_workflow(&bytes).unwrap();
     assert_eq!(echod_logic::document::codec::promises(&echod_logic::document::loaded_body(&loaded)).len(), 2);
     assert!(loaded.change_count > 2, "{} changes", loaded.change_count);
