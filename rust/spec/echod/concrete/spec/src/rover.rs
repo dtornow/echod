@@ -6,7 +6,7 @@
 
 use vstd::prelude::*;
 
-use echod_abstract_spec::{BoundaryEvent, Call, Output};
+use echod_types::{BoundaryEvent, Call, Output};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::{axiom_bytes_realised, axiom_string_ext, axiom_string_realised};
 use rover_spec::rover::comm::{ProcessEvent, Time};
@@ -285,8 +285,8 @@ pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
 
 pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
     let dispatch = match note {
-        NoteV::Execute { id, version } => echod_abstract_spec::Dispatch::Execute { id: spec_string(id), version },
-        NoteV::Unblock { address, promise } => echod_abstract_spec::Dispatch::Unblock { address: spec_string(address), promise },
+        NoteV::Execute { id, version } => echod_types::Dispatch::Execute { id: spec_string(id), version },
+        NoteV::Unblock { address, promise } => echod_types::Dispatch::Unblock { address: spec_string(address), promise },
     };
     (Pid::Outside, Message::Output(Output::Dispatch(dispatch)))
 }
@@ -343,10 +343,10 @@ impl RoverSpec::Spec for Spec {
     open spec fn observe(&self, label: Label<Pid, Message>) -> Seq<BoundaryEvent> {
         match label {
             Label::Input { at, message: Message::Request(request), .. } => {
-                seq![BoundaryEvent::Input { at, call: request }]
+                seq![BoundaryEvent::Input { recipient: (), at, message: echod_types::Message::Request(request) }]
             }
             Label::Outside { at, message: Message::Output(output), .. } => {
-                seq![BoundaryEvent::Output { at, output }]
+                seq![BoundaryEvent::Output { sender: (), at, message: echod_types::Message::Output(output) }]
             }
             _ => Seq::empty(),
         }

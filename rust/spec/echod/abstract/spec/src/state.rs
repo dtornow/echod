@@ -11,7 +11,6 @@ use echod_types::{
     PromiseRecord, PromiseRes, PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes,
     Tags, TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value,
 };
-use super::protocol::Dispatch;
 use super::axioms::*;
 
 pub type Time = u64;
@@ -61,11 +60,6 @@ pub struct StoreV {
     pub schedules: Map<Chars, ScheduleV>,
 }
 
-pub enum DispatchV {
-    Execute { id: Chars, version: u64 },
-    Unblock { address: Chars, promise: PromiseRecord },
-}
-
 pub enum InternalV {
     PromiseTimeout(Chars),
     Callback { awaited: Chars, awaiter: Chars },
@@ -113,17 +107,6 @@ pub open spec fn schedule_v(c: Schedule) -> ScheduleV {
         created_at: c.created_at,
         next_run_at: c.next_run_at,
         last_run_at: c.last_run_at,
-    }
-}
-
-impl View for Dispatch {
-    type V = DispatchV;
-
-    open spec fn view(&self) -> DispatchV {
-        match self {
-            Dispatch::Execute { id, version } => DispatchV::Execute { id: id@, version: *version },
-            Dispatch::Unblock { address, promise } => DispatchV::Unblock { address: address@, promise: *promise },
-        }
     }
 }
 

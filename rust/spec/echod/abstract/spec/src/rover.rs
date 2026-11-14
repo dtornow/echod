@@ -9,7 +9,7 @@ use rover_spec::rover::RoverSpec;
 use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
 use echod_types::{Request, Response};
 use super::state::*;
-use super::protocol::{BoundaryEvent, Call, Message, Output};
+use echod_types::{BoundaryEvent, Call, DispatchV, Message, Output};
 #[cfg(verus_keep_ghost)]
 use super::axioms::{pset_seq, spec_expand};
 
@@ -311,12 +311,12 @@ impl RoverSpec::Spec for Spec {
                 at,
                 message: Message::Request(call),
                 ..
-            } => seq![BoundaryEvent::Input { at, call }],
+            } => seq![BoundaryEvent::Input { recipient: (), at, message: Message::Request(call) }],
             Label::Outside {
                 at,
                 message: Message::Output(output),
                 ..
-            } => seq![BoundaryEvent::Output { at, output }],
+            } => seq![BoundaryEvent::Output { sender: (), at, message: Message::Output(output) }],
             _ => Seq::empty(),
         }
     }

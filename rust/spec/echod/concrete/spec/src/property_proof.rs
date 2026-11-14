@@ -6,7 +6,7 @@
 
 use vstd::prelude::*;
 
-use echod_abstract_spec::Call;
+use echod_types::Call;
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec::Proc as _;
 

@@ -10,6 +10,7 @@ name = "echod_types"
 path = "src/lib.rs"
 
 [dependencies]
+rover-spec = { path = "../../spec/rover/spec" }
 serde = { version = "1", features = ["derive"] }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"

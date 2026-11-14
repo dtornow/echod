@@ -12,6 +12,9 @@
 use vstd::contrib::{make_spec_type, self_view};
 use vstd::prelude::*;
 
+pub mod protocol;
+pub use protocol::{BoundaryEvent, Call, Dispatch, DispatchV, Message, Output};
+
 verus! {
 
 /// Client-visible time values and durations stay below this bound. Two valid

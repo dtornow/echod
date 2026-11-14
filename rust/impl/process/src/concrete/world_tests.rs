@@ -1,7 +1,7 @@
 //! The concrete world: the nodes and the store Rover starts from, one node
 //! flight, and the store's conditional write.
 
-use echod_abstract_spec::{Call, Dispatch, Output};
+use echod_types::{Call, Dispatch, Output};
 use crate::concrete::rover::{Config, Proc, Message, Pid, Spec};
 use crate::concrete::store::Store;
 use crate::concrete::{Etag, StoreReq, StoreError, StoreRes};

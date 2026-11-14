@@ -33,7 +33,7 @@ use super::rover::{Pid, Proc};
 use super::axioms::origin;
 use echod_types::{PromiseState, TaskState};
 use super::state::Config;
-use super::protocol::Message;
+use echod_types::Message;
 #[cfg(verus_keep_ghost)]
 use super::state::distinct;
 use super::state::{Chars, PromiseV, ScheduleV, TaskV};
