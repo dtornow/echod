@@ -27,7 +27,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::store::before;
+use echod_concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::str_eq;
@@ -35,9 +35,9 @@ use crate::verified::table::Table;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::spec_before;
+use echod_concrete::store::spec_before;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::StoreErrorSpec;
+use echod_concrete::store::StoreErrorSpec;
 
 verus! {
 

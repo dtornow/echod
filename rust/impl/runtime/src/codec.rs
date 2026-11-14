@@ -121,13 +121,9 @@ pub fn create_in(d: &w::PromiseCreateData) -> Result<rows::PromiseCreateReq, Str
             return Err("Invalid resonate:target address".to_string());
         }
     }
-    let timeout_at = nat(d.timeout_at, "timeoutAt")?;
-    if !rows::time_bounded(timeout_at) {
-        return Err(format!("timeoutAt must be at most {}", rows::MAX_TIME));
-    }
     Ok(rows::PromiseCreateReq {
         id: d.id.clone(),
-        timeout_at,
+        timeout_at: nat(d.timeout_at, "timeoutAt")?,
         param: value_in(&d.param),
         tags: create_tags(&d.tags),
     })

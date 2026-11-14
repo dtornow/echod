@@ -97,8 +97,8 @@ label! {
         Put => "put",
         PutIfMatch => "put_if_match",
         PutIfNoneMatch => "put_if_none_match",
-        AppIfMatch => "append_if_match",
-        Del => "delete",
+        AppendIfMatch => "append_if_match",
+        Delete => "delete",
         List => "list",
         ListPrefixes => "list_prefixes",
     }
@@ -113,7 +113,7 @@ label! {
     /// How a store call ended. A write that `failed` may or may not have
     /// landed; `conflict` is a conditional write the store refused because
     /// the object had moved: CAS'ed out.
-    StoreResult { Ok => "ok", NotModified => "not_modified", Absent => "absent", Conflict => "conflict", Failed => "failed" }
+    StoreOutcome { Ok => "ok", NotModified => "not_modified", Absent => "absent", Conflict => "conflict", Failed => "failed" }
 }
 
 label! {
@@ -180,7 +180,7 @@ pub struct MessageLabels {
 pub struct StoreLabels {
     pub op: StoreOp,
     pub object: Object,
-    pub outcome: StoreResult,
+    pub outcome: StoreOutcome,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -405,7 +405,7 @@ impl Metrics {
         self.message_duration.observe(started.elapsed().as_secs_f64());
     }
 
-    pub fn store(&self, op: StoreOp, object: Object, outcome: StoreResult, started: Instant) {
+    pub fn store(&self, op: StoreOp, object: Object, outcome: StoreOutcome, started: Instant) {
         self.store_operations.get_or_create(&StoreLabels { op, object, outcome }).inc();
         self.store_duration.get_or_create(&StoreTiming { op, object }).observe(started.elapsed().as_secs_f64());
     }
@@ -484,11 +484,11 @@ impl MeteredStore {
         }
     }
 
-    fn done<T>(&self, op: StoreOp, key: &str, started: Instant, r: &Result<T, StoreError>, ok: impl FnOnce(&T) -> StoreResult) {
+    fn done<T>(&self, op: StoreOp, key: &str, started: Instant, r: &Result<T, StoreError>, ok: impl FnOnce(&T) -> StoreOutcome) {
         let outcome = match r {
             Ok(v) => ok(v),
-            Err(StoreError::PreconditionFailed) => StoreResult::Conflict,
-            Err(StoreError::Unavailable(_)) => StoreResult::Failed,
+            Err(StoreError::PreconditionFailed) => StoreOutcome::Conflict,
+            Err(StoreError::Unavailable(_)) => StoreOutcome::Failed,
         };
         self.metrics.store(op, self.object(key), outcome, started);
     }
@@ -499,7 +499,7 @@ impl Store for MeteredStore {
     async fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>, StoreError> {
         let t = Instant::now();
         let r = self.inner.get(key).await;
-        self.done(StoreOp::Get, key, t, &r, |v| if v.is_some() { StoreResult::Ok } else { StoreResult::Absent });
+        self.done(StoreOp::Get, key, t, &r, |v| if v.is_some() { StoreOutcome::Ok } else { StoreOutcome::Absent });
         r
     }
 
@@ -507,9 +507,9 @@ impl Store for MeteredStore {
         let t = Instant::now();
         let r = self.inner.get_if_none_match(key, etag).await;
         self.done(StoreOp::GetIfNoneMatch, key, t, &r, |v| match v {
-            Read::Body(..) => StoreResult::Ok,
-            Read::NotModified => StoreResult::NotModified,
-            Read::Absent => StoreResult::Absent,
+            Read::Body(..) => StoreOutcome::Ok,
+            Read::NotModified => StoreOutcome::NotModified,
+            Read::Absent => StoreOutcome::Absent,
         });
         r
     }
@@ -517,21 +517,21 @@ impl Store for MeteredStore {
     async fn put_if_match(&self, key: &str, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
         let t = Instant::now();
         let r = self.inner.put_if_match(key, body, etag).await;
-        self.done(StoreOp::PutIfMatch, key, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::PutIfMatch, key, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
     async fn put_if_none_match(&self, key: &str, body: Vec<u8>) -> Result<Etag, StoreError> {
         let t = Instant::now();
         let r = self.inner.put_if_none_match(key, body).await;
-        self.done(StoreOp::PutIfNoneMatch, key, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::PutIfNoneMatch, key, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
     async fn append_if_match(&self, key: &str, offset: u64, body: Vec<u8>, etag: &Etag) -> Result<Etag, StoreError> {
         let t = Instant::now();
         let r = self.inner.append_if_match(key, offset, body, etag).await;
-        self.done(StoreOp::AppIfMatch, key, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::AppendIfMatch, key, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
@@ -542,28 +542,28 @@ impl Store for MeteredStore {
     async fn put(&self, key: &str, body: Vec<u8>) -> Result<(), StoreError> {
         let t = Instant::now();
         let r = self.inner.put(key, body).await;
-        self.done(StoreOp::Put, key, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::Put, key, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
     async fn delete(&self, key: &str) -> Result<(), StoreError> {
         let t = Instant::now();
         let r = self.inner.delete(key).await;
-        self.done(StoreOp::Del, key, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::Delete, key, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
     async fn list(&self, prefix: &str, max_keys: usize) -> Result<Vec<String>, StoreError> {
         let t = Instant::now();
         let r = self.inner.list(prefix, max_keys).await;
-        self.done(StoreOp::List, prefix, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::List, prefix, t, &r, |_| StoreOutcome::Ok);
         r
     }
 
     async fn list_prefixes(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
         let t = Instant::now();
         let r = self.inner.list_prefixes(prefix).await;
-        self.done(StoreOp::ListPrefixes, prefix, t, &r, |_| StoreResult::Ok);
+        self.done(StoreOp::ListPrefixes, prefix, t, &r, |_| StoreOutcome::Ok);
         r
     }
 

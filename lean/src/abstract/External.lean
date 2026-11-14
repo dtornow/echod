@@ -17,85 +17,6 @@ def promiseCreate (req : PromiseCreateReq) (now : Nat) :
   let o ← readOrCreate req now
   return { status := 200, promise := some (o.promise.toRecord o.id) }
 
-/-- Wake `awaiter` because `awaited` settled. -/
-def settleResume (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
-  match ← readTask awaiter now with
-  | none => pure ()
-  | some (object, task) =>
-      match task.state with
-      | .suspended =>
-          setObject { object with
-            task := some { task with
-              state := .pending
-              resumes := [awaited]
-              retryTimeoutAt := some now } }
-      | .pending | .acquired | .halted =>
-          if !(task.resumes.contains awaited) then
-            setObject { object with
-              task := some { task with resumes := task.resumes ++ [awaited] } }
-      | .fulfilled => pure ()
-
-/-- Drop one callback and resume its task. A pending promise has not settled. -/
-def settleCallback (req : PromiseRegisterCallbackReq) (now : Nat) : Handler Unit := do
-  match ← readObject req.awaited now with
-  | none => pure ()
-  | some awaited =>
-      if awaited.promise.state == .pending then pure ()
-      else if awaited.promise.callbacks.contains req.awaiter then
-        setObject { awaited with
-          promise.callbacks := awaited.promise.callbacks.filter (· != req.awaiter) }
-        settleResume req.awaited req.awaiter now
-
-/-- Drop one listener and tell it. -/
-def settleListener (req : PromiseRegisterListenerReq) (now : Nat) : Handler Unit := do
-  match ← readObject req.awaited now with
-  | none => pure ()
-  | some awaited =>
-      if awaited.promise.state == .pending then pure ()
-      else if awaited.promise.listeners.contains req.address then
-        setObject { awaited with
-          promise.listeners := awaited.promise.listeners.filter (· != req.address) }
-        setMessage req.address (.unblock (awaited.promise.toRecord req.awaited))
-
-def wasDue (id : Ident) (now : Nat) : Handler Bool := do
-  match ← readObject id now with
-  | none => return false
-  | some object => return retryDue object.promise object.task now
-
-/-- Offer a task this settlement woke. A retry that was already due stays. -/
-def offerIfNew (awaiter : Ident) (due : Bool) (now : Nat) : Handler Unit := do
-  if due then
-    pure ()
-  else
-    match ← readTask awaiter now with
-    | none => pure ()
-    | some (object, task) =>
-        match task.retryTimeoutAt with
-        | none => pure ()
-        | some due =>
-            if task.state == .pending ∧ due ≤ now ∧ object.promise.state == .pending then
-              let env ← ask
-              setObject { object with
-                task := some { task with retryTimeoutAt := some (now + env.config.retryTimeout) } }
-              setMessage
-                ((object.promise.tags.get? "resonate:target").getD "")
-                (.execute awaiter task.version)
-            else
-              pure ()
-
-/-- Resume the tasks registered on `id`, tell its listeners, and offer a task
-this resume made due. -/
-def resumeRegistered (id : Ident) (callbacks : List Ident) (listeners : List String)
-    (now : Nat) : Handler Unit := do
-  let mine := callbacks.filter (·.sameOrigin id)
-  let dues ← mine.mapM (wasDue · now)
-  mine.forM fun awaiter =>
-    settleCallback { awaited := id, awaiter } now
-  listeners.forM fun address =>
-    settleListener { awaited := id, address } now
-  (mine.zip dues).forM fun (awaiter, due) =>
-    offerIfNew awaiter due now
-
 def promiseSettle (req : PromiseSettleReq) (now : Nat) :
     Handler PromiseSettleRes := do
   if !req.state.settable then
@@ -109,7 +30,6 @@ def promiseSettle (req : PromiseSettleReq) (now : Nat) :
           value := req.value
           settledAt := some now }
         setSettled o p now
-        resumeRegistered req.id p.callbacks p.listeners now
         return { status := 200, promise := some (p.toRecord req.id) }
       return { status := 200, promise := some (o.promise.toRecord req.id) }
 

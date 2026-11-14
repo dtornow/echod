@@ -14,7 +14,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::DocumentBody;
+use echod_concrete::DocumentBody;
 
 use crate::verified::node::{str_eq, NodeCore};
 use crate::verified::table::Table;
@@ -49,9 +49,9 @@ use crate::verified::node_spec::{spec_read_config, ANode};
 #[cfg(verus_keep_ghost)]
 use crate::verified::ScheduleSpec;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::DocumentBodyV;
+use echod_concrete::node::DocumentBodyV;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{StoreCallSpec, StoreErrorSpec};
 
 verus! {
 
@@ -202,8 +202,8 @@ pub open spec fn spec_debug_begin(s: S, call: DebugCallSpec) -> S {
 /// the schedules.
 #[verifier::opaque]
 pub open spec fn spec_list_docs(s: S) -> (S, Map<OpId, bool>) {
-    let (s, op1) = spec_store(s, StoreReqSpec::List { prefix: s.keys.prefix + "wf/"@, max_keys: usize::MAX }, Owner::Debug);
-    let (s, op2) = spec_store(s, StoreReqSpec::List { prefix: s.keys.prefix + "sched/"@, max_keys: usize::MAX }, Owner::Debug);
+    let (s, op1) = spec_store(s, StoreCallSpec::List { prefix: s.keys.prefix + "wf/"@, max_keys: usize::MAX }, Owner::Debug);
+    let (s, op2) = spec_store(s, StoreCallSpec::List { prefix: s.keys.prefix + "sched/"@, max_keys: usize::MAX }, Owner::Debug);
     (s, Map::<OpId, bool>::empty().insert(op1, true).insert(op2, true))
 }
 
@@ -211,7 +211,7 @@ pub open spec fn spec_list_docs(s: S) -> (S, Map<OpId, bool>) {
 pub open spec fn spec_debug_start(s: S, call: DebugCallSpec) -> S {
     match call {
         DebugCallSpec::Reset { id, kind, corr } => {
-            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: s.cfg.prefix, max_keys: usize::MAX }, Owner::Debug);
+            let (s, op) = spec_store(s, StoreCallSpec::List { prefix: s.cfg.prefix, max_keys: usize::MAX }, Owner::Debug);
             spec_current(s, Some(OpSpec::Reset { id, kind, corr, phase: ResetSpec::Listing { op } }))
         },
         DebugCallSpec::Snap { id, kind, corr } => {
@@ -261,7 +261,7 @@ pub open spec fn spec_delete_keys(s: S, keys: Seq<Seq<char>>, pending: Map<OpId,
     } else {
         let key = keys[0];
         let (s, pending) = if spec_resettable(spec_class_of(s.keys.prefix, key)) {
-            let (s, op) = spec_store(s, StoreReqSpec::Del { key }, Owner::Debug);
+            let (s, op) = spec_store(s, StoreCallSpec::Delete { key }, Owner::Debug);
             (s, pending.insert(op, true))
         } else {
             (s, pending)
@@ -279,7 +279,7 @@ pub open spec fn spec_get_keys(s: S, keys: Seq<Seq<char>>, pending: Map<OpId, bo
     } else {
         let key = keys[0];
         let schedule = spec_class_of(s.keys.prefix, key) == Some("sched"@);
-        let (s, op) = spec_store(s, StoreReqSpec::Get { key }, Owner::Debug);
+        let (s, op) = spec_store(s, StoreCallSpec::Get { key }, Owner::Debug);
         spec_get_keys(s, keys.drop_first(), pending.insert(op, schedule))
     }
 }
@@ -336,7 +336,7 @@ pub open spec fn spec_submit_fires(s: S, schedules: Seq<Seq<char>>, time: u64) -
 }
 
 #[verifier::opaque]
-pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
+pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreOutcome) -> S {
     match s.debug.current {
         None => s,
         Some(current) => {
@@ -353,7 +353,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                 let s = spec_current(s, None);
                 match current {
                     OpSpec::Reset { id, kind, corr, phase } => match (phase, outcome) {
-                        (ResetSpec::Listing { .. }, StoreRes::List { result: Ok(keys) }) => {
+                        (ResetSpec::Listing { .. }, StoreOutcome::Listed(keys)) => {
                             let (s, pending) = spec_delete_keys(s, keys.deep_view(), Map::empty());
                             if pending =~= Map::<OpId, bool>::empty() {
                                 spec_debug_reset_done(s, id, kind, corr)
@@ -361,7 +361,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                                 spec_current(s, Some(OpSpec::Reset { id, kind, corr, phase: ResetSpec::Deleting { pending } }))
                             }
                         },
-                        (ResetSpec::Deleting { pending }, StoreRes::Del { result: Ok(()) }) => {
+                        (ResetSpec::Deleting { pending }, StoreOutcome::Done) => {
                             let pending = pending.remove(op);
                             if pending =~= Map::<OpId, bool>::empty() {
                                 spec_debug_reset_done(s, id, kind, corr)
@@ -369,18 +369,17 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                                 spec_current(s, Some(OpSpec::Reset { id, kind, corr, phase: ResetSpec::Deleting { pending } }))
                             }
                         },
-                        (_, StoreRes::List { result: Err(e) } | StoreRes::Del { result: Err(e) }) =>
-                            spec_debug_fail(s, id, kind, corr, e.deep_view()),
+                        (_, StoreOutcome::Failed(e)) => spec_debug_fail(s, id, kind, corr, e.deep_view()),
                         _ => spec_debug_fail(s, id, kind, corr, spec_unexpected()),
                     },
                     OpSpec::Snap { id, kind, corr, phase: SnapSpec::Gathering { ops, pending, origins, schedules } } => {
                         let gathered: Result<(S, Map<OpId, bool>, Map<OpId, bool>, Seq<DocumentBodyV>, Seq<ScheduleSpec>), StoreErrorSpec> = match outcome {
-                            StoreRes::List { result: Ok(keys) } => {
+                            StoreOutcome::Listed(keys) => {
                                 let ops = ops.remove(op);
                                 let (s, pending) = spec_get_keys(s, keys.deep_view(), pending);
                                 Ok((s, ops, pending, origins, schedules))
                             },
-                            StoreRes::Get { result: Ok(got) } => {
+                            StoreOutcome::Got(got) => {
                                 let schedule = if pending.contains_key(op) { pending[op] } else { false };
                                 let pending = pending.remove(op);
                                 match got {
@@ -403,8 +402,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                                     None => Ok((s, ops, pending, origins, schedules)),
                                 }
                             },
-                            StoreRes::List { result: Err(e) } | StoreRes::Get { result: Err(e) } =>
-                                Err(e.deep_view()),
+                            StoreOutcome::Failed(e) => Err(e.deep_view()),
                             _ => Err(spec_unexpected()),
                         };
                         match gathered {
@@ -419,7 +417,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                         }
                     },
                     OpSpec::Tick { id, kind, corr, time, phase } => match (phase, outcome) {
-                        (TickSpec::Listing { ops, origins, schedules }, StoreRes::List { result: Ok(keys) }) => {
+                        (TickSpec::Listing { ops, origins, schedules }, StoreOutcome::Listed(keys)) => {
                             let ops = ops.remove(op);
                             let (origins, schedules) = spec_tick_names(s.keys.prefix, keys.deep_view(), origins, schedules);
                             if !(ops =~= Map::<OpId, bool>::empty()) {
@@ -435,8 +433,7 @@ pub open spec fn spec_debug_completed(s: S, op: OpId, outcome: StoreRes) -> S {
                                 }
                             }
                         },
-                        (_, StoreRes::List { result: Err(e) }) =>
-                            spec_debug_fail(s, id, kind, corr, e.deep_view()),
+                        (_, StoreOutcome::Failed(e)) => spec_debug_fail(s, id, kind, corr, e.deep_view()),
                         _ => spec_debug_fail(s, id, kind, corr, spec_unexpected()),
                     },
                 }
@@ -579,10 +576,10 @@ impl State {
         }
         let mut ops: Table<OpId, bool> = Table::new();
         let p1 = concat(self.keys.prefix.as_str(), "wf/");
-        let op1 = self.store(StoreReq::List { prefix: p1, max_keys: usize::MAX }, Owner::Debug);
+        let op1 = self.store(StoreCall::List { prefix: p1, max_keys: usize::MAX }, Owner::Debug);
         ops.insert(op1, true);
         let p2 = concat(self.keys.prefix.as_str(), "sched/");
-        let op2 = self.store(StoreReq::List { prefix: p2, max_keys: usize::MAX }, Owner::Debug);
+        let op2 = self.store(StoreCall::List { prefix: p2, max_keys: usize::MAX }, Owner::Debug);
         ops.insert(op2, true);
         ops
     }
@@ -597,7 +594,7 @@ impl State {
         match call {
             DebugCall::Reset { id, kind, corr } => {
                 let prefix = copy_string(&self.cfg.prefix);
-                let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Debug);
+                let op = self.store(StoreCall::List { prefix, max_keys: usize::MAX }, Owner::Debug);
                 self.debug.current = Some(Op::Reset { id, kind, corr, phase: Reset::Listing { op } });
             },
             DebugCall::Snap { id, kind, corr } => {
@@ -677,7 +674,7 @@ impl State {
             }
             let key = copy_string(&keys[i]);
             if resettable(&self.keys.class_of(key.as_str())) {
-                let op = self.store(StoreReq::Del { key }, Owner::Debug);
+                let op = self.store(StoreCall::Delete { key }, Owner::Debug);
                 pending.insert(op, true);
             }
             i += 1;
@@ -712,7 +709,7 @@ impl State {
             }
             let key = copy_string(&keys[i]);
             let schedule = is_class(&self.keys.class_of(key.as_str()), "sched");
-            let op = self.store(StoreReq::Get { key }, Owner::Debug);
+            let op = self.store(StoreCall::Get { key }, Owner::Debug);
             pending.insert(op, schedule);
             i += 1;
         }
@@ -837,8 +834,7 @@ impl State {
         }
     }
 
-    #[verifier::rlimit(20)]
-    pub fn debug_completed(&mut self, op: OpId, outcome: StoreRes)
+    pub fn debug_completed(&mut self, op: OpId, outcome: StoreOutcome)
         ensures
             final(self).deep_view() == spec_debug_completed(old(self).deep_view(), op, outcome),
     {
@@ -862,7 +858,7 @@ impl State {
         }
         match current {
             Op::Reset { id, kind, corr, phase } => match (phase, outcome) {
-                (Reset::Listing { .. }, StoreRes::List { result: Ok(keys) }) => {
+                (Reset::Listing { .. }, StoreOutcome::Listed(keys)) => {
                     let mut pending: Table<OpId, bool> = Table::new();
                     self.delete_keys(&keys, &mut pending);
                     if pending.is_empty() {
@@ -871,7 +867,7 @@ impl State {
                         self.debug.current = Some(Op::Reset { id, kind, corr, phase: Reset::Deleting { pending } });
                     }
                 },
-                (Reset::Deleting { mut pending }, StoreRes::Del { result: Ok(()) }) => {
+                (Reset::Deleting { mut pending }, StoreOutcome::Done) => {
                     pending.remove(&op);
                     if pending.is_empty() {
                         self.debug_reset_done(id, kind, corr);
@@ -879,18 +875,17 @@ impl State {
                         self.debug.current = Some(Op::Reset { id, kind, corr, phase: Reset::Deleting { pending } });
                     }
                 },
-                (_, StoreRes::List { result: Err(e) } | StoreRes::Del { result: Err(e) }) =>
-                    self.debug_fail(id, kind, corr, e),
+                (_, StoreOutcome::Failed(e)) => self.debug_fail(id, kind, corr, e),
                 _ => self.debug_fail(id, kind, corr, unexpected()),
             },
             Op::Snap { id, kind, corr, phase: Snap::Gathering { mut ops, mut pending, mut origins, mut schedules } } => {
                 let failed: Option<StoreError> = match outcome {
-                    StoreRes::List { result: Ok(keys) } => {
+                    StoreOutcome::Listed(keys) => {
                         ops.remove(&op);
                         self.get_keys(&keys, &mut pending);
                         None
                     },
-                    StoreRes::Get { result: Ok(got) } => {
+                    StoreOutcome::Got(got) => {
                         let schedule = match pending.remove(&op) {
                             Some(b) => b,
                             None => false,
@@ -902,7 +897,7 @@ impl State {
                                         Ok(loaded) => {
                                             let body = document::loaded_body(&loaded);
                                             proof {
-                                                crate::concrete::lemma_doc_view(&body);
+                                                echod_concrete::lemma_doc_view(&body);
                                             }
                                             match body {
                                                 DocumentBody::Schedule(Some(row)) => {
@@ -938,7 +933,7 @@ impl State {
                             None => None,
                         }
                     },
-                    StoreRes::List { result: Err(e) } | StoreRes::Get { result: Err(e) } => Some(e),
+                    StoreOutcome::Failed(e) => Some(e),
                     _ => Some(unexpected()),
                 };
                 match failed {
@@ -953,7 +948,7 @@ impl State {
                 }
             },
             Op::Tick { id, kind, corr, time, phase } => match (phase, outcome) {
-                (Tick::Listing { mut ops, mut origins, mut schedules }, StoreRes::List { result: Ok(keys) }) => {
+                (Tick::Listing { mut ops, mut origins, mut schedules }, StoreOutcome::Listed(keys)) => {
                     ops.remove(&op);
                     self.tick_names(&keys, &mut origins, &mut schedules);
                     if !ops.is_empty() {
@@ -969,7 +964,7 @@ impl State {
                         self.submit_sweeps(&origins, time);
                     }
                 },
-                (_, StoreRes::List { result: Err(e) }) => self.debug_fail(id, kind, corr, e),
+                (_, StoreOutcome::Failed(e)) => self.debug_fail(id, kind, corr, e),
                 _ => self.debug_fail(id, kind, corr, unexpected()),
             },
         }

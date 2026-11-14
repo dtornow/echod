@@ -3,7 +3,7 @@
 //! One `State` behind one lock. Every event goes through `apply`, which
 //! takes the lock, runs the core's one step, drops the lock, and performs
 //! what came out: a store call is spawned and its answer comes back as
-//! `Event::Store`; a reply wakes the request waiting for it; a message is
+//! `Completed`; a reply wakes the request waiting for it; a message is
 //! pushed; a wake resets the one timer; a note goes to the metrics, the
 //! log, and whoever listens. The core never waits, so the lock is held
 //! for a step and no longer, and nothing here decides anything.
@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use echod_logic::Membership;
-use echod_logic::types::{Armed, Effect, Event, Note, RequestEvent, RequestId};
+use echod_logic::types::{Armed, Effect, Event, Note, RequestId};
 use echod_logic::{Call, DebugCall, State};
 use resonate_core::types::{Message, RequestEnvelope, ResponseEnvelope};
 use resonate_core::{ResonateRouter, ResonateServer, Unavailable};
@@ -46,25 +46,25 @@ pub struct Node {
     next_request: AtomicU64,
     /// When the core next wants a wake, and what that wake is for.
     wake: watch::Sender<Option<(tokio::time::Instant, Armed)>>,
+    stopped: watch::Sender<bool>,
     crashed: watch::Sender<bool>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Node {
     /// A node over `store` with HTTP push as its only transport.
-    pub fn new(cfg: Config, store: Arc<dyn Store>) -> Result<Arc<Self>, String> {
+    pub fn new(cfg: Config, store: Arc<dyn Store>) -> Arc<Self> {
         let router: Arc<dyn ResonateRouter> = Arc::new(Router::http_push());
         Self::with_router(cfg, store, router)
     }
 
-    pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Result<Arc<Self>, String> {
+    pub fn with_router(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>) -> Arc<Self> {
         Self::with_env(cfg, store, router, Arc::new(SystemClock), Arc::new(NoNotes))
     }
 
     /// A node whose clock and listener are supplied: what a simulation
     /// builds.
-    pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, notes: Arc<dyn Notes>) -> Result<Arc<Self>, String> {
-        cfg.validate()?;
+    pub fn with_env(cfg: Config, store: Arc<dyn Store>, router: Arc<dyn ResonateRouter>, clock: Arc<dyn Clock>, notes: Arc<dyn Notes>) -> Arc<Self> {
         let keys = echod_logic::keys::KeySpace::new(&cfg.prefix, cfg.timer_bucket_ms);
         // Every call on the bucket goes through the meter.
         let metrics = Metrics::new();
@@ -73,6 +73,7 @@ impl Node {
         let id = cfg.node_id.clone().unwrap_or_else(|| format!("{:016x}", echod_logic::keys::fnv1a(&format!("{}/{}", cfg.node_url(), clock.now()))));
         let state = State::new(cfg.logic(id.clone(), appendable));
         let (wake, _) = watch::channel(None);
+        let (stopped, _) = watch::channel(false);
         let (crashed, _) = watch::channel(false);
         let node = Arc::new_cyclic(|me| Node {
             me: me.clone(),
@@ -87,13 +88,14 @@ impl Node {
             replies: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
             wake,
+            stopped,
             crashed,
             tasks: Mutex::new(Vec::new()),
         });
         // The gauges: read when scraped, from the state as it is then.
         let weak = Arc::downgrade(&node);
         node.metrics.set_snapshot(move || weak.upgrade().map(|n| n.lock().snapshot()).unwrap_or_default());
-        Ok(node)
+        node
     }
 
     fn me(&self) -> Arc<Node> {
@@ -166,22 +168,22 @@ impl Node {
         if *self.crashed.borrow() {
             return;
         }
-        let effects = {
+        let (effects, stopped) = {
             let mut s = self.lock();
-            s.on_event(event)
+            let effects = s.on_event(event);
+            (effects, s.stopped())
         };
-        self.perform_all(effects);
-    }
-
-    fn perform_all(&self, effects: Vec<Effect>) {
         for e in effects {
             self.perform(e);
+        }
+        if stopped {
+            let _ = self.stopped.send(true);
         }
     }
 
     fn perform(&self, e: Effect) {
         match e {
-            Effect::Store { op, request } => {
+            Effect::Store { op, call } => {
                 let node = self.me();
                 let store = Arc::clone(&self.store);
                 let mut crashed = self.crashed();
@@ -189,9 +191,9 @@ impl Node {
                     tokio::select! {
                         biased;
                         _ = crashed.changed() => {}
-                        response = store::call(&*store, request) => {
+                        outcome = store::call(&*store, call) => {
                             let clock = node.clock.now();
-                            node.apply(Event::Store { op, response, clock });
+                            node.apply(Event::Completed { op, outcome, clock });
                         }
                     }
                 });
@@ -266,7 +268,7 @@ impl Node {
                             _ = tokio::time::sleep_until(at) => {
                                 let _ = node.wake.send_replace(None);
                                 let clock = node.clock.now();
-                                node.apply(Event::Wake { clock, armed });
+                                node.apply(Event::Due { clock, armed });
                             }
                         }
                     }
@@ -304,14 +306,19 @@ impl ResonateServer for Node {
             let handle = self.me().spawn_wake();
             self.tasks.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
         }
-        self.lock().set_loops(!debug);
-        self.apply(Event::Wake { clock, armed: Armed::Heartbeat });
+        self.apply(Event::Start { clock, loops: !debug });
         Ok(())
     }
 
-    /// Stop the impure shell. Durable leases and announcements expire without
-    /// a lifecycle transition in the pure core.
+    /// Stop: the announcement is withdrawn, the timer stops. Requests in
+    /// flight are answered.
     async fn stop(&self) -> Result<(), Unavailable> {
+        let mut stopped = self.stopped.subscribe();
+        let clock = self.clock.now();
+        self.apply(Event::Stop { clock });
+        if !*stopped.borrow_and_update() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), stopped.changed()).await;
+        }
         let tasks: Vec<_> = self.tasks.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
         for t in tasks {
             t.abort();
@@ -339,7 +346,7 @@ impl ResonateServer for Node {
                 let (id, rx) = self.begin();
                 self.apply(Event::Request {
                     clock,
-                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
+                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
                 });
                 self.finish(&req.kind, started, rx).await
             }
@@ -350,10 +357,7 @@ impl ResonateServer for Node {
                     crate::admit::DebugOp::Snap => DebugCall::Snap { id, kind, corr },
                     crate::admit::DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
                 };
-                self.apply(Event::Request {
-                    clock,
-                    request: RequestEvent::Debug(call),
-                });
+                self.apply(Event::Debug { clock, call });
                 self.finish(&req.kind, started, rx).await
             }
         }

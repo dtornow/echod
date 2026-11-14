@@ -10,8 +10,8 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::store::{StoreError, StoreRes};
-use crate::concrete::{
+use echod_concrete::store::{StoreError, StoreOutcome};
+use echod_concrete::{
     create_occurrence, request_transition, run_due, sweep, DocumentBody, Outbound, Pending,
 };
 use echod_types::{Request, Response};
@@ -24,7 +24,7 @@ use super::commit_spec::*;
 #[cfg(verus_keep_ghost)]
 use super::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{notes_v, pend_v, NoteV, PendingV};
+use echod_concrete::node::{notes_v, pend_v, NoteV, PendingV};
 
 verus! {
 
@@ -141,22 +141,15 @@ pub open spec fn opt_seq(o: Option<String>) -> Option<Seq<char>> {
     }
 }
 
-pub open spec fn answer_v(step: AStep, o: Option<&StoreRes>) -> AAnswer {
-    match (step, o) {
-        (_, None) => AAnswer::Fresh,
-        (AStep::PuttingKey(_), Some(StoreRes::Put { result: Ok(()) }))
-        | (AStep::DeletingPrevious(_), Some(StoreRes::Del { result: Ok(()) }))
-        | (AStep::DeletingFired(_), Some(StoreRes::Del { result: Ok(()) })) => AAnswer::Done,
-        (AStep::Writing { .. }, Some(StoreRes::PutIfMatch { result: Ok(tag) }))
-        | (AStep::Writing { .. }, Some(StoreRes::PutIfNoneMatch { result: Ok(tag) }))
-        | (AStep::Writing { .. }, Some(StoreRes::AppIfMatch { result: Ok(tag) })) => AAnswer::Written(tag.0@),
-        (AStep::PuttingKey(_), Some(StoreRes::Put { result: Err(e) }))
-        | (AStep::DeletingPrevious(_), Some(StoreRes::Del { result: Err(e) }))
-        | (AStep::DeletingFired(_), Some(StoreRes::Del { result: Err(e) }))
-        | (AStep::Writing { .. }, Some(StoreRes::PutIfMatch { result: Err(e) }))
-        | (AStep::Writing { .. }, Some(StoreRes::PutIfNoneMatch { result: Err(e) }))
-        | (AStep::Writing { .. }, Some(StoreRes::AppIfMatch { result: Err(e) })) => AAnswer::Failed(*e),
-        (_, Some(_)) => AAnswer::Other,
+pub open spec fn answer_v(o: Option<&StoreOutcome>) -> AAnswer {
+    match o {
+        None => AAnswer::Fresh,
+        Some(x) => match *x {
+            StoreOutcome::Done => AAnswer::Done,
+            StoreOutcome::Written(tag) => AAnswer::Written(tag.0@),
+            StoreOutcome::Failed(e) => AAnswer::Failed(e),
+            _ => AAnswer::Other,
+        },
     }
 }
 
@@ -320,9 +313,9 @@ impl Sequence {
 
     /// One decision: `spec_advance`. `answer` is the store's answer to the
     /// call the commit waits on, if it waits on one.
-    pub fn advance(&mut self, core: &mut NodeCore, answer: Option<&StoreRes>) -> (r: Outcome)
+    pub fn advance(&mut self, core: &mut NodeCore, answer: Option<&StoreOutcome>) -> (r: Outcome)
         ensures
-            (final(self)@, final(core)@, r@) == spec_advance(old(self)@, old(core)@, answer_v(old(self)@.step, answer)),
+            (final(self)@, final(core)@, r@) == spec_advance(old(self)@, old(core)@, answer_v(answer)),
     {
         let step = copy_step(&self.step);
         match step {
@@ -352,14 +345,12 @@ impl Sequence {
                 }
             },
             Step::PuttingKey(key) => match answer {
-                Some(StoreRes::Put { result: Ok(()) }) => {
-                    proof { assert(answer_v(old(self)@.step, answer) == AAnswer::Done); }
+                Some(StoreOutcome::Done) => {
                     self.plan.armed(key);
                     self.step = Step::Writing { idle: false };
                     Outcome::Act(Act::Write { cond: copy_opt_string(&self.etag), idle: false })
                 },
-                Some(StoreRes::Put { result: Err(e) }) => {
-                    proof { assert(answer_v(old(self)@.step, answer) == AAnswer::Failed(*e)); }
+                Some(StoreOutcome::Failed(e)) => {
                     self.step = Step::Over;
                     Outcome::Failed(Some(copy_error(e)))
                 },
@@ -369,10 +360,7 @@ impl Sequence {
                 },
             },
             Step::Writing { idle } => match answer {
-                Some(StoreRes::PutIfMatch { result: Ok(tag) })
-                | Some(StoreRes::PutIfNoneMatch { result: Ok(tag) })
-                | Some(StoreRes::AppIfMatch { result: Ok(tag) }) => {
-                    proof { assert(answer_v(old(self)@.step, answer) == AAnswer::Written(tag.0@)); }
+                Some(StoreOutcome::Written(tag)) => {
                     self.etag = Some(clone_string(&tag.0));
                     if idle {
                         self.collect(core)
@@ -389,10 +377,7 @@ impl Sequence {
                         }
                     }
                 },
-                Some(StoreRes::PutIfMatch { result: Err(e) })
-                | Some(StoreRes::PutIfNoneMatch { result: Err(e) })
-                | Some(StoreRes::AppIfMatch { result: Err(e) }) => {
-                    proof { assert(answer_v(old(self)@.step, answer) == AAnswer::Failed(*e)); }
+                Some(StoreOutcome::Failed(e)) => {
                     self.step = Step::Over;
                     Outcome::Failed(Some(copy_error(e)))
                 },
@@ -410,8 +395,7 @@ impl Sequence {
                 self.collect(core)
             },
             Step::DeletingFired(_) => match answer {
-                Some(StoreRes::Del { result: Ok(()) }) => {
-                    proof { assert(answer_v(old(self)@.step, answer) == AAnswer::Done); }
+                Some(StoreOutcome::Done) => {
                     self.step = Step::Over;
                     Outcome::Act(Act::Done { deleted: true })
                 },
