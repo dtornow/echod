@@ -2,7 +2,9 @@ name: soak
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   soak:
@@ -11,5 +13,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: 20 seeds, 1000 operations each
+      - name: Smoke — 5 seeds, 100 operations each
+        if: github.event_name != 'workflow_dispatch'
+        run: cargo run --release --locked -p echod-sim -- soak --from 1 --seeds 5 --operations 100
+      - name: Full soak — 20 seeds, 1000 operations each
+        if: github.event_name == 'workflow_dispatch'
         run: cargo run --release --locked -p echod-sim -- soak --from 1 --seeds 20 --operations 1000
