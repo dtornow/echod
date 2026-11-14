@@ -1,0 +1,6 @@
+.git
+target
+target-verus
+lean
+examples
+**/node_modules

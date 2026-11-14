@@ -1,0 +1,18 @@
+[package]
+name = "echod-model-test"
+description = "Trace and workload support for testing the Echod abstract model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_model_test"
+path = "src/lib.rs"
+
+[dependencies]
+echod-abstract-spec = { path = "../../spec/echod/abstract/spec" }
+echod-abstract-exec = { path = "../../spec/echod/abstract/exec" }
+echod-cron = { path = "../../comm/cron" }
+echod-types = { path = "../../comm/types" }
+rover-spec = { path = "../../spec/rover/spec" }
+rover-exec = { path = "../../spec/rover/exec" }

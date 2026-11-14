@@ -1,0 +1,26 @@
+[package]
+name = "echod-test-runtime"
+description = "Synchronous deterministic effect interpreter for echod: one seed, a virtual clock, an in-memory store, and recorded sends."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_sim"
+path = "src/lib.rs"
+
+[dependencies]
+echod-process = { path = "../../impl/process" }
+echod-cron = { path = "../../comm/cron" }
+echod-types = { path = "../../comm/types" }
+rover-spec = { path = "../../spec/rover/spec" }
+serde = { version = "1", features = ["derive"] }
+rover-exec = { path = "../../spec/rover/exec" }
+echod-abstract-spec = { path = "../../spec/echod/abstract/spec" }
+echod-abstract-exec = { path = "../../spec/echod/abstract/exec" }
+echod-model-test = { path = "../model" }
+echod-concrete-spec = { path = "../../spec/echod/concrete/spec" }
+vstd = "=0.0.0-2026-10-11-0230"
+
+[dev-dependencies]
+serde_json = "1"

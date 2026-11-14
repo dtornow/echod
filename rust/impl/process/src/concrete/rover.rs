@@ -1,0 +1,183 @@
+//! Executable adapter for the Echod concrete world.
+//!
+//! Production document execution uses `document`; this adapter keeps the
+//! executable world used by concrete runtime tests beside that implementation.
+
+use vstd::prelude::*;
+
+pub use echod_concrete_spec::Config;
+pub use echod_concrete_spec::model::{Message, Pid};
+use echod_concrete_spec::model::LogicV;
+use echod_concrete_spec::Proc as SpecProc;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::model::{spec_store, spec_world};
+#[cfg(test)]
+use echod_concrete_spec::Spec as SpecModel;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::node::NodeV;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::store::StoreV;
+use rover_spec::rover::comm::ProcessEvent;
+#[cfg(test)]
+use rover_spec::rover::comm::Time;
+#[cfg(test)]
+use rover_exec as RoverExec;
+#[cfg(test)]
+use RoverExec::ProcResult;
+
+#[cfg(verus_keep_ghost)]
+use crate::concrete::document::node_results_v;
+use crate::concrete::document::Node;
+use crate::concrete::store::Store;
+
+verus! {
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct Logic {
+    pub clock: u64,
+    pub loops: bool,
+    pub stopping: bool,
+    pub stopped: bool,
+    pub last_wake: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum Proc {
+    Node(Node),
+    Store(Store),
+}
+
+impl View for Logic {
+    type V = LogicV;
+    open spec fn view(&self) -> LogicV {
+        LogicV {
+            clock: self.clock as nat, loops: self.loops, stopping: self.stopping,
+            stopped: self.stopped,
+            last_wake: match self.last_wake { Some(t) => Some(t as nat), None => None },
+        }
+    }
+}
+
+impl View for Proc {
+    type V = SpecProc;
+    open spec fn view(&self) -> SpecProc {
+        match self {
+            Proc::Node(node) => SpecProc::Node(node@),
+            Proc::Store(store) => SpecProc::Store(store@),
+        }
+    }
+}
+
+pub struct Spec;
+
+pub open spec fn world_v(v: Seq<(Pid, Proc)>) -> Seq<(Pid, SpecProc)> {
+    v.map_values(|entry: (Pid, Proc)| (entry.0, entry.1@))
+}
+
+pub open spec fn store_results_v(pairs: Seq<(Store, Vec<(Pid, Message)>)>) -> Seq<rover_spec::rover::RoverSpec::StepResultV<SpecProc, Pid, Message>> {
+    pairs.map_values(|pair: (Store, Vec<(Pid, Message)>)| rover_spec::rover::RoverSpec::StepResultV { state: SpecProc::Store(pair.0@), send: pair.1@ })
+}
+
+fn same_pid(a: Pid, b: Pid) -> (r: bool)
+    ensures r == (a == b),
+{
+    match (a, b) {
+        (Pid::Outside, Pid::Outside) | (Pid::Store, Pid::Store) => true,
+        (Pid::Node(x), Pid::Node(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn seen_has(seen: &Vec<(Pid, u64)>, sender: Pid, op: u64) -> (r: bool)
+    ensures r == seen@.contains((sender, op)),
+{
+    let mut i = 0;
+    while i < seen.len()
+        invariant i <= seen.len(), forall|j: int| 0 <= j < i ==> seen@[j] != (sender, op),
+        decreases seen.len() - i,
+    {
+        let (p, o) = seen[i];
+        if same_pid(p, sender) && o == op {
+            assert(seen@[i as int] == (sender, op));
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+impl Store {
+    pub fn step(&self, event: &ProcessEvent<Pid, Message>) -> (r: Vec<(Store, Vec<(Pid, Message)>)>)
+        ensures store_results_v(r@) == spec_store(self@, *event),
+    {
+        let mut r: Vec<(Store, Vec<(Pid, Message)>)> = Vec::new();
+        match event {
+            ProcessEvent::Receive { sender, message: Message::StoreReq { op, request } } => {
+                if seen_has(&self.seen, *sender, *op) {
+                    r.push((self.copy(), Vec::new()));
+                    proof { assert(store_results_v(r@) =~~= spec_store(self@, *event)); }
+                    return r;
+                }
+                let (mut next, response) = self.apply(request);
+                next.seen.push((*sender, *op));
+                let mut send = Vec::new();
+                send.push((*sender, Message::StoreRes { op: *op, response }));
+                r.push((next, send));
+                proof { assert(store_results_v(r@) =~~= spec_store(self@, *event)); }
+                r
+            },
+            _ => {
+                proof { assert(store_results_v(r@) =~~= Seq::<rover_spec::rover::RoverSpec::StepResultV<SpecProc, Pid, Message>>::empty()); }
+                r
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+impl RoverExec::Proc for Proc {
+    type Spec = SpecProc;
+
+    fn on_event(&self, _config: &Config, now: Time, event: &ProcessEvent<Pid, Message>) -> Vec<ProcResult<Self>> {
+        let mut results = Vec::new();
+        match self {
+            Proc::Node(node) => {
+                let pairs = node.step(now, event);
+                for (node, send) in pairs { results.push(ProcResult { state: Proc::Node(node), send, marks: Vec::new() }); }
+            },
+            Proc::Store(store) => {
+                let pairs = store.step(event);
+                for (store, send) in pairs { results.push(ProcResult { state: Proc::Store(store), send, marks: Vec::new() }); }
+            },
+        }
+        results
+    }
+}
+
+#[cfg(test)]
+impl RoverExec::Spec for Spec {
+    type Spec = SpecModel;
+    type Proc = Proc;
+
+    open spec fn spec(&self) -> SpecModel { SpecModel }
+    fn outside(&self) -> Pid { Pid::Outside }
+
+    fn initial(&self, config: &Config) -> Vec<(Pid, Proc)> {
+        let mut process = Vec::new();
+        let mut id = 0u64;
+        while id < config.nodes {
+            process.push((Pid::Node(id), Proc::Node(Node::new(id, config.nodes, config.loops, config.retry_timeout))));
+            id += 1;
+        }
+        process.push((Pid::Store, Proc::Store(Store::empty(config.appendable))));
+        process
+    }
+
+    fn injectable(&self, _config: &Config, message: &Message) -> bool {
+        matches!(message, Message::Request(_) | Message::Stop)
+    }
+}
+
+} // verus!

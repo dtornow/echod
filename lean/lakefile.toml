@@ -1,0 +1,38 @@
+name = "rover"
+defaultTargets = ["Rover", "Resonate"]
+
+[[require]]
+name = "resonate-spec"
+git = "https://github.com/resonatehq/resonate"
+rev = "9c72d818721b1776edd6b1b2939a83b3c0b248a6"
+subDir = "spec"
+
+[[lean_lib]]
+name = "Rover"
+srcDir = "src/Rover"
+
+[[lean_lib]]
+name = "Resonate"
+srcDir = "src"
+roots = [
+  # Check.lean stays Rover.Check, whose path is relative to src.
+  "Rover.Check",
+  "Protocol",
+  "abstract.Check",
+  "abstract.Machine",
+  "abstract.External",
+  "abstract.Internal",
+  "abstract.Model",
+  "concrete.Document",
+  "concrete.Messages",
+  "concrete.ProcessStore",
+  "concrete.ProcessNode",
+  "concrete.Machine",
+  "concrete.External",
+  "concrete.Internal",
+  "concrete.Model",
+  "refinement_handlers",
+  "refinement_proof",
+  "refinement_claim",
+  "settlement_tests",
+]

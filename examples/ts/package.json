@@ -1,0 +1,23 @@
+{
+  "name": "echod-examples",
+  "private": true,
+  "type": "module",
+  "description": "The Resonate TypeScript SDK against echod-server, over HTTP push.",
+  "scripts": {
+    "hello": "tsx hello.ts",
+    "fibonacci": "tsx fibonacci.ts",
+    "sleep": "tsx sleep.ts",
+    "human": "tsx human-in-the-loop.ts",
+    "rpc": "tsx rpc.ts",
+    "retries": "tsx retries.ts",
+    "all": "tsx hello.ts && tsx fibonacci.ts --mode mix --n 8 && tsx sleep.ts && tsx human-in-the-loop.ts && tsx rpc.ts && tsx retries.ts"
+  },
+  "dependencies": {
+    "@resonatehq/sdk": "0.11.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0"
+  }
+}
