@@ -61,6 +61,7 @@ what is next. Each crate root opens with a map of its files.
 ```
 cargo build --workspace                 # every crate, the ghost code erased
 cargo test --workspace                  # unit and end-to-end tests, in memory
+scripts/chaos.sh --seed 7               # isolated three-node container fleet under faults
 cargo verus verify -p rover-spec -p rover-exec
 cargo verus verify -p echod-abstract-spec -p echod-abstract-exec
 cargo verus verify -p echod-concrete-spec -p echod-refinement

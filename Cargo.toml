@@ -19,6 +19,7 @@ members = [
   "rust/test/cli/model",
   "rust/test/cli/store",
   "rust/test/cli/fakes3",
+  "rust/test/cli/chaos",
   "rust/impl/box",
   "rust/experiment/claude-quickjs",
 ]

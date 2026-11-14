@@ -425,6 +425,41 @@ answered 200 at least once, and the history overlapped.
 `RoverExec::exec` to generate a production-backed concrete trace before the
 same abstract check. It does not replace the primary DST.
 
+### Container chaos
+
+`scripts/chaos.sh` runs three disposable `echod` nodes over `fakes3`.
+Each node's PID 1 is `chaos-agent`, which starts and signals only its own
+child. The HTTP workload uses the current simulator generator and
+`echod-types` requests, translated at the harness boundary to the production
+wire protocol. It does not restore the old combined spec/execution crates
+or change the simulator's operation mix. Schedules are disabled in this
+bounded workload.
+
+The harness crashes, stops, pauses, partitions and slows nodes, then waits
+for every fault task before healing and settling the fleet. It checks
+observed state/version regressions, final reads, notifications, deadlines,
+current-format bucket documents and fleet health. These are black-box
+checks, not the simulator's typed model-history refinement proof: wall-clock
+HTTP observations lack the decision timestamps and autonomous steps that
+the model checker requires.
+
+Run `scripts/chaos.sh --no-chaos` for a healthy baseline, or
+`scripts/chaos.sh --seed 7 --duration-secs 120` for faults. Reports and logs
+land in `target/chaos/`. `--keep` retains that run's stopped containers in
+its uniquely named Compose project; remove that project explicitly when finished.
+Docker Compose (or `COMPOSE="podman compose"`) and a Linux container runtime
+supporting `NET_ADMIN`, iptables and optionally `sch_netem` are required.
+A missing netem capability is reported as skipped, not validated.
+
+Never point this tool at production. The agent requires explicit
+`--owned-test-node` acknowledgement and PID 1; the driver checks its ownership
+marker before faults. Control ports have no authentication and must stay on
+the private test network. Compose publishes no ports, mounts no host data
+into nodes and uses no host network or PID namespace. Cleanup flushes only
+the agent's exclusive firewall chains and removes only its tracked qdisc,
+never host firewall chains or store data. The script tears down only its
+own uniquely named Compose project.
+
 ### Differential
 
 `echod-diff` runs echod against the Resonate reference server, both as
