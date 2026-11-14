@@ -14,7 +14,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::DocumentBody;
+use echod_concrete::DocumentBody;
 
 use crate::verified::node::{str_eq, NodeCore};
 use crate::verified::table::Table;
@@ -49,9 +49,9 @@ use crate::verified::node_spec::{spec_read_config, ANode};
 #[cfg(verus_keep_ghost)]
 use crate::verified::ScheduleSpec;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::DocumentBodyV;
+use echod_concrete::node::DocumentBodyV;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 
 verus! {
 
@@ -902,7 +902,7 @@ impl State {
                                         Ok(loaded) => {
                                             let body = document::loaded_body(&loaded);
                                             proof {
-                                                crate::concrete::lemma_doc_view(&body);
+                                                echod_concrete::lemma_doc_view(&body);
                                             }
                                             match body {
                                                 DocumentBody::Schedule(Some(row)) => {

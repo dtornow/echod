@@ -11,12 +11,12 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::document::{
+use echod_concrete::node::{
     notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
     spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
-use crate::concrete::store::{StoreError, StoreReq, StoreRes};
-use echod_concrete_spec::model::{Message, Pid};
+use echod_concrete::store::{StoreError, StoreReq, StoreRes};
+use echod_concrete::model::{Message, Pid};
 use echod_types::Response;
 
 use super::commit_spec::*;
@@ -81,7 +81,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBod
             match after.flight {
                 Some(open) => {
                     &&& open.writing
-                    &&& open.decided == Some(crate::concrete::document::spec_encode_body(next))
+                    &&& open.decided == Some(echod_concrete::node::spec_encode_body(next))
                     &&& sent.len() == 1
                     &&& match sent[0].1 {
                         Message::StoreReq { request, .. } => match flight.etag {
@@ -99,7 +99,7 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBod
     match after.flight {
         Some(open) => {
             match flight.etag {
-                Some(chars) => echod_concrete_spec::model::lemma_string_realised(chars),
+                Some(chars) => echod_concrete::interpret::lemma_string_view(chars),
                 None => {},
             }
         },

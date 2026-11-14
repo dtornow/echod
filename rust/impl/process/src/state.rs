@@ -33,7 +33,7 @@ use crate::verified::node_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::StoreReqSpec;
+use echod_concrete::store::StoreReqSpec;
 
 verus! {
 

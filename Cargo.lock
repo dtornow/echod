@@ -12,12 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "allocator-api2"
-version = "0.2.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -820,16 +814,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "claude-quickjs"
-version = "0.1.0"
-dependencies = [
- "clap",
- "reqwest 0.13.5",
- "rquickjs",
- "serde_json",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1108,52 +1092,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-abstract-exec"
+name = "echod-abstract"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
  "echod-cron",
+ "echod-rover",
  "echod-types",
- "imbl",
- "rover-exec",
- "rover-spec",
  "vstd",
 ]
 
 [[package]]
-name = "echod-abstract-spec"
+name = "echod-concrete"
 version = "0.1.0"
 dependencies = [
+ "echod-abstract",
+ "echod-cron",
+ "echod-rover",
  "echod-types",
- "rover-spec",
- "vstd",
-]
-
-[[package]]
-name = "echod-chaos"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "echod-process",
- "echod-runtime",
- "echod-test-runtime",
- "echod-types",
- "libc",
- "reqwest 0.12.28",
- "resonate-core",
  "serde",
  "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "echod-concrete-spec"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-spec",
- "echod-types",
- "rover-spec",
  "verus_builtin",
  "verus_builtin_macros",
  "vstd",
@@ -1187,39 +1144,21 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "echod-abstract-exec",
- "echod-abstract-spec",
- "echod-model-test",
+ "echod-abstract",
+ "echod-rover",
  "reqwest 0.12.28",
  "resonate-core",
- "rover-exec",
- "rover-spec",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "echod-model-test"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
- "echod-cron",
- "echod-types",
- "rover-exec",
- "rover-spec",
 ]
 
 [[package]]
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
- "echod-concrete-spec",
- "echod-cron",
+ "echod-abstract",
+ "echod-concrete",
  "echod-types",
- "rover-exec",
- "rover-spec",
  "serde",
  "serde_json",
  "verus_builtin",
@@ -1228,15 +1167,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "echod-refinement"
+name = "echod-rover"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
- "echod-concrete-spec",
- "echod-types",
- "rover-spec",
- "verus_builtin",
- "verus_builtin_macros",
+ "echod-abstract",
+ "imbl",
  "vstd",
 ]
 
@@ -1271,6 +1206,7 @@ dependencies = [
  "clap",
  "echod-test-runtime",
  "serde_json",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1292,18 +1228,17 @@ dependencies = [
 name = "echod-test-runtime"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
- "echod-concrete-spec",
+ "async-trait",
+ "echod-abstract",
  "echod-cron",
- "echod-model-test",
  "echod-process",
- "echod-types",
- "rover-exec",
- "rover-spec",
+ "echod-rover",
+ "echod-runtime",
+ "resonate-core",
  "serde",
  "serde_json",
- "vstd",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1356,16 +1291,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "fakes3"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "md-5",
- "tokio",
 ]
 
 [[package]]
@@ -1598,8 +1523,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash",
 ]
 
@@ -2648,15 +2571,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "relative-path"
-version = "2.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38540a682c6e9bca04a8bca9e5ec5a6ba168dfbb04c9998fe517a9befb92eb68"
-dependencies = [
- "serde_core",
-]
-
-[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2702,7 +2616,6 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.20",
@@ -2772,52 +2685,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rover-exec"
-version = "0.1.0"
-dependencies = [
- "echod-abstract-exec",
- "echod-abstract-spec",
- "rover-spec",
- "vstd",
-]
-
-[[package]]
-name = "rover-spec"
-version = "0.1.0"
-dependencies = [
- "vstd",
-]
-
-[[package]]
-name = "rquickjs"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a22bf72f515cc4189dd7c63d016f6de92a11eee98ddf7dd64794198f6eb34e"
-dependencies = [
- "rquickjs-core",
-]
-
-[[package]]
-name = "rquickjs-core"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6657979a24d543e5fc66f32cef2f47ca82ce8eb55cec5f7d59a12b7b570bbf24"
-dependencies = [
- "hashbrown",
- "relative-path",
- "rquickjs-sys",
-]
-
-[[package]]
-name = "rquickjs-sys"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
-dependencies = [
- "cc",
 ]
 
 [[package]]

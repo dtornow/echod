@@ -19,8 +19,8 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::{
+use echod_abstract::trusted::copy;
+use echod_concrete::{
     advance_stored, body_len, clone_stored, peek, stored_body, stored_is_workflow, DocumentBody,
     Outbound, StoredDocument,
 };
@@ -58,12 +58,12 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::PromiseResSpec;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{
+use echod_concrete::node::{
     notes_v, spec_body_deadline, spec_workflow_map, DocumentBodyV, NoteV, ScheduleDocumentV,
     StoredDocumentV, WorkflowDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
 #[cfg(verus_keep_ghost)]
 use echod_types::spec::AResponse;
 
@@ -276,7 +276,7 @@ impl DeepView for Progress {
 /// How many due steps one sweep runs before it commits. A document with
 /// more due is committed with its nearest deadline past, which arms a key
 /// that fires at once.
-pub const SWEEP_STEPS: u64 = crate::concrete::document::REQUEST_SWEEP_STEPS;
+pub const SWEEP_STEPS: u64 = echod_concrete::node::REQUEST_SWEEP_STEPS;
 
 /// What a committed step answers with.
 #[make_spec_type]
@@ -296,7 +296,7 @@ pub struct FireCtx {
     pub ws: Working,
     pub row: crate::verified::Schedule,
     pub advanced: DocumentBody,
-    pub pending: crate::concrete::Pending,
+    pub pending: echod_concrete::Pending,
     pub t1: u64,
     pub origin: String,
     pub next: u64,
@@ -522,14 +522,14 @@ pub fn dispatches(doc: &DocumentBody, notes: &Vec<Outbound>) -> (r: Vec<(String,
         let ghost before = out.deep_view();
         proof {
             assert(nv[i as int] == notes@[i as int]@);
-            crate::concrete::lemma_outbound_view(&notes@[i as int]);
+            echod_concrete::lemma_outbound_view(&notes@[i as int]);
         }
         match &notes[i] {
             Outbound::Execute { id, version } => {
                 match peek(doc, id) {
                     Some(obj) => {
                         proof {
-                            crate::concrete::lemma_obj_view(&obj);
+                            echod_concrete::lemma_obj_view(&obj);
                         }
                         match crate::reason::target_of(&obj.promise.tags) {
                             Some(address) => {
@@ -569,7 +569,7 @@ pub fn is_workflow(d: &DocumentBody) -> (r: bool)
         r == (d@ is Workflow),
 {
     proof {
-        crate::concrete::lemma_doc_view(d);
+        echod_concrete::lemma_doc_view(d);
     }
     match d {
         DocumentBody::Workflow(_) => true,
@@ -1051,7 +1051,7 @@ pub open spec fn spec_commit_new(s: S, w: WorkingSpec, after: DocumentBodyV, dea
     };
     let (s, token) = spec_token(s);
     let seq = spec_new(s.node.core, w.target, etag, deadline, changed_any, fired, token as nat);
-    let after = crate::concrete::document::spec_advance_stored(w.loaded.document, after, now);
+    let after = echod_concrete::node::spec_advance_stored(w.loaded.document, after, now);
     (s, CommittingSpec { w, after, now, seq, issued: None })
 }
 
@@ -1141,16 +1141,16 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
 pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec) {
     let (call, mode, change_count, bytes) = match cond {
         None => {
-            let after = crate::concrete::document::spec_stored_body(c.after);
-            let body = document::spec_encode_body(c.after);
-            (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, crate::concrete::document::spec_body_len(after) as usize, body.len() as u64)
+            let after = echod_concrete::node::spec_stored_body(c.after);
+            let body = document::spec_encode(c.after);
+            (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, echod_concrete::node::spec_body_len(after) as usize, body.len() as u64)
         },
         Some(etag) => {
             let etag = EtagSpec(etag);
-            let after = crate::concrete::document::spec_stored_body(c.after);
+            let after = echod_concrete::node::spec_stored_body(c.after);
             let (delta, changed) = document::spec_encode_delta(c.w.loaded.document, c.after);
             let removed = document::spec_removed_any(document::spec_loaded_body(c.w.loaded), after);
-            let after_len = crate::concrete::document::spec_body_len(after) as usize;
+            let after_len = echod_concrete::node::spec_body_len(after) as usize;
             let stale_after = c.w.loaded.change_count.saturating_add(changed).saturating_sub(after_len);
             let append = document::spec_loaded_version(c.w.loaded) > 0 && !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
             if append {
@@ -1158,7 +1158,7 @@ pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: 
                 let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
                 (StoreReqSpec::AppIfMatch { key: c.w.key, offset: c.w.loaded.bytes, body: delta, etag }, WriteMode::Append, n, b)
             } else {
-                let body = document::spec_encode_body(c.after);
+                let body = document::spec_encode(c.after);
                 (StoreReqSpec::PutIfMatch { key: c.w.key, body, etag }, WriteMode::Rewrite, after_len, body.len() as u64)
             }
         },
@@ -1953,7 +1953,7 @@ impl State {
     /// nearest deadline. `fired` is the key whose firing this is.
     pub fn commit_new(&mut self, w: Working, after: DocumentBody, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> (c: Committing)
         ensures
-            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, crate::concrete::document::nat_v(deadline), now, fired.deep_view()),
+            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, echod_concrete::node::nat_v(deadline), now, fired.deep_view()),
     {
         proof {
             reveal(spec_commit_new);
