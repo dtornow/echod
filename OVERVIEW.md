@@ -37,7 +37,6 @@ lean/src/concrete     nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
 jeps                  Jepsen, from outside the process: a pass means the pipeline a client can see produced a correct result
-rust/experiment/claude-quickjs  optional Messages API agent-loop experiment
 ```
 
 The process's document steps live under `rust/impl/process/src/concrete`,
@@ -115,15 +114,3 @@ and echod in debug mode and drives both over HTTP. The model driver is
 `cargo verus` wants a Verus release (`cargo-verus`, `verus`, z3) on the
 path. `cargo build` is the other compiler for the same sources: it sees the
 executable code alone.
-
-## Optional QuickJS experiment
-
-The [QuickJS experiment](rust/experiment/claude-quickjs/README.md) runs a small
-Messages API loop, not an agent SDK. It requires an explicit model, prompt, and
-API key to make paid calls. Its unit tests use synthetic responses with no
-external API calls:
-
-```sh
-cargo test -p claude-quickjs --locked
-cargo run -p claude-quickjs -- --help
-```
