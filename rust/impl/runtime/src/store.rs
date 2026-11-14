@@ -311,7 +311,9 @@ impl Store for S3Store {
         match self.client.put_object().bucket(&self.bucket).key(key).if_match(format!("\"{}\"", etag.0)).body(body.into()).send().await {
             Ok(out) => Ok(Self::strip(out.e_tag().map(str::to_string))),
             Err(e) => match status_of(&e) {
-                Some(412) | Some(409) => Err(StoreError::PreconditionFailed),
+                // S3 answers 404 to a condition on a key that is not there:
+                // the version named is not the current one either way.
+                Some(412) | Some(409) | Some(404) => Err(StoreError::PreconditionFailed),
                 _ => Err(Self::unavailable(e)),
             },
         }
@@ -344,7 +346,9 @@ impl Store for S3Store {
         {
             Ok(out) => Ok(Self::strip(out.e_tag().map(str::to_string))),
             Err(e) => match status_of(&e) {
-                Some(412) | Some(409) | Some(400) => Err(StoreError::PreconditionFailed),
+                // 400 is `InvalidWriteOffset`: the object is not the size
+                // the version implied, so it is not that version.
+                Some(412) | Some(409) | Some(400) | Some(404) => Err(StoreError::PreconditionFailed),
                 _ => Err(Self::unavailable(e)),
             },
         }

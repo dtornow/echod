@@ -1,22 +1,25 @@
 //! The store port against every backend: the in-memory model, the
 //! `object_store` crate over memory, and, when `ECHOD_STORE` names one
 //! (`s3://bucket`, with `ECHOD_ENDPOINT` for an emulator and credentials in
-//! the environment), a real object store.
+//! the environment), a real object store. When `ECHOD_EXPRESS_BUCKET` names
+//! a directory bucket, the AWS SDK client that appends, on that bucket,
+//! which the tests take for their own.
 //!
 //! What it checks is what the commit protocol relies on: a conditional
 //! create of an existing key is refused, a conditional write on a stale
 //! version is refused, a conditional read of the current version is "not
-//! modified", listings page and sort. On S3 also: a version is a function of
+//! modified", listings page and sort, an append lands only at the current
+//! size under the current version. On S3 also: a version is a function of
 //! the content, which is why every write of ours carries a nonce.
 //!
 //! ```shell
-//! scripts/s3-tests.sh                                   # the s3s-fs emulator
+//! scripts/s3-tests.sh                                   # fakes3, both clients
 //! ECHOD_STORE=s3://my-bucket cargo test -p echod-store-tests --test store
 //! ```
 
 use std::sync::Arc;
 
-use echod::store::{Etag, MemoryStore, ObjectStoreStore, Read, Store, StoreError};
+use echod::store::{Etag, MemoryStore, ObjectStoreStore, Read, S3Store, Store, StoreError};
 
 struct Backend {
     name: &'static str,
@@ -29,15 +32,22 @@ async fn backends() -> Vec<Backend> {
     let nonce = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     let mut out = vec![
         Backend { name: "memory", store: Arc::new(MemoryStore::new()), content_addressed: true },
+        Backend { name: "memory appendable", store: Arc::new(MemoryStore::appendable()), content_addressed: true },
         Backend { name: "object_store memory", store: Arc::new(ObjectStoreStore::new(Arc::new(object_store::memory::InMemory::new()), object_store::path::Path::default())), content_addressed: false },
     ];
+    let endpoint = std::env::var("ECHOD_ENDPOINT").ok();
+    let region = std::env::var("ECHOD_REGION").ok();
     // Not `object_store::local::LocalFileSystem`: it does not implement
     // conditional updates (`PutMode::Update`), so it cannot hold a bucket.
     if let Ok(url) = std::env::var("ECHOD_STORE") {
-        let endpoint = std::env::var("ECHOD_ENDPOINT").ok();
-        let region = std::env::var("ECHOD_REGION").ok();
         let s = ObjectStoreStore::from_url(&format!("{}/test-{nonce}", url.trim_end_matches('/')), endpoint.as_deref(), region.as_deref()).unwrap();
         out.push(Backend { name: "object_store url", store: Arc::new(s), content_addressed: url.starts_with("s3") });
+    }
+    // The SDK client has no prefix of its own, so the bucket is the tests'
+    // alone. A directory bucket's ETag is not promised to be the content.
+    if let Ok(bucket) = std::env::var("ECHOD_EXPRESS_BUCKET") {
+        let s = S3Store::open(&bucket, region.as_deref(), endpoint.as_deref(), true).await;
+        out.push(Backend { name: "s3 express", store: Arc::new(s), content_addressed: false });
     }
     out
 }
@@ -114,6 +124,33 @@ async fn listings_page_and_sort() {
             s.delete(&key).await.unwrap();
         }
         assert_eq!(s.list("t/", usize::MAX).await.unwrap().len(), 0, "{}", b.name);
+    }
+}
+
+#[tokio::test]
+async fn appends_land_at_the_current_size_under_the_current_version() {
+    for b in backends().await.into_iter().filter(|b| b.store.supports_append()) {
+        let s = &b.store;
+        let k = "log";
+        let e1 = s.put_if_none_match(k, b"one\n".to_vec()).await.unwrap();
+        let e2 = s.append_if_match(k, 4, b"two\n".to_vec(), &e1).await.unwrap();
+        assert_ne!(e1, e2, "{}: an append is a new version", b.name);
+        let (body, e) = s.get(k).await.unwrap().unwrap();
+        assert_eq!(body, b"one\ntwo\n", "{}", b.name);
+        assert_eq!(e, e2, "{}", b.name);
+        let stale = s.append_if_match(k, 8, b"x\n".to_vec(), &e1).await;
+        assert!(matches!(stale, Err(StoreError::PreconditionFailed)), "{}: an append on the stale version is refused, got {stale:?}", b.name);
+        let short = s.append_if_match(k, 4, b"x\n".to_vec(), &e2).await;
+        assert!(matches!(short, Err(StoreError::PreconditionFailed)), "{}: an append short of the end is refused, got {short:?}", b.name);
+        let long = s.append_if_match(k, 12, b"x\n".to_vec(), &e2).await;
+        assert!(matches!(long, Err(StoreError::PreconditionFailed)), "{}: an append past the end is refused, got {long:?}", b.name);
+        let absent = s.append_if_match("absent", 0, b"x\n".to_vec(), &e2).await;
+        assert!(matches!(absent, Err(StoreError::PreconditionFailed)), "{}: an append to nothing is refused, got {absent:?}", b.name);
+        assert_eq!(s.get(k).await.unwrap().unwrap().0, b"one\ntwo\n", "{}: nothing refused landed", b.name);
+        let e3 = s.put_if_match(k, b"fresh\n".to_vec(), &e2).await.unwrap();
+        let e4 = s.append_if_match(k, 6, b"more\n".to_vec(), &e3).await.unwrap();
+        assert_eq!(s.get(k).await.unwrap().unwrap(), (b"fresh\nmore\n".to_vec(), e4), "{}: a rewrite then an append", b.name);
+        s.delete(k).await.unwrap();
     }
 }
 
