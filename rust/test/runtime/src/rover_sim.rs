@@ -27,8 +27,8 @@ use echod_abstract_spec::rover::Pid as AbstractPid;
 use echod_abstract_spec::{Call, Config as AbstractConfig, Message as AbstractMessage, Output};
 use echod_concrete_spec::model::RETRY_TIMEOUT;
 use echod_concrete_spec::{
-    Config as ConcreteConfig, Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreCall,
-    StoreError, StoreOutcome,
+    Config as ConcreteConfig, Proc as ConcreteSpecProc, Spec as ConcreteSpec, StoreReq,
+    StoreError, StoreRes,
 };
 use vstd::prelude::View;
 
@@ -490,7 +490,7 @@ impl SeededStrategy {
                 event:
                     ProcessEvent::Receive {
                         sender: ConcretePid::Store,
-                        message: ConcreteMessage::StoreReply { op, .. },
+                        message: ConcreteMessage::StoreRes { op, .. },
                     },
                 ..
             } => {
@@ -610,7 +610,7 @@ impl Strategy<AdapterSpec> for SeededStrategy {
                             process,
                             event: ProcessEvent::Receive {
                                 sender: ConcretePid::Store,
-                                message: ConcreteMessage::StoreReply { op, .. },
+                                message: ConcreteMessage::StoreRes { op, .. },
                             },
                             ..
                         } if !self.delivered_store_replies.contains(&(*process, *op))
@@ -723,17 +723,17 @@ fn request_kind(request: &Request) -> &'static str {
     }
 }
 
-fn is_store_read(call: &StoreCall) -> bool {
+fn is_store_read(call: &StoreReq) -> bool {
     matches!(
         call,
-        StoreCall::Get { .. }
-            | StoreCall::GetIfNoneMatch { .. }
-            | StoreCall::List { .. }
-            | StoreCall::ListPrefixes { .. }
+        StoreReq::Get { .. }
+            | StoreReq::GetIfNoneMatch { .. }
+            | StoreReq::List { .. }
+            | StoreReq::ListPrefixes { .. }
     )
 }
 
-fn is_store_write(call: &StoreCall) -> bool {
+fn is_store_write(call: &StoreReq) -> bool {
     !is_store_read(call)
 }
 
@@ -817,18 +817,18 @@ fn flow(certificate: &[ConcreteAction], options: &Options) -> FlowStats {
             } => {
                 stats.internal_deliveries += 1;
                 match message {
-                    ConcreteMessage::StoreReq { call, .. } => {
+                    ConcreteMessage::StoreReq { request: call, .. } => {
                         stats.store_requests += 1;
                         stats.store_reads += usize::from(is_store_read(call));
                         stats.store_writes += usize::from(is_store_write(call));
                     }
-                    ConcreteMessage::StoreReply { outcome, .. } => {
+                    ConcreteMessage::StoreRes { response: outcome, .. } => {
                         stats.store_replies += 1;
-                        match outcome {
-                            StoreOutcome::Failed(StoreError::PreconditionFailed) => {
+                        match crate::store::response_error(outcome) {
+                            Some(StoreError::PreconditionFailed) => {
                                 stats.store_precondition_failures += 1
                             }
-                            StoreOutcome::Failed(StoreError::Unavailable(_)) => {
+                            Some(StoreError::Unavailable(_)) => {
                                 stats.store_unavailable += 1
                             }
                             _ => {}
@@ -989,7 +989,7 @@ pub fn run(seed: u64) -> Result<Report, RunError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use echod_logic::concrete::StoreCall;
+    use echod_logic::concrete::StoreReq;
 
     fn focused(seed: u64, schedules: bool, operations: usize) -> Options {
         Options {
@@ -1065,7 +1065,7 @@ mod tests {
             at: 3,
             message: ConcreteMessage::StoreReq {
                 op: 1,
-                call: StoreCall::Get { key: "k".into() },
+                request: StoreReq::Get { key: "k".into() },
             },
         }];
         assert_eq!(

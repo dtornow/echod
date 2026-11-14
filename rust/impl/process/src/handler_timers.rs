@@ -33,7 +33,7 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_owner;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::{StoreCallSpec, StoreErrorSpec};
+use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
 
 verus! {
 
@@ -94,11 +94,11 @@ pub open spec fn spec_timers_run(s: S, now: u64) -> S {
             spec_reload(s, now)
         } else if s.timers.loaded_through is Some && s.timers.loaded_through->Some_0 < spec_horizon(s, now) {
             let bucket = s.timers.loaded_through->Some_0.saturating_add(s.keys.bucket_ms);
-            let (s, op) = spec_store(s, StoreCallSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
+            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
             spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Extend { op, bucket }), ..s.timers })
         } else if s.timers.closed_through is Some && s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms) < spec_bucket_of(now, s.keys.bucket_ms) {
             let bucket = s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms);
-            let (s, op) = spec_store(s, StoreCallSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
+            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
             spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Relist { op, bucket }), ..s.timers })
         } else if s.timers.loaded_through is Some {
             spec_fire_due(s, now)
@@ -115,7 +115,7 @@ pub open spec fn spec_reload(s: S, now: u64) -> S {
     let horizon = spec_horizon(s, now);
     let armed = s.timers.wheel.armed.filter(|k: SlotSpec| spec_owns_key(s, k.1));
     let s = spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed }, ..s.timers });
-    let (s, op) = spec_store(s, StoreCallSpec::ListPrefixes { prefix: spec_timer_prefix(s.keys.prefix) }, Owner::Timers);
+    let (s, op) = spec_store(s, StoreReqSpec::ListPrefixes { prefix: spec_timer_prefix(s.keys.prefix) }, Owner::Timers);
     spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Prefixes { op, horizon }), ..s.timers })
 }
 
@@ -152,7 +152,7 @@ pub open spec fn spec_list_buckets(s: S, prefixes: Seq<Seq<char>>, horizon: u64,
         let (s, pending) = match spec_parse_bucket_prefix(s.keys.prefix, prefixes[0]) {
             Some(bucket) => {
                 if bucket <= horizon {
-                    let (s, op) = spec_store(s, StoreCallSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
+                    let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
                     (s, pending.insert(op, bucket))
                 } else {
                     (s, pending)
@@ -165,7 +165,7 @@ pub open spec fn spec_list_buckets(s: S, prefixes: Seq<Seq<char>>, horizon: u64,
 }
 
 #[verifier::opaque]
-pub open spec fn spec_timers_completed(s: S, op: OpId, outcome: StoreOutcome) -> S {
+pub open spec fn spec_timers_completed(s: S, op: OpId, outcome: StoreRes) -> S {
     match s.timers.listing {
         None => s,
         Some(listing) => {
@@ -187,9 +187,9 @@ pub open spec fn spec_timers_completed(s: S, op: OpId, outcome: StoreOutcome) ->
 
 /// The bucket prefixes are listed: list each bucket up to the horizon.
 #[verifier::opaque]
-pub open spec fn spec_prefixes_listed(s: S, horizon: u64, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_prefixes_listed(s: S, horizon: u64, now: u64, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Listed(prefixes) => {
+        StoreRes::ListPrefixes { result: Ok(prefixes) } => {
             let (s, pending) = spec_list_buckets(s, prefixes.deep_view(), horizon, Map::empty());
             if pending =~= Map::<OpId, u64>::empty() {
                 spec_reloaded(s, horizon, 0, now)
@@ -197,20 +197,20 @@ pub open spec fn spec_prefixes_listed(s: S, horizon: u64, now: u64, outcome: Sto
                 spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Buckets { pending, horizon, loaded: 0, failed: None }), ..s.timers })
             }
         },
-        StoreOutcome::Failed(e) => spec_listing_failed(s, e.deep_view(), now),
+        StoreRes::ListPrefixes { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
         _ => spec_listing_failed(s, spec_unexpected(), now),
     }
 }
 
 /// One bucket of the full load is listed.
 #[verifier::opaque]
-pub open spec fn spec_bucket_listed(s: S, pending: Map<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec>, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_bucket_listed(s: S, pending: Map<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec>, now: u64, outcome: StoreRes) -> S {
     let (s, loaded, failed) = match outcome {
-        StoreOutcome::Listed(keys) => {
+        StoreRes::List { result: Ok(keys) } => {
             let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
             (s, loaded.saturating_add(n as usize), failed)
         },
-        StoreOutcome::Failed(e) => (s, loaded, Some(e.deep_view())),
+        StoreRes::List { result: Err(e) } => (s, loaded, Some(e.deep_view())),
         _ => (s, loaded, Some(spec_unexpected())),
     };
     if !(pending =~= Map::<OpId, u64>::empty()) {
@@ -225,32 +225,32 @@ pub open spec fn spec_bucket_listed(s: S, pending: Map<OpId, u64>, horizon: u64,
 
 /// The next bucket is listed: the horizon moves.
 #[verifier::opaque]
-pub open spec fn spec_extended(s: S, bucket: u64, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_extended(s: S, bucket: u64, now: u64, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Listed(keys) => {
+        StoreRes::List { result: Ok(keys) } => {
             let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
             let s = spec_note(s, NoteSpec::BucketLoaded { bucket, deadlines: n as usize });
             let s = spec_note(s, NoteSpec::TimerListing { ok: true });
             let s = spec_with_timers(s, TimersSpec { loaded_through: Some(bucket), ..s.timers });
             spec_timers_run(s, now)
         },
-        StoreOutcome::Failed(e) => spec_listing_failed(s, e.deep_view(), now),
+        StoreRes::List { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
         _ => spec_listing_failed(s, spec_unexpected(), now),
     }
 }
 
 /// A past bucket is listed again: it is closed.
 #[verifier::opaque]
-pub open spec fn spec_relisted(s: S, bucket: u64, now: u64, outcome: StoreOutcome) -> S {
+pub open spec fn spec_relisted(s: S, bucket: u64, now: u64, outcome: StoreRes) -> S {
     match outcome {
-        StoreOutcome::Listed(keys) => {
+        StoreRes::List { result: Ok(keys) } => {
             let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
             let s = spec_note(s, NoteSpec::BucketLoaded { bucket, deadlines: n as usize });
             let s = spec_note(s, NoteSpec::TimerListing { ok: true });
             let s = spec_with_timers(s, TimersSpec { closed_through: Some(bucket), ..s.timers });
             spec_timers_run(s, now)
         },
-        StoreOutcome::Failed(e) => spec_listing_failed(s, e.deep_view(), now),
+        StoreRes::List { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
         _ => spec_listing_failed(s, spec_unexpected(), now),
     }
 }
@@ -451,7 +451,7 @@ impl State {
                 // Bring the loaded range up to the horizon, one bucket at a time.
                 let bucket = through.saturating_add(self.keys.bucket_ms());
                 let prefix = self.keys.bucket_prefix(bucket);
-                let op = self.store(StoreCall::List { prefix, max_keys: usize::MAX }, Owner::Timers);
+                let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
                 self.timers.listing = Some(Listing::Extend { op, bucket });
                 return;
             }
@@ -462,7 +462,7 @@ impl State {
                 // The clock left a bucket this node listed ahead of time: list
                 // it once more, for what others armed into it since.
                 let prefix = self.keys.bucket_prefix(bucket);
-                let op = self.store(StoreCall::List { prefix, max_keys: usize::MAX }, Owner::Timers);
+                let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
                 self.timers.listing = Some(Listing::Relist { op, bucket });
                 return;
             }
@@ -519,7 +519,7 @@ impl State {
         }
         self.timers.wheel.armed = kept;
         let prefix = self.keys.timer_prefix();
-        let op = self.store(StoreCall::ListPrefixes { prefix }, Owner::Timers);
+        let op = self.store(StoreReq::ListPrefixes { prefix }, Owner::Timers);
         self.timers.listing = Some(Listing::Prefixes { op, horizon });
     }
 
@@ -588,7 +588,7 @@ impl State {
             if let Some(bucket) = self.keys.parse_bucket_prefix(prefixes[i].as_str()) {
                 if bucket <= horizon {
                     let prefix = self.keys.bucket_prefix(bucket);
-                    let op = self.store(StoreCall::List { prefix, max_keys: usize::MAX }, Owner::Timers);
+                    let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
                     pending.insert(op, bucket);
                 }
             }
@@ -599,7 +599,7 @@ impl State {
         }
     }
 
-    pub fn timers_completed(&mut self, op: OpId, outcome: StoreOutcome)
+    pub fn timers_completed(&mut self, op: OpId, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_timers_completed(old(self).deep_view(), op, outcome),
     {
@@ -627,7 +627,7 @@ impl State {
     }
 
     /// The bucket prefixes are listed: list each bucket up to the horizon.
-    fn prefixes_listed(&mut self, horizon: u64, now: u64, outcome: StoreOutcome)
+    fn prefixes_listed(&mut self, horizon: u64, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_prefixes_listed(old(self).deep_view(), horizon, now, outcome),
     {
@@ -635,7 +635,7 @@ impl State {
             reveal(spec_prefixes_listed);
         }
         match outcome {
-            StoreOutcome::Listed(prefixes) => {
+            StoreRes::ListPrefixes { result: Ok(prefixes) } => {
                 let mut pending: Table<OpId, u64> = Table::new();
                 self.list_buckets(&prefixes, horizon, &mut pending);
                 if pending.is_empty() {
@@ -644,13 +644,13 @@ impl State {
                     self.timers.listing = Some(Listing::Buckets { pending, horizon, loaded: 0, failed: None });
                 }
             },
-            StoreOutcome::Failed(e) => self.listing_failed(e, now),
+            StoreRes::ListPrefixes { result: Err(e) } => self.listing_failed(e, now),
             _ => self.listing_failed(unexpected(), now),
         }
     }
 
     /// One bucket of the full load is listed.
-    fn bucket_listed(&mut self, pending: Table<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError>, now: u64, outcome: StoreOutcome)
+    fn bucket_listed(&mut self, pending: Table<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError>, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_bucket_listed(old(self).deep_view(), pending@, horizon, loaded, failed.deep_view(), now, outcome),
     {
@@ -658,11 +658,11 @@ impl State {
             reveal(spec_bucket_listed);
         }
         let (loaded, failed) = match outcome {
-            StoreOutcome::Listed(keys) => {
+            StoreRes::List { result: Ok(keys) } => {
                 let n = self.take_bucket(&keys);
                 (loaded.saturating_add(n), failed)
             },
-            StoreOutcome::Failed(e) => (loaded, Some(e)),
+            StoreRes::List { result: Err(e) } => (loaded, Some(e)),
             _ => (loaded, Some(unexpected())),
         };
         if !pending.is_empty() {
@@ -676,7 +676,7 @@ impl State {
     }
 
     /// The next bucket is listed: the horizon moves.
-    fn extended(&mut self, bucket: u64, now: u64, outcome: StoreOutcome)
+    fn extended(&mut self, bucket: u64, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_extended(old(self).deep_view(), bucket, now, outcome),
     {
@@ -684,20 +684,20 @@ impl State {
             reveal(spec_extended);
         }
         match outcome {
-            StoreOutcome::Listed(keys) => {
+            StoreRes::List { result: Ok(keys) } => {
                 let n = self.take_bucket(&keys);
                 self.note(Note::BucketLoaded { bucket, deadlines: n });
                 self.note(Note::TimerListing { ok: true });
                 self.timers.loaded_through = Some(bucket);
                 self.timers_run(now);
             },
-            StoreOutcome::Failed(e) => self.listing_failed(e, now),
+            StoreRes::List { result: Err(e) } => self.listing_failed(e, now),
             _ => self.listing_failed(unexpected(), now),
         }
     }
 
     /// A past bucket is listed again: it is closed.
-    fn relisted(&mut self, bucket: u64, now: u64, outcome: StoreOutcome)
+    fn relisted(&mut self, bucket: u64, now: u64, outcome: StoreRes)
         ensures
             final(self).deep_view() == spec_relisted(old(self).deep_view(), bucket, now, outcome),
     {
@@ -705,14 +705,14 @@ impl State {
             reveal(spec_relisted);
         }
         match outcome {
-            StoreOutcome::Listed(keys) => {
+            StoreRes::List { result: Ok(keys) } => {
                 let n = self.take_bucket(&keys);
                 self.note(Note::BucketLoaded { bucket, deadlines: n });
                 self.note(Note::TimerListing { ok: true });
                 self.timers.closed_through = Some(bucket);
                 self.timers_run(now);
             },
-            StoreOutcome::Failed(e) => self.listing_failed(e, now),
+            StoreRes::List { result: Err(e) } => self.listing_failed(e, now),
             _ => self.listing_failed(unexpected(), now),
         }
     }

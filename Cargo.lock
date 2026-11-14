@@ -1215,6 +1215,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "clap",
+ "echod-cron",
  "echod-process",
  "futures",
  "object_store",

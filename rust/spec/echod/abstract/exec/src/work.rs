@@ -4,6 +4,9 @@
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::work::*;
@@ -66,7 +69,7 @@ impl<'cfg> Handlers<'cfg> {
     /// A suspended task resumes when a promise it awaits has settled; any
     /// other task is told. The callback is spent either way. The awaited
     /// promise is written as it reads, with the callback removed.
-    fn process_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (r: InOut)
+    pub(crate) fn process_callback(&self, awaited: &Id, awaiter: &Id, s: &Store, now: Time) -> (r: InOut)
         ensures
             r@ == spec_callback(s@, awaited@, awaiter@, now),
     {
@@ -76,7 +79,7 @@ impl<'cfg> Handlers<'cfg> {
         if projected.state == PromiseState::Pending || !projected.callbacks.contains(awaiter) {
             return self.noop(s);
         }
-        let since = match projected.settled_at {
+        let _since = match projected.settled_at {
             Some(t) => t,
             None => 0,
         };
@@ -100,7 +103,7 @@ impl<'cfg> Handlers<'cfg> {
                     u.resumes = Vec::new();
                     u.resumes.push(awaited.clone());
                     assert(strs(u.resumes@) =~= seq![awaited@]);
-                    u.retry_timeout_at = Some(since);
+                    u.retry_timeout_at = Some(now);
                     n.tasks.insert(awaiter.clone(), u);
                     marks.push(mk("task resumed"));
                 },

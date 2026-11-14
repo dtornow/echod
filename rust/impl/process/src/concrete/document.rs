@@ -4,9 +4,9 @@
 //!
 //! The executable node first, inside `verus!`, each function carrying the
 //! `spec_*` twin it computes; then the node as a specification, over the
-//! view types: `NodeV`, `DocV`, the `spec_*` twins of its handlers and steps.
+//! view types: `NodeV`, `DocumentBodyV`, the `spec_*` twins of its handlers and steps.
 //!
-//! Trusted here: the JSON codec computes `spec_encode` / `spec_read`
+//! Trusted here: the JSON codec computes `spec_encode_body` / `spec_read`
 //! (`encode`, `decode`), the key hash computes `spec_fnv` (`hash_key`, over
 //! the store's `fnv1a`), a string is its characters (`chars_of`), a copy of a
 //! sorted table is that table (`Objects::clone`), and the cron engine and the
@@ -19,10 +19,10 @@
 use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
-use echod_concrete_spec::node::*;
+pub use echod_concrete_spec::node::*;
 
 use echod_types::{
-    origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
+    deadline_bounded, MAX_TIME, MAX_VERSION, origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
     PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
     ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
     TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
@@ -42,7 +42,7 @@ use rover_spec::rover::comm::ProcessEvent;
 use rover_spec::rover::RoverSpec::StepResultV;
 use rover_spec::rover::comm::Time;
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec, AValue};
+use echod_types::{origin, same_origin_spec, spec_deadline_bounded, AValue};
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{
@@ -53,11 +53,43 @@ use crate::concrete::rover::{Config, Logic, Message, Pid};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{spec_before, spec_fnv, spec_sat_add, spec_starts};
 use crate::concrete::store::{Read, StoreError};
-use crate::concrete::store::{fnv1a, Etag, StoreCall, StoreOutcome};
+use crate::concrete::store::{fnv1a, Etag, StoreReq, StoreRes};
+
+
+pub use crate::concrete::values::*;
 
 verus! {
+spec fn spec_has_key(entries: Seq<(String, Obj)>, k: Seq<char>) -> bool {
+    exists|i: int| 0 <= i < entries.len() && #[trigger] entries[i].0@ == k
+}
+
+
+spec fn spec_index(entries: Seq<(String, Obj)>, k: Seq<char>) -> int {
+    choose|i: int| 0 <= i < entries.len() && #[trigger] entries[i].0@ == k
+}
+
+
+spec fn spec_keys_of(entries: Seq<(String, Obj)>) -> Seq<Seq<char>> {
+    entries.map_values(|e: (String, Obj)| e.0@)
+}
+
+
+/// The entries as a map from id to object.
+spec fn spec_objs(entries: Seq<(String, Obj)>) -> Map<Seq<char>, ObjV> {
+    Map::new(spec_keys_of(entries).to_set(), |k: Seq<char>| entries[spec_index(entries, k)].1@)
+}
+
+
+spec fn spec_sorted_entries(entries: Seq<(String, Obj)>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < entries.len() ==> spec_before(#[trigger] entries[i].0@, #[trigger] entries[j].0@)
+}
+
+
+
+
 
 broadcast use vstd::seq::group_seq_lemmas, vstd::set::group_set_lemmas;
+
 
 // ---------------------------------------------------------------------------
 // The node, executed
@@ -83,13 +115,15 @@ pub struct Node {
     next_op: u64,
 }
 
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 struct Cached {
     key: String,
-    doc: Doc,
+    doc: DocumentBody,
     etag: Option<Etag>,
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -105,13 +139,14 @@ struct Flight {
     /// The client a request flight answers: its name and the call id.
     caller: Option<(String, u64)>,
     /// The document a write is putting, installed in the cache when it lands.
-    decided: Option<Doc>,
+    decided: Option<DocumentBody>,
     /// Occurrences a schedule step queued, delivered to the pending list when the write lands.
     born: Vec<Pending>,
     reply: Option<(String, u64, Response)>,
     /// Boundary output of a due step, sent when that step's document is committed.
     notify: Vec<Outbound>,
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -120,6 +155,7 @@ enum Job {
     Due,
     Occurrence(Pending),
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -131,22 +167,6 @@ pub struct Pending {
     pub tags: Tags,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub enum Doc {
-    Origin(Objects),
-    Schedule(Option<Schedule>),
-}
-
-/// The objects of one origin, by id, in key order. The order is a type
-/// invariant: every `Objects` Verus sees is sorted, so a lookup is a map
-/// lookup and the first due object is the first in `spec_sorted`.
-#[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Objects {
-    entries: Vec<(String, Obj)>,
-}
 
 /// A copy of a sorted table is sorted: the derived clone, with its invariant kept.
 impl Clone for Objects {
@@ -159,41 +179,6 @@ impl Clone for Objects {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Obj {
-    pub promise: Prom,
-    pub task: Option<Tk>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Prom {
-    pub state: PromiseState,
-    pub param: Value,
-    pub value: Value,
-    pub tags: Tags,
-    pub timeout_at: u64,
-    pub created_at: u64,
-    pub settled_at: Option<u64>,
-    pub callbacks: Vec<String>,
-    pub listeners: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-#[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
-pub struct Tk {
-    pub state: TaskState,
-    pub version: u64,
-    pub pid: Option<String>,
-    pub ttl: Option<u64>,
-    pub lease_timeout_at: Option<u64>,
-    pub retry_timeout_at: Option<u64>,
-    pub resumes: Vec<String>,
-}
 
 /// What a due step tells the outside, once the document that step wrote is the one in the cache.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +190,7 @@ pub enum Outbound {
     Unblock { address: String, promise: PromiseRecord },
 }
 
+
 // ---------------------------------------------------------------------------
 // Views: the exec node as the specification sees it
 // ---------------------------------------------------------------------------
@@ -212,6 +198,7 @@ pub enum Outbound {
 spec fn strs_v(v: Seq<String>) -> Seq<Seq<char>> {
     v.map_values(|s: String| s@)
 }
+
 
 impl View for Prom {
     type V = PromV;
@@ -230,6 +217,7 @@ impl View for Prom {
     }
 }
 
+
 impl View for Tk {
     type V = TkV;
     closed spec fn view(&self) -> TkV {
@@ -245,6 +233,7 @@ impl View for Tk {
     }
 }
 
+
 impl View for Obj {
     type V = ObjV;
     closed spec fn view(&self) -> ObjV {
@@ -255,22 +244,6 @@ impl View for Obj {
     }
 }
 
-spec fn spec_has_key(entries: Seq<(String, Obj)>, k: Seq<char>) -> bool {
-    exists|i: int| 0 <= i < entries.len() && #[trigger] entries[i].0@ == k
-}
-
-spec fn spec_index(entries: Seq<(String, Obj)>, k: Seq<char>) -> int {
-    choose|i: int| 0 <= i < entries.len() && #[trigger] entries[i].0@ == k
-}
-
-spec fn spec_keys_of(entries: Seq<(String, Obj)>) -> Seq<Seq<char>> {
-    entries.map_values(|e: (String, Obj)| e.0@)
-}
-
-/// The entries as a map from id to object.
-spec fn spec_objs(entries: Seq<(String, Obj)>) -> Map<Seq<char>, ObjV> {
-    Map::new(spec_keys_of(entries).to_set(), |k: Seq<char>| entries[spec_index(entries, k)].1@)
-}
 
 /// Strictly increasing keys.
 /// The entries put in turn, a later id replacing an earlier one.
@@ -284,6 +257,7 @@ pub open spec fn spec_from_entries(entries: Seq<(String, Obj)>) -> Map<Seq<char>
     }
 }
 
+
 proof fn lemma_from_entries_prefix(entries: Seq<(String, Obj)>, i: int)
     requires
         i == 0,
@@ -292,6 +266,7 @@ proof fn lemma_from_entries_prefix(entries: Seq<(String, Obj)>, i: int)
 {
     assert(entries.take(0).len() == 0);
 }
+
 
 proof fn lemma_from_entries_step(entries: Seq<(String, Obj)>, i: int)
     requires
@@ -302,6 +277,7 @@ proof fn lemma_from_entries_step(entries: Seq<(String, Obj)>, i: int)
     assert(entries.take(i + 1).drop_last() =~= entries.take(i));
     assert(entries.take(i + 1).last() == entries[i]);
 }
+
 
 /// A table with distinct keys is the put of its entries.
 proof fn lemma_from_entries_sorted(entries: Seq<(String, Obj)>)
@@ -324,9 +300,6 @@ proof fn lemma_from_entries_sorted(entries: Seq<(String, Obj)>)
     }
 }
 
-spec fn spec_sorted_entries(entries: Seq<(String, Obj)>) -> bool {
-    forall|i: int, j: int| 0 <= i < j < entries.len() ==> spec_before(#[trigger] entries[i].0@, #[trigger] entries[j].0@)
-}
 
 impl Objects {
     #[verifier::type_invariant]
@@ -335,6 +308,7 @@ impl Objects {
     }
 }
 
+
 impl View for Objects {
     type V = Map<Seq<char>, ObjV>;
     closed spec fn view(&self) -> Map<Seq<char>, ObjV> {
@@ -342,15 +316,76 @@ impl View for Objects {
     }
 }
 
-impl View for Doc {
-    type V = DocV;
-    closed spec fn view(&self) -> DocV {
+
+impl View for DocumentBody {
+    type V = DocumentBodyV;
+    closed spec fn view(&self) -> DocumentBodyV {
         match self {
-            Doc::Origin(objs) => DocV::Origin(objs@),
-            Doc::Schedule(slot) => DocV::Schedule(*slot),
+            DocumentBody::Workflow(objs) => DocumentBodyV::Workflow(objs@),
+            DocumentBody::Schedule(slot) => DocumentBodyV::Schedule(*slot),
         }
     }
 }
+
+
+impl View for WorkflowDocument {
+    type V = WorkflowDocumentV;
+    closed spec fn view(&self) -> WorkflowDocumentV {
+        WorkflowDocumentV {
+            document: self.document@,
+            version: self.version,
+            committed_at: self.committed_at,
+            next_wake_at: self.next_wake_at,
+            objects: self.objects@,
+        }
+    }
+}
+
+
+impl View for ScheduleDocument {
+    type V = ScheduleDocumentV;
+    closed spec fn view(&self) -> ScheduleDocumentV {
+        ScheduleDocumentV {
+            document: self.document@,
+            version: self.version,
+            committed_at: self.committed_at,
+            next_wake_at: self.next_wake_at,
+            schedule: self.schedule,
+        }
+    }
+}
+
+
+impl View for StoredDocument {
+    type V = StoredDocumentV;
+    closed spec fn view(&self) -> StoredDocumentV {
+        match self {
+            StoredDocument::Workflow(doc) => StoredDocumentV::Workflow(doc@),
+            StoredDocument::Schedule(doc) => StoredDocumentV::Schedule(doc@),
+        }
+    }
+}
+
+
+impl View for LoadedDocument {
+    type V = LoadedDocumentV;
+    open spec fn view(&self) -> LoadedDocumentV {
+        LoadedDocumentV {
+            document: self.document@,
+            change_count: self.change_count,
+            bytes: self.bytes,
+        }
+    }
+}
+
+
+impl DeepView for LoadedDocument {
+    type V = LoadedDocumentV;
+    open spec fn deep_view(&self) -> LoadedDocumentV {
+        self.view()
+    }
+}
+
 
 impl View for Pending {
     type V = PendingV;
@@ -359,12 +394,22 @@ impl View for Pending {
     }
 }
 
-impl DeepView for Doc {
-    type V = DocV;
-    open spec fn deep_view(&self) -> DocV {
+
+impl DeepView for DocumentBody {
+    type V = DocumentBodyV;
+    open spec fn deep_view(&self) -> DocumentBodyV {
         self.view()
     }
 }
+
+
+impl DeepView for StoredDocument {
+    type V = StoredDocumentV;
+    open spec fn deep_view(&self) -> StoredDocumentV {
+        self.view()
+    }
+}
+
 
 impl DeepView for Pending {
     type V = PendingV;
@@ -372,6 +417,7 @@ impl DeepView for Pending {
         self.view()
     }
 }
+
 
 impl View for Outbound {
     type V = NoteV;
@@ -382,6 +428,7 @@ impl View for Outbound {
         }
     }
 }
+
 
 impl View for Job {
     type V = JobV;
@@ -394,36 +441,44 @@ impl View for Job {
     }
 }
 
+
 spec fn etag_v(etag: Option<Etag>) -> Option<Seq<char>> {
     match etag { Some(tag) => Some(tag.0@), None => None }
 }
+
 
 spec fn caller_v(caller: Option<(String, u64)>) -> Option<(Seq<char>, u64)> {
     match caller { Some((client, id)) => Some((client@, id)), None => None }
 }
 
+
 spec fn reply_v(reply: Option<(String, u64, Response)>) -> Option<(Seq<char>, u64, Response)> {
     match reply { Some((client, id, response)) => Some((client@, id, response)), None => None }
 }
+
 
 pub open spec fn pend_v(v: Seq<Pending>) -> Seq<PendingV> {
     v.map_values(|p: Pending| p@)
 }
 
+
 pub open spec fn notes_v(v: Seq<Outbound>) -> Seq<NoteV> {
     v.map_values(|n: Outbound| n@)
 }
+
 
 spec fn docs_v(v: Seq<Cached>) -> Seq<CachedV> {
     v.map_values(|c: Cached| c@)
 }
 
+
 impl View for Cached {
     type V = CachedV;
     closed spec fn view(&self) -> CachedV {
-        CachedV { key: self.key@, body: spec_encode(self.doc@), etag: etag_v(self.etag) }
+        CachedV { key: self.key@, body: spec_encode_body(self.doc@), etag: etag_v(self.etag) }
     }
 }
+
 
 impl View for Flight {
     type V = FlightV;
@@ -439,10 +494,11 @@ impl View for Flight {
             born: pend_v(self.born@),
             reply: reply_v(self.reply),
             notify: notes_v(self.notify@),
-            decided: match self.decided { Some(doc) => Some(spec_encode(doc@)), None => None },
+            decided: match self.decided { Some(doc) => Some(spec_encode_body(doc@)), None => None },
         }
     }
 }
+
 
 impl View for Node {
     type V = NodeV;
@@ -462,6 +518,7 @@ impl View for Node {
     }
 }
 
+
 // ---------------------------------------------------------------------------
 // The key order
 // ---------------------------------------------------------------------------
@@ -475,6 +532,7 @@ proof fn lemma_before_irrefl(a: Seq<char>)
         lemma_before_irrefl(a.drop_first());
     }
 }
+
 
 proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
     requires
@@ -493,6 +551,7 @@ proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
         lemma_before_trans(a.drop_first(), b.drop_first(), c.drop_first());
     }
 }
+
 
 proof fn lemma_before_total(a: Seq<char>, b: Seq<char>)
     requires
@@ -518,6 +577,7 @@ proof fn lemma_before_total(a: Seq<char>, b: Seq<char>)
     }
 }
 
+
 proof fn lemma_before_asym(a: Seq<char>, b: Seq<char>)
     requires
         spec_before(a, b),
@@ -529,6 +589,7 @@ proof fn lemma_before_asym(a: Seq<char>, b: Seq<char>)
         lemma_before_irrefl(a);
     }
 }
+
 
 /// A key is in the key set exactly when some entry carries it.
 proof fn lemma_key_set(entries: Seq<(String, Obj)>, k: Seq<char>)
@@ -548,6 +609,7 @@ proof fn lemma_key_set(entries: Seq<(String, Obj)>, k: Seq<char>)
         assert(entries[i].0@ == k);
     }
 }
+
 
 /// Sorted entries have distinct keys, and each key is found at its index.
 proof fn lemma_sorted_index(entries: Seq<(String, Obj)>, i: int)
@@ -574,6 +636,7 @@ proof fn lemma_sorted_index(entries: Seq<(String, Obj)>, i: int)
     }
 }
 
+
 /// A key the entries have is at some index; one they lack, at none.
 proof fn lemma_objs_key(entries: Seq<(String, Obj)>, k: Seq<char>)
     requires
@@ -589,6 +652,7 @@ proof fn lemma_objs_key(entries: Seq<(String, Obj)>, k: Seq<char>)
 {
     lemma_key_set(entries, k);
 }
+
 
 /// The domain of the map is the set of keys, and the keys, sorted, are the keys.
 proof fn lemma_sorted_keys(entries: Seq<(String, Obj)>)
@@ -659,6 +723,7 @@ proof fn lemma_sorted_keys(entries: Seq<(String, Obj)>)
     }
 }
 
+
 /// Two sorted tables are one map exactly when they are the same entries, view for view.
 proof fn lemma_objs_eq(a: Seq<(String, Obj)>, b: Seq<(String, Obj)>)
     requires
@@ -702,6 +767,7 @@ proof fn lemma_objs_eq(a: Seq<(String, Obj)>, b: Seq<(String, Obj)>)
     }
 }
 
+
 // ---------------------------------------------------------------------------
 // Strings and bytes
 // ---------------------------------------------------------------------------
@@ -714,6 +780,7 @@ fn chars_of(text: &String) -> (r: Vec<char>)
 {
     text.chars().collect()
 }
+
 
 /// `spec_before`: the order the keys are kept in.
 fn before(a: &String, b: &String) -> (r: bool)
@@ -748,6 +815,7 @@ fn before(a: &String, b: &String) -> (r: bool)
     ac.len() < bc.len()
 }
 
+
 /// `spec_starts(key, "s/")`: a schedule document's key.
 fn is_schedule_key(key: &String) -> (r: bool)
     ensures
@@ -770,6 +838,16 @@ fn is_schedule_key(key: &String) -> (r: bool)
     r
 }
 
+
+/// A string from a literal, as the spec names it.
+fn string_lit(text: &str) -> (r: String)
+    ensures
+        r@ == text@,
+{
+    text.to_owned()
+}
+
+
 /// `spec_origin_key(origin(id))`.
 fn origin_key(id: &String) -> (r: String)
     ensures
@@ -785,6 +863,7 @@ fn origin_key(id: &String) -> (r: String)
     s
 }
 
+
 /// `spec_schedule_key(id)`.
 fn schedule_key(id: &String) -> (r: String)
     ensures
@@ -799,6 +878,7 @@ fn schedule_key(id: &String) -> (r: String)
     }
     s
 }
+
 
 fn same_strs(a: &Vec<String>, b: &Vec<String>) -> (r: bool)
     ensures
@@ -827,6 +907,7 @@ fn same_strs(a: &Vec<String>, b: &Vec<String>) -> (r: bool)
     true
 }
 
+
 fn contains_str(ids: &Vec<String>, id: &String) -> (r: bool)
     ensures
         r == strs_v(ids@).contains(id@),
@@ -846,6 +927,7 @@ fn contains_str(ids: &Vec<String>, id: &String) -> (r: bool)
     }
     false
 }
+
 
 fn same_tags(a: &Tags, b: &Tags) -> (r: bool)
     ensures
@@ -878,6 +960,7 @@ fn same_tags(a: &Tags, b: &Tags) -> (r: bool)
     true
 }
 
+
 fn same_value(a: &Value, b: &Value) -> (r: bool)
     ensures
         r == (*a == *b),
@@ -901,6 +984,7 @@ fn same_value(a: &Value, b: &Value) -> (r: bool)
     }
 }
 
+
 fn same_opt_u64(a: &Option<u64>, b: &Option<u64>) -> (r: bool)
     ensures
         r == (*a == *b),
@@ -912,6 +996,7 @@ fn same_opt_u64(a: &Option<u64>, b: &Option<u64>) -> (r: bool)
     }
 }
 
+
 fn same_opt_str(a: &Option<String>, b: &Option<String>) -> (r: bool)
     ensures
         r == (match (*a, *b) { (Some(x), Some(y)) => x@ == y@, (None, None) => true, _ => false }),
@@ -922,6 +1007,7 @@ fn same_opt_str(a: &Option<String>, b: &Option<String>) -> (r: bool)
         _ => false,
     }
 }
+
 
 fn same_prom(a: &Prom, b: &Prom) -> (r: bool)
     ensures
@@ -938,6 +1024,7 @@ fn same_prom(a: &Prom, b: &Prom) -> (r: bool)
         && same_strs(&a.listeners, &b.listeners)
 }
 
+
 fn same_tk(a: &Tk, b: &Tk) -> (r: bool)
     ensures
         r == (a@ == b@),
@@ -950,6 +1037,7 @@ fn same_tk(a: &Tk, b: &Tk) -> (r: bool)
         && same_opt_u64(&a.retry_timeout_at, &b.retry_timeout_at)
         && same_strs(&a.resumes, &b.resumes)
 }
+
 
 fn same_obj(a: &Obj, b: &Obj) -> (r: bool)
     ensures
@@ -964,6 +1052,7 @@ fn same_obj(a: &Obj, b: &Obj) -> (r: bool)
         _ => false,
     }
 }
+
 
 fn same_objects(a: &Objects, b: &Objects) -> (r: bool)
     ensures
@@ -996,6 +1085,7 @@ fn same_objects(a: &Objects, b: &Objects) -> (r: bool)
     true
 }
 
+
 fn same_schedule(a: &Schedule, b: &Schedule) -> (r: bool)
     ensures
         r == (*a == *b),
@@ -1021,40 +1111,218 @@ fn same_schedule(a: &Schedule, b: &Schedule) -> (r: bool)
     }
 }
 
+
 /// `next == previous`, on documents.
-pub fn same_doc(a: &Doc, b: &Doc) -> (r: bool)
+pub fn same_body(a: &DocumentBody, b: &DocumentBody) -> (r: bool)
     ensures
         r == (a@ == b@),
 {
     match (a, b) {
-        (Doc::Origin(x), Doc::Origin(y)) => same_objects(x, y),
-        (Doc::Schedule(Some(x)), Doc::Schedule(Some(y))) => same_schedule(x, y),
-        (Doc::Schedule(None), Doc::Schedule(None)) => true,
+        (DocumentBody::Workflow(x), DocumentBody::Workflow(y)) => same_objects(x, y),
+        (DocumentBody::Schedule(Some(x)), DocumentBody::Schedule(Some(y))) => same_schedule(x, y),
+        (DocumentBody::Schedule(None), DocumentBody::Schedule(None)) => true,
         _ => false,
     }
 }
 
+
 /// A copy of a document, equal to its source.
-pub fn clone_doc(d: &Doc) -> (r: Doc)
+pub fn clone_body(d: &DocumentBody) -> (r: DocumentBody)
     ensures
         r == *d,
 {
     match d {
-        Doc::Origin(objs) => Doc::Origin(objs.clone()),
-        Doc::Schedule(slot) => Doc::Schedule(copy(slot)),
+        DocumentBody::Workflow(objs) => DocumentBody::Workflow(objs.clone()),
+        DocumentBody::Schedule(slot) => DocumentBody::Schedule(copy(slot)),
     }
 }
 
+
+pub fn stored_body(d: &StoredDocument) -> (r: DocumentBody)
+    ensures
+        r@ == spec_stored_body(d@),
+{
+    match d {
+        StoredDocument::Workflow(doc) => DocumentBody::Workflow(doc.objects.clone()),
+        StoredDocument::Schedule(doc) => DocumentBody::Schedule(copy(&doc.schedule)),
+    }
+}
+
+
+pub fn clone_stored(d: &StoredDocument) -> (r: StoredDocument)
+    ensures r == *d,
+{
+    match d {
+        StoredDocument::Workflow(doc) => StoredDocument::Workflow(WorkflowDocument {
+            document: doc.document.clone(),
+            version: doc.version,
+            committed_at: doc.committed_at,
+            next_wake_at: doc.next_wake_at,
+            objects: doc.objects.clone(),
+        }),
+        StoredDocument::Schedule(doc) => StoredDocument::Schedule(ScheduleDocument {
+            document: doc.document.clone(),
+            version: doc.version,
+            committed_at: doc.committed_at,
+            next_wake_at: doc.next_wake_at,
+            schedule: copy(&doc.schedule),
+        }),
+    }
+}
+
+
+pub fn stored_version(d: &StoredDocument) -> (r: u64)
+    ensures r == spec_stored_version(d@),
+{
+    match d {
+        StoredDocument::Workflow(doc) => doc.version,
+        StoredDocument::Schedule(doc) => doc.version,
+    }
+}
+
+
+pub fn stored_committed_at(d: &StoredDocument) -> (r: u64)
+    ensures r == spec_stored_committed_at(d@),
+{
+    match d {
+        StoredDocument::Workflow(doc) => doc.committed_at,
+        StoredDocument::Schedule(doc) => doc.committed_at,
+    }
+}
+
+
+pub fn stored_next_wake_at(d: &StoredDocument) -> (r: Option<u64>)
+    ensures r == spec_stored_next_wake_at(d@),
+{
+    match d {
+        StoredDocument::Workflow(doc) => doc.next_wake_at,
+        StoredDocument::Schedule(doc) => doc.next_wake_at,
+    }
+}
+
+
+pub fn stored_is_workflow(d: &StoredDocument) -> (r: bool)
+    ensures r == (d@ is Workflow),
+{
+    match d {
+        StoredDocument::Workflow(_) => true,
+        StoredDocument::Schedule(_) => false,
+    }
+}
+
+
+pub fn empty_stored_workflow(document: String) -> (r: StoredDocument)
+    ensures r@ == spec_empty_stored_workflow(document@),
+{
+    StoredDocument::Workflow(WorkflowDocument {
+        document,
+        version: 0,
+        committed_at: 0,
+        next_wake_at: None,
+        objects: Objects::empty(),
+    })
+}
+
+
+pub fn empty_stored_schedule(document: String) -> (r: StoredDocument)
+    ensures r@ == spec_empty_stored_schedule(document@),
+{
+    StoredDocument::Schedule(ScheduleDocument {
+        document,
+        version: 0,
+        committed_at: 0,
+        next_wake_at: None,
+        schedule: None,
+    })
+}
+
+
+pub fn advance_stored(
+    before: &StoredDocument,
+    body: DocumentBody,
+    committed_at: u64,
+) -> (r: StoredDocument)
+    ensures r@ == spec_advance_stored(before@, body@, committed_at),
+{
+    let document = match before {
+        StoredDocument::Workflow(doc) => doc.document.clone(),
+        StoredDocument::Schedule(doc) => doc.document.clone(),
+    };
+    let version = stored_version(before).saturating_add(1);
+    let next_wake_at = body_deadline(&body);
+    match body {
+        DocumentBody::Workflow(objects) => StoredDocument::Workflow(WorkflowDocument {
+            document,
+            version,
+            committed_at,
+            next_wake_at,
+            objects,
+        }),
+        DocumentBody::Schedule(schedule) => StoredDocument::Schedule(ScheduleDocument {
+            document,
+            version,
+            committed_at,
+            next_wake_at,
+            schedule,
+        }),
+    }
+}
+
+
+impl LoadedDocument {
+    pub fn empty_workflow(document: String) -> (r: LoadedDocument)
+        ensures
+            r@ == (LoadedDocumentV {
+                document: spec_empty_stored_workflow(document@),
+                change_count: 0,
+                bytes: 0,
+            }),
+    {
+        LoadedDocument {
+            document: empty_stored_workflow(document),
+            change_count: 0,
+            bytes: 0,
+        }
+    }
+
+    pub fn empty_schedule(document: String) -> (r: LoadedDocument)
+        ensures
+            r@ == (LoadedDocumentV {
+                document: spec_empty_stored_schedule(document@),
+                change_count: 0,
+                bytes: 0,
+            }),
+    {
+        LoadedDocument {
+            document: empty_stored_schedule(document),
+            change_count: 0,
+            bytes: 0,
+        }
+    }
+
+    pub fn copy(&self) -> (r: LoadedDocument)
+        ensures r == *self,
+    {
+        LoadedDocument {
+            document: clone_stored(&self.document),
+            change_count: self.change_count,
+            bytes: self.bytes,
+        }
+    }
+}
+
+
 /// What a document's view is, variant by variant, for code outside this
-/// crate that matches on a `Doc`.
-pub proof fn lemma_doc_view(d: &Doc)
+/// crate that matches on a `DocumentBody`.
+pub proof fn lemma_doc_view(d: &DocumentBody)
     ensures
         d@ == match d {
-            Doc::Origin(objs) => DocV::Origin(objs@),
-            Doc::Schedule(slot) => DocV::Schedule(*slot),
+            DocumentBody::Workflow(objs) => DocumentBodyV::Workflow(objs@),
+            DocumentBody::Schedule(slot) => DocumentBodyV::Schedule(*slot),
         },
 {
 }
+
 
 /// What an object's view says of its tags and its task, for code outside
 /// this crate that reads an object it peeked.
@@ -1066,31 +1334,24 @@ pub proof fn lemma_obj_view(o: &Obj)
 {
 }
 
-/// How many rows a document holds: its objects, or its one schedule.
-pub open spec fn spec_doc_len(d: DocV) -> nat {
-    match d {
-        DocV::Origin(m) => m.dom().len(),
-        DocV::Schedule(Some(_)) => 1,
-        DocV::Schedule(None) => 0,
-    }
-}
 
-pub fn doc_len(d: &Doc) -> (r: usize)
+pub fn body_len(d: &DocumentBody) -> (r: usize)
     ensures
-        r as nat == spec_doc_len(d@),
+        r as nat == spec_body_len(d@),
 {
     match d {
-        Doc::Origin(objs) => {
+        DocumentBody::Workflow(objs) => {
             proof {
                 use_type_invariant(objs);
                 lemma_sorted_keys(objs.entries@);
             }
             objs.entries.len()
         },
-        Doc::Schedule(Some(_)) => 1,
-        Doc::Schedule(None) => 0,
+        DocumentBody::Schedule(Some(_)) => 1,
+        DocumentBody::Schedule(None) => 0,
     }
 }
+
 
 /// What a note's view is, variant by variant.
 pub proof fn lemma_outbound_view(n: &Outbound)
@@ -1102,6 +1363,7 @@ pub proof fn lemma_outbound_view(n: &Outbound)
 {
 }
 
+
 /// What an occurrence's view is, field by field.
 pub proof fn lemma_pending_view(p: &Pending)
     ensures
@@ -1109,21 +1371,24 @@ pub proof fn lemma_pending_view(p: &Pending)
 {
 }
 
-/// An origin's empty document.
-pub fn empty_origin() -> (r: Doc)
+
+/// An workflow's empty document.
+pub fn empty_workflow() -> (r: DocumentBody)
     ensures
-        r@ == DocV::Origin(Map::<Seq<char>, ObjV>::empty()),
+        r@ == DocumentBodyV::Workflow(Map::<Seq<char>, ObjV>::empty()),
 {
-    Doc::Origin(Objects::empty())
+    DocumentBody::Workflow(Objects::empty())
 }
 
+
 /// A schedule's empty document.
-pub fn empty_schedule() -> (r: Doc)
+pub fn empty_schedule() -> (r: DocumentBody)
     ensures
-        r@ == DocV::Schedule(None),
+        r@ == DocumentBodyV::Schedule(None),
 {
-    Doc::Schedule(None)
+    DocumentBody::Schedule(None)
 }
+
 
 /// Every id of `a` is an id of `b`: nothing was removed between them.
 pub fn keys_within(a: &Objects, b: &Objects) -> (r: bool)
@@ -1160,6 +1425,7 @@ pub fn keys_within(a: &Objects, b: &Objects) -> (r: bool)
     true
 }
 
+
 // ---------------------------------------------------------------------------
 // Tags
 // ---------------------------------------------------------------------------
@@ -1183,6 +1449,7 @@ fn tag_is(tags: &Tags, key: &str, value: &str) -> (r: bool)
     false
 }
 
+
 fn tag_key(tags: &Tags, key: &str) -> (r: bool)
     ensures
         r == spec_tag_key(*tags, key@, 0),
@@ -1202,6 +1469,7 @@ fn tag_key(tags: &Tags, key: &str) -> (r: bool)
     false
 }
 
+
 fn timer(tags: &Tags) -> (r: bool)
     ensures
         r == spec_timer(*tags),
@@ -1215,6 +1483,7 @@ fn timer(tags: &Tags) -> (r: bool)
     tag_is(tags, "resonate:timer", "true")
 }
 
+
 fn targeted(tags: &Tags) -> (r: bool)
     ensures
         r == spec_targeted(*tags),
@@ -1225,6 +1494,7 @@ fn targeted(tags: &Tags) -> (r: bool)
     }
     tag_key(tags, "resonate:target")
 }
+
 
 /// Lean's `otype.awaitable`: a target, global scope, an external tag, or a timer.
 fn awaitable(tags: &Tags) -> (r: bool)
@@ -1246,6 +1516,7 @@ fn awaitable(tags: &Tags) -> (r: bool)
         || tag_is(tags, "resonate:external", "true")
         || tag_is(tags, "resonate:scope", "global")
 }
+
 
 /// Decimal digits to a number, `None` on anything else or on overflow:
 /// `spec_parse_u64`, what `str::parse::<u64>` accepts.
@@ -1289,6 +1560,7 @@ fn parse_u64(text: &String) -> (r: Option<u64>)
     Some(acc)
 }
 
+
 /// `spec_delay(tags, 0)`.
 fn delay_of(tags: &Tags) -> (r: Option<u64>)
     ensures
@@ -1317,6 +1589,7 @@ fn delay_of(tags: &Tags) -> (r: Option<u64>)
     None
 }
 
+
 /// The first offer of a task born at `at`: `spec_offer_at`.
 fn offer_at(tags: &Tags, at: u64) -> (r: u64)
     ensures
@@ -1328,6 +1601,7 @@ fn offer_at(tags: &Tags, at: u64) -> (r: u64)
     }
 }
 
+
 /// `spec_sat_add`.
 fn sat_add(a: u64, b: u64) -> (r: u64)
     ensures
@@ -1335,6 +1609,7 @@ fn sat_add(a: u64, b: u64) -> (r: u64)
 {
     a.saturating_add(b)
 }
+
 
 
 // ---------------------------------------------------------------------------
@@ -1348,12 +1623,14 @@ proof fn lemma_strs_empty()
     assert(strs_v(Seq::<String>::empty()) =~= Seq::<Seq<char>>::empty());
 }
 
+
 proof fn lemma_strs_push(v: Seq<String>, s: String)
     ensures
         strs_v(v.push(s)) == strs_v(v).push(s@),
 {
     assert(strs_v(v.push(s)) =~= strs_v(v).push(s@));
 }
+
 
 proof fn lemma_strs_skip(v: Seq<String>)
     requires
@@ -1363,6 +1640,7 @@ proof fn lemma_strs_skip(v: Seq<String>)
 {
     assert(strs_v(v.remove(0)) =~= strs_v(v).skip(1));
 }
+
 
 /// `ids.push(id)`, on the views.
 fn push_id(ids: &mut Vec<String>, id: &String)
@@ -1375,6 +1653,7 @@ fn push_id(ids: &mut Vec<String>, id: &String)
         lemma_strs_push(before, ids@[ids@.len() - 1]);
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // The sorted table
@@ -1425,6 +1704,7 @@ proof fn lemma_objs_update(entries: Seq<(String, Obj)>, i: int, e: (String, Obj)
     };
     assert(spec_objs(next) =~= target);
 }
+
 
 /// Inserting at the key's place keeps the order and is a map insert.
 proof fn lemma_objs_insert(entries: Seq<(String, Obj)>, i: int, e: (String, Obj))
@@ -1500,6 +1780,7 @@ proof fn lemma_objs_insert(entries: Seq<(String, Obj)>, i: int, e: (String, Obj)
     assert(spec_objs(next) =~= target);
 }
 
+
 /// The index of an id, if the table has it.
 fn find_id(entries: &Vec<(String, Obj)>, id: &String) -> (r: Option<usize>)
     ensures
@@ -1522,6 +1803,7 @@ fn find_id(entries: &Vec<(String, Obj)>, id: &String) -> (r: Option<usize>)
     }
     None
 }
+
 
 /// Where a new id goes: before the first key it is before.
 fn insert_at(entries: &Vec<(String, Obj)>, id: &String) -> (i: usize)
@@ -1558,6 +1840,7 @@ fn insert_at(entries: &Vec<(String, Obj)>, id: &String) -> (i: usize)
     }
     i
 }
+
 
 impl Objects {
     pub fn empty() -> (r: Objects)
@@ -1826,9 +2109,6 @@ impl Objects {
     }
 }
 
-pub open spec fn nat_v(o: Option<u64>) -> Option<nat> {
-    match o { Some(x) => Some(x as nat), None => None }
-}
 
 /// `spec_min_nat`, on `u64`s.
 fn min_u64(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
@@ -1842,6 +2122,7 @@ fn min_u64(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
     }
 }
 
+
 /// `spec_earlier`.
 fn earlier(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
     ensures
@@ -1853,6 +2134,7 @@ fn earlier(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
         (Some(x), Some(y)) => Some(if x < y { x } else { y }),
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // One object
@@ -1870,6 +2152,7 @@ fn project_prom(p: &Prom, now: u64) -> (r: Prom)
     }
     q
 }
+
 
 /// `spec_fulfill_task`.
 fn fulfill_task(t: &Tk) -> (r: Tk)
@@ -1890,6 +2173,7 @@ fn fulfill_task(t: &Tk) -> (r: Tk)
     }
 }
 
+
 /// `spec_project_obj`.
 fn project_obj(obj: &Obj, now: u64) -> (r: Obj)
     ensures
@@ -1909,6 +2193,7 @@ fn project_obj(obj: &Obj, now: u64) -> (r: Obj)
     Obj { promise, task }
 }
 
+
 /// `spec_record`.
 fn record(id: &String, p: &Prom) -> (r: PromiseRecord)
     ensures
@@ -1925,6 +2210,7 @@ fn record(id: &String, p: &Prom) -> (r: PromiseRecord)
         settled_at: p.settled_at,
     }
 }
+
 
 /// `spec_task_record`.
 fn task_record(id: &String, t: &Tk) -> (r: TaskRecord)
@@ -1946,6 +2232,7 @@ fn task_record(id: &String, t: &Tk) -> (r: TaskRecord)
     }
 }
 
+
 /// `spec_new_obj`: a promise, and a task when the promise is a target.
 fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) -> (r: Obj)
     ensures
@@ -1953,7 +2240,6 @@ fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) 
 {
     let live = timeout_at > now;
     let is_timer = timer(&tags);
-    let offer = offer_at(&tags, now);
     let empty = Value::empty();
     proof {
         assert(exists|v: Value| v@ == AValue::empty());
@@ -1978,7 +2264,10 @@ fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) 
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: if live { Some(offer) } else { None },
+            // A newly runnable promise is offered by this transition.  The
+            // request drain advances this to `now + retry_timeout` before
+            // the document is committed.
+            retry_timeout_at: if live { Some(now) } else { None },
             resumes: Vec::new(),
         })
     } else {
@@ -1986,6 +2275,7 @@ fn new_obj(timeout_at: u64, now: u64, param: Value, tags: Tags, runnable: bool) 
     };
     Obj { promise, task }
 }
+
 
 /// `spec_acquire`.
 fn acquire(t: &Tk, pid: &String, ttl: u64, now: u64) -> (r: Tk)
@@ -2006,6 +2296,7 @@ fn acquire(t: &Tk, pid: &String, ttl: u64, now: u64) -> (r: Tk)
     }
 }
 
+
 /// `spec_unlease`.
 fn unlease(t: &Tk, state: TaskState, retry: Option<u64>) -> (r: Tk)
     ensures
@@ -2022,6 +2313,7 @@ fn unlease(t: &Tk, state: TaskState, retry: Option<u64>) -> (r: Tk)
     }
 }
 
+
 /// `spec_promise_due`.
 fn promise_due(obj: &Obj, now: u64) -> (r: Option<u64>)
     ensures
@@ -2037,6 +2329,7 @@ fn promise_due(obj: &Obj, now: u64) -> (r: Option<u64>)
         None
     }
 }
+
 
 /// `spec_lease_due`.
 fn lease_due(obj: &Obj, now: u64) -> (r: Option<u64>)
@@ -2058,6 +2351,7 @@ fn lease_due(obj: &Obj, now: u64) -> (r: Option<u64>)
     }
 }
 
+
 /// `spec_retry_due`.
 fn retry_due(obj: &Obj, now: u64) -> (r: Option<u64>)
     ensures
@@ -2078,6 +2372,7 @@ fn retry_due(obj: &Obj, now: u64) -> (r: Option<u64>)
     }
 }
 
+
 /// `spec_obj_due`.
 fn obj_due(obj: &Obj, now: u64) -> (r: Option<u64>)
     ensures
@@ -2085,6 +2380,7 @@ fn obj_due(obj: &Obj, now: u64) -> (r: Option<u64>)
 {
     earlier(earlier(promise_due(obj, now), lease_due(obj, now)), retry_due(obj, now))
 }
+
 
 /// `spec_obj_deadline`.
 fn obj_deadline(obj: &Obj) -> (r: Option<u64>)
@@ -2094,77 +2390,84 @@ fn obj_deadline(obj: &Obj) -> (r: Option<u64>)
     obj_due(obj, u64::MAX)
 }
 
+
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------
 
-/// `spec_empty_doc`.
-pub fn empty_doc(key: &String) -> (r: Doc)
+/// `spec_empty_body`.
+pub fn empty_body(key: &String) -> (r: DocumentBody)
     ensures
-        r@ == spec_empty_doc(key@),
+        r@ == spec_empty_body(key@),
 {
-    if is_schedule_key(key) { Doc::Schedule(None) } else { Doc::Origin(Objects::empty()) }
+    if is_schedule_key(key) { DocumentBody::Schedule(None) } else { DocumentBody::Workflow(Objects::empty()) }
 }
 
-/// `spec_is_empty`.
-fn is_empty(doc: &Doc) -> (r: bool)
+
+/// `spec_body_is_empty`.
+fn is_empty(doc: &DocumentBody) -> (r: bool)
     ensures
-        r == spec_is_empty(doc@),
+        r == spec_body_is_empty(doc@),
 {
     match doc {
-        Doc::Origin(objs) => objs.is_empty(),
-        Doc::Schedule(slot) => slot.is_none(),
+        DocumentBody::Workflow(objs) => objs.is_empty(),
+        DocumentBody::Schedule(slot) => slot.is_none(),
     }
 }
 
-/// `spec_origin_map`: the objects of an origin document; none for a schedule.
-fn open(doc: Doc) -> (r: Objects)
+
+/// `spec_workflow_map`: the objects of an workflow document; none for a schedule.
+fn open(doc: DocumentBody) -> (r: Objects)
     ensures
-        r@ == spec_origin_map(doc@),
+        r@ == spec_workflow_map(doc@),
 {
     match doc {
-        Doc::Origin(objs) => objs,
-        Doc::Schedule(_) => Objects::empty(),
+        DocumentBody::Workflow(objs) => objs,
+        DocumentBody::Schedule(_) => Objects::empty(),
     }
 }
 
-/// `spec_origin_map(doc)[id]`, copied out, without opening the document.
-pub fn peek(doc: &Doc, id: &String) -> (r: Option<Obj>)
+
+/// `spec_workflow_map(doc)[id]`, copied out, without opening the document.
+pub fn peek(doc: &DocumentBody, id: &String) -> (r: Option<Obj>)
     ensures
         match r {
-            Some(o) => spec_origin_map(doc@).contains_key(id@) && o@ == spec_origin_map(doc@)[id@],
-            None => !spec_origin_map(doc@).contains_key(id@),
+            Some(o) => spec_workflow_map(doc@).contains_key(id@) && o@ == spec_workflow_map(doc@)[id@],
+            None => !spec_workflow_map(doc@).contains_key(id@),
         },
 {
     match doc {
-        Doc::Origin(objs) => objs.get(id),
-        Doc::Schedule(_) => None,
+        DocumentBody::Workflow(objs) => objs.get(id),
+        DocumentBody::Schedule(_) => None,
     }
 }
 
-/// `spec_doc_deadline`.
-pub fn doc_deadline(doc: &Doc) -> (r: Option<u64>)
+
+/// `spec_body_deadline`.
+pub fn body_deadline(doc: &DocumentBody) -> (r: Option<u64>)
     ensures
-        nat_v(r) == spec_doc_deadline(doc@),
+        nat_v(r) == spec_body_deadline(doc@),
 {
     match doc {
-        Doc::Schedule(Some(schedule)) => Some(schedule.next_run_at),
-        Doc::Origin(objs) => objs.deadline(),
-        Doc::Schedule(None) => None,
+        DocumentBody::Schedule(Some(schedule)) => Some(schedule.next_run_at),
+        DocumentBody::Workflow(objs) => objs.deadline(),
+        DocumentBody::Schedule(None) => None,
     }
 }
 
+
 /// `spec_earliest_in`.
-fn earliest_in(doc: &Doc, now: u64) -> (r: Option<u64>)
+fn earliest_in(doc: &DocumentBody, now: u64) -> (r: Option<u64>)
     ensures
         r == spec_earliest_in(doc@, now),
 {
     match doc {
-        Doc::Schedule(Some(schedule)) => if schedule.next_run_at <= now { Some(schedule.next_run_at) } else { None },
-        Doc::Origin(objs) => objs.earliest(now),
-        Doc::Schedule(None) => None,
+        DocumentBody::Schedule(Some(schedule)) => if schedule.next_run_at <= now { Some(schedule.next_run_at) } else { None },
+        DocumentBody::Workflow(objs) => objs.earliest(now),
+        DocumentBody::Schedule(None) => None,
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Requests
@@ -2203,6 +2506,7 @@ fn key_of(request: &Request) -> (r: Option<String>)
     }
 }
 
+
 /// `spec_promise_res`.
 fn promise_res(status: u16, promise: Option<PromiseRecord>) -> (r: Response)
     ensures
@@ -2210,6 +2514,7 @@ fn promise_res(status: u16, promise: Option<PromiseRecord>) -> (r: Response)
 {
     Response::Promise(PromiseRes { status, promise })
 }
+
 
 /// `spec_pure`: the answer to a request about no document.
 fn pure(request: &Request) -> (r: Response)
@@ -2223,6 +2528,7 @@ fn pure(request: &Request) -> (r: Response)
         _ => unavailable(request),
     }
 }
+
 
 /// `spec_unavailable`: 503, in the shape the request expects.
 fn unavailable(request: &Request) -> (r: Response)
@@ -2244,6 +2550,7 @@ fn unavailable(request: &Request) -> (r: Response)
 }
 
 
+
 // ---------------------------------------------------------------------------
 // Handlers: one request against one document
 // ---------------------------------------------------------------------------
@@ -2255,6 +2562,7 @@ fn status_res(status: u16) -> (r: Response)
     Response::Status(StatusRes { status })
 }
 
+
 fn claim_res(status: u16, task: Option<TaskRecord>, promise: Option<PromiseRecord>) -> (r: Response)
     ensures
         r == Response::TaskClaim(TaskClaimRes { status, task, promise }),
@@ -2262,12 +2570,14 @@ fn claim_res(status: u16, task: Option<TaskRecord>, promise: Option<PromiseRecor
     Response::TaskClaim(TaskClaimRes { status, task, promise })
 }
 
+
 fn fence_res(status: u16, action: Option<TaskFenceInnerRes>) -> (r: Response)
     ensures
         r == Response::TaskFence(TaskFenceRes { status, action }),
 {
     Response::TaskFence(TaskFenceRes { status, action })
 }
+
 
 /// A settled promise, and its task fulfilled: the shared tail of `promise_settle` and `task_fulfill`.
 fn settle_obj(seen: Obj, state: PromiseState, value: Value, now: u64) -> (r: Obj)
@@ -2292,6 +2602,7 @@ fn settle_obj(seen: Obj, state: PromiseState, value: Value, now: u64) -> (r: Obj
     Obj { promise, task }
 }
 
+
 /// The awaiter joins the awaited promise's callbacks, once.
 fn add_callback(obj: Obj, id: &String) -> (r: Obj)
     ensures
@@ -2310,6 +2621,7 @@ fn add_callback(obj: Obj, id: &String) -> (r: Obj)
     }
     Obj { promise, task }
 }
+
 
 /// The address joins the promise's listeners, once.
 fn add_listener(obj: Obj, address: &String) -> (r: Obj)
@@ -2330,26 +2642,28 @@ fn add_listener(obj: Obj, address: &String) -> (r: Obj)
     Obj { promise, task }
 }
 
-fn promise_get(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
+
+fn promise_get(doc: DocumentBody, id: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_promise_get(doc@, *id, now),
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (DocumentBody::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let obj = project_obj(&found, now);
             let res = promise_res(200, Some(record(id, &obj.promise)));
-            (Doc::Origin(objs), res)
+            (DocumentBody::Workflow(objs), res)
         },
     }
 }
 
-fn promise_create(doc: Doc, req: &PromiseCreateReq, now: u64) -> (r: (Doc, Response))
+
+fn promise_create(doc: DocumentBody, req: &PromiseCreateReq, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_promise_create(doc@, *req, now),
 {
-    if timer(&req.tags) && targeted(&req.tags) {
+    if req.timeout_at > MAX_TIME || (timer(&req.tags) && targeted(&req.tags)) {
         return (doc, promise_res(400, None));
     }
     match peek(&doc, &req.id) {
@@ -2363,12 +2677,13 @@ fn promise_create(doc: Doc, req: &PromiseCreateReq, now: u64) -> (r: (Doc, Respo
             let obj = new_obj(req.timeout_at, now, copy(&req.param), copy(&req.tags), runnable);
             let res = promise_res(200, Some(record(&req.id, &obj.promise)));
             let objs = open(doc).put(&req.id, obj);
-            (Doc::Origin(objs), res)
+            (DocumentBody::Workflow(objs), res)
         },
     }
 }
 
-fn promise_settle(doc: Doc, req: &PromiseSettleReq, now: u64) -> (r: (Doc, Response))
+
+fn promise_settle(doc: DocumentBody, req: &PromiseSettleReq, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_promise_settle(doc@, *req, now),
 {
@@ -2377,22 +2692,23 @@ fn promise_settle(doc: Doc, req: &PromiseSettleReq, now: u64) -> (r: (Doc, Respo
     }
     let objs = open(doc);
     match objs.get(&req.id) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (DocumentBody::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let seen = project_obj(&found, now);
             if !(seen.promise.state == PromiseState::Pending) {
                 let res = promise_res(200, Some(record(&req.id, &seen.promise)));
-                (Doc::Origin(objs), res)
+                (DocumentBody::Workflow(objs), res)
             } else {
                 let obj = settle_obj(seen, req.state, copy(&req.value), now);
                 let res = promise_res(200, Some(record(&req.id, &obj.promise)));
-                (Doc::Origin(objs.put(&req.id, obj)), res)
+                (DocumentBody::Workflow(objs.put(&req.id, obj)), res)
             }
         },
     }
 }
 
-fn register_callback(doc: Doc, awaited: &String, awaiter: &String, now: u64) -> (r: (Doc, Response))
+
+fn register_callback(doc: DocumentBody, awaited: &String, awaiter: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_register_callback(doc@, *awaited, *awaiter, now),
 {
@@ -2401,21 +2717,25 @@ fn register_callback(doc: Doc, awaited: &String, awaiter: &String, now: u64) -> 
     }
     let objs = open(doc);
     match objs.get(awaited) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (DocumentBody::Workflow(objs), promise_res(404, None)),
         Some(a) => match objs.get(awaiter) {
-            None => (Doc::Origin(objs), promise_res(422, None)),
+            None => (DocumentBody::Workflow(objs), promise_res(422, None)),
             Some(b) => {
                 let awaited_obj = project_obj(&a, now);
                 let awaiter_obj = project_obj(&b, now);
-                if !targeted(&awaiter_obj.promise.tags) || !awaitable(&awaited_obj.promise.tags) {
-                    (Doc::Origin(objs), promise_res(422, None))
+                let runnable = targeted(&awaiter_obj.promise.tags);
+                let can_await = awaitable(&awaited_obj.promise.tags);
+                let both_pending = awaited_obj.promise.state == PromiseState::Pending
+                    && awaiter_obj.promise.state == PromiseState::Pending;
+                if !runnable || !can_await {
+                    (DocumentBody::Workflow(objs), promise_res(422, None))
                 } else {
                     let res = promise_res(200, Some(record(awaited, &awaited_obj.promise)));
-                    if awaited_obj.promise.state == PromiseState::Pending && awaiter_obj.promise.state == PromiseState::Pending {
+                    if both_pending {
                         let obj = add_callback(awaited_obj, awaiter);
-                        (Doc::Origin(objs.put(awaited, obj)), res)
+                        (DocumentBody::Workflow(objs.put(awaited, obj)), res)
                     } else {
-                        (Doc::Origin(objs), res)
+                        (DocumentBody::Workflow(objs), res)
                     }
                 }
             },
@@ -2423,55 +2743,59 @@ fn register_callback(doc: Doc, awaited: &String, awaiter: &String, now: u64) -> 
     }
 }
 
-fn register_listener(doc: Doc, awaited: &String, address: &String, now: u64) -> (r: (Doc, Response))
+
+fn register_listener(doc: DocumentBody, awaited: &String, address: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_register_listener(doc@, *awaited, *address, now),
 {
     let objs = open(doc);
     match objs.get(awaited) {
-        None => (Doc::Origin(objs), promise_res(404, None)),
+        None => (DocumentBody::Workflow(objs), promise_res(404, None)),
         Some(found) => {
             let obj = project_obj(&found, now);
             if !awaitable(&obj.promise.tags) {
-                (Doc::Origin(objs), promise_res(422, None))
+                (DocumentBody::Workflow(objs), promise_res(422, None))
             } else {
                 let res = promise_res(200, Some(record(awaited, &obj.promise)));
                 if obj.promise.state == PromiseState::Pending {
                     let obj = add_listener(obj, address);
-                    (Doc::Origin(objs.put(awaited, obj)), res)
+                    (DocumentBody::Workflow(objs.put(awaited, obj)), res)
                 } else {
-                    (Doc::Origin(objs), res)
+                    (DocumentBody::Workflow(objs), res)
                 }
             }
         },
     }
 }
 
-fn task_get(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
+
+fn task_get(doc: DocumentBody, id: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_get(doc@, *id, now),
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
+        None => (DocumentBody::Workflow(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
         Some(found) => {
             let obj = project_obj(&found, now);
             match &obj.task {
-                None => (Doc::Origin(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
+                None => (DocumentBody::Workflow(objs), Response::TaskGet(TaskGetRes { status: 404, task: None })),
                 Some(t) => {
                     let res = Response::TaskGet(TaskGetRes { status: 200, task: Some(task_record(id, t)) });
-                    (Doc::Origin(objs), res)
+                    (DocumentBody::Workflow(objs), res)
                 },
             }
         },
     }
 }
 
-fn task_create(doc: Doc, pid: &String, ttl: u64, action: &PromiseCreateReq, now: u64) -> (r: (Doc, Response))
+
+fn task_create(doc: DocumentBody, pid: &String, ttl: u64, action: &PromiseCreateReq, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_create(doc@, *pid, ttl, *action, now),
 {
-    if !targeted(&action.tags) || timer(&action.tags) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !targeted(&action.tags) || timer(&action.tags) {
         return (doc, claim_res(400, None, None));
     }
     let (doc, created) = promise_create(doc, action, now);
@@ -2495,11 +2819,13 @@ fn task_create(doc: Doc, pid: &String, ttl: u64, action: &PromiseCreateReq, now:
                     if t.state == TaskState::Fulfilled {
                         let res = claim_res(200, Some(task_record(&action.id, &t)), Some(record(&action.id, &promise)));
                         (doc, res)
+                    } else if t.state == TaskState::Pending && t.version >= MAX_VERSION {
+                        (doc, claim_res(409, None, None))
                     } else if t.state == TaskState::Pending {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(&action.id, &u)), Some(record(&action.id, &promise)));
                         let objs = open(doc).put(&action.id, Obj { promise, task: Some(u) });
-                        (Doc::Origin(objs), res)
+                        (DocumentBody::Workflow(objs), res)
                     } else {
                         (doc, claim_res(409, None, None))
                     }
@@ -2509,12 +2835,14 @@ fn task_create(doc: Doc, pid: &String, ttl: u64, action: &PromiseCreateReq, now:
     }
 }
 
+
 /// `Held`, executed.
 enum Lease {
     Ok(Obj),
     Missing,
     Stale,
 }
+
 
 spec fn lease_v(lease: Lease) -> Held {
     match lease {
@@ -2523,6 +2851,7 @@ spec fn lease_v(lease: Lease) -> Held {
         Lease::Stale => Held::Stale,
     }
 }
+
 
 /// `spec_held`: the task `id` at `version`, acquired and live.
 fn held(objs: &Objects, id: &String, version: u64, now: u64) -> (r: Lease)
@@ -2545,24 +2874,29 @@ fn held(objs: &Objects, id: &String, version: u64, now: u64) -> (r: Lease)
     }
 }
 
-fn task_acquire(doc: Doc, id: &String, version: u64, pid: &String, ttl: u64, now: u64) -> (r: (Doc, Response))
+
+fn task_acquire(doc: DocumentBody, id: &String, version: u64, pid: &String, ttl: u64, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_acquire(doc@, *id, version, *pid, ttl, now),
 {
+    if ttl == 0 || ttl > MAX_TIME {
+        return (doc, claim_res(400, None, None));
+    }
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), claim_res(404, None, None)),
+        None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), claim_res(404, None, None)),
+                None => (DocumentBody::Workflow(objs), claim_res(404, None, None)),
                 Some(t) => {
-                    if !(t.state == TaskState::Pending) || t.version != version || !(promise.state == PromiseState::Pending) {
-                        (Doc::Origin(objs), claim_res(409, None, None))
+                    if !(t.state == TaskState::Pending) || t.version != version
+                        || !(promise.state == PromiseState::Pending) || t.version >= MAX_VERSION {
+                        (DocumentBody::Workflow(objs), claim_res(409, None, None))
                     } else {
                         let u = acquire(&t, pid, ttl, now);
                         let res = claim_res(200, Some(task_record(id, &u)), Some(record(id, &promise)));
-                        (Doc::Origin(objs.put(id, Obj { promise, task: Some(u) })), res)
+                        (DocumentBody::Workflow(objs.put(id, Obj { promise, task: Some(u) })), res)
                     }
                 },
             }
@@ -2570,26 +2904,28 @@ fn task_acquire(doc: Doc, id: &String, version: u64, pid: &String, ttl: u64, now
     }
 }
 
-fn task_release(doc: Doc, id: &String, version: u64, now: u64) -> (r: (Doc, Response))
+
+fn task_release(doc: DocumentBody, id: &String, version: u64, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_release(doc@, *id, version, now),
 {
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
+        Lease::Missing => (DocumentBody::Workflow(objs), status_res(404)),
+        Lease::Stale => (DocumentBody::Workflow(objs), status_res(409)),
         Lease::Ok(obj) => {
             let Obj { promise, task } = obj;
             let task = match task {
                 Some(t) => Some(unlease(&t, TaskState::Pending, Some(now))),
                 None => None,
             };
-            (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(200))
+            (DocumentBody::Workflow(objs.put(id, Obj { promise, task })), status_res(200))
         },
     }
 }
 
-fn task_fulfill(doc: Doc, id: &String, version: u64, action: &PromiseSettleReq, now: u64) -> (r: (Doc, Response))
+
+fn task_fulfill(doc: DocumentBody, id: &String, version: u64, action: &PromiseSettleReq, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_fulfill(doc@, *id, version, *action, now),
 {
@@ -2598,35 +2934,36 @@ fn task_fulfill(doc: Doc, id: &String, version: u64, action: &PromiseSettleReq, 
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), promise_res(404, None)),
-        Lease::Stale => (Doc::Origin(objs), promise_res(409, None)),
+        Lease::Missing => (DocumentBody::Workflow(objs), promise_res(404, None)),
+        Lease::Stale => (DocumentBody::Workflow(objs), promise_res(409, None)),
         Lease::Ok(obj) => {
             let obj = settle_obj(obj, action.state, copy(&action.value), now);
             let res = promise_res(200, Some(record(id, &obj.promise)));
-            (Doc::Origin(objs.put(id, obj)), res)
+            (DocumentBody::Workflow(objs.put(id, obj)), res)
         },
     }
 }
 
-fn task_halt(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
+
+fn task_halt(doc: DocumentBody, id: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_halt(doc@, *id, now),
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), status_res(404)),
+        None => (DocumentBody::Workflow(objs), status_res(404)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), status_res(404)),
+                None => (DocumentBody::Workflow(objs), status_res(404)),
                 Some(t) => {
                     if t.state == TaskState::Fulfilled {
-                        (Doc::Origin(objs), status_res(409))
+                        (DocumentBody::Workflow(objs), status_res(409))
                     } else if t.state == TaskState::Halted {
-                        (Doc::Origin(objs), status_res(200))
+                        (DocumentBody::Workflow(objs), status_res(200))
                     } else {
                         let obj = Obj { promise, task: Some(unlease(&t, TaskState::Halted, None)) };
-                        (Doc::Origin(objs.put(id, obj)), status_res(200))
+                        (DocumentBody::Workflow(objs.put(id, obj)), status_res(200))
                     }
                 },
             }
@@ -2634,31 +2971,33 @@ fn task_halt(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
     }
 }
 
-fn task_continue(doc: Doc, id: &String, now: u64) -> (r: (Doc, Response))
+
+fn task_continue(doc: DocumentBody, id: &String, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_task_continue(doc@, *id, now),
 {
     let objs = open(doc);
     match objs.get(id) {
-        None => (Doc::Origin(objs), status_res(404)),
+        None => (DocumentBody::Workflow(objs), status_res(404)),
         Some(found) => {
             let Obj { promise, task } = project_obj(&found, now);
             match task {
-                None => (Doc::Origin(objs), status_res(404)),
+                None => (DocumentBody::Workflow(objs), status_res(404)),
                 Some(t) => {
                     if !(t.state == TaskState::Halted) || !(promise.state == PromiseState::Pending) {
-                        (Doc::Origin(objs), status_res(409))
+                        (DocumentBody::Workflow(objs), status_res(409))
                     } else {
                         let mut u = t;
                         u.state = TaskState::Pending;
                         u.retry_timeout_at = Some(now);
-                        (Doc::Origin(objs.put(id, Obj { promise, task: Some(u) })), status_res(200))
+                        (DocumentBody::Workflow(objs.put(id, Obj { promise, task: Some(u) })), status_res(200))
                     }
                 },
             }
         },
     }
 }
+
 
 /// `spec_one_origin`: every task in the heartbeat is in the first one's origin.
 fn one_origin(tasks: &Vec<TaskRef>) -> (r: bool)
@@ -2683,6 +3022,7 @@ fn one_origin(tasks: &Vec<TaskRef>) -> (r: bool)
     }
     true
 }
+
 
 /// `spec_extend`: each acquired task the heartbeat names, leased for another ttl.
 fn extend(objs: Objects, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: Objects)
@@ -2722,7 +3062,8 @@ fn extend(objs: Objects, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: Ob
     objs
 }
 
-fn heartbeat(doc: Doc, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: (Doc, Response))
+
+fn heartbeat(doc: DocumentBody, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_heartbeat(doc@, *pid, tasks@, now),
 {
@@ -2733,8 +3074,9 @@ fn heartbeat(doc: Doc, pid: &String, tasks: &Vec<TaskRef>, now: u64) -> (r: (Doc
         return (doc, status_res(400));
     }
     let objs = extend(open(doc), pid, tasks, now);
-    (Doc::Origin(objs), status_res(200))
+    (DocumentBody::Workflow(objs), status_res(200))
 }
+
 
 /// `spec_bad_suspend`: an action awaits the task itself, or another origin.
 fn bad_suspend(actions: &Vec<PromiseRegisterCallbackReq>, id: &String) -> (r: bool)
@@ -2755,6 +3097,7 @@ fn bad_suspend(actions: &Vec<PromiseRegisterCallbackReq>, id: &String) -> (r: bo
     }
     false
 }
+
 
 /// `spec_seen`: whether an awaited id appears before `stop`.
 fn seen(actions: &Vec<PromiseRegisterCallbackReq>, id: &String, stop: usize) -> (r: bool)
@@ -2779,6 +3122,7 @@ fn seen(actions: &Vec<PromiseRegisterCallbackReq>, id: &String, stop: usize) -> 
     false
 }
 
+
 /// `spec_distinct_awaited`: no awaited id twice.
 fn distinct_awaited(actions: &Vec<PromiseRegisterCallbackReq>) -> (r: bool)
     ensures
@@ -2799,6 +3143,7 @@ fn distinct_awaited(actions: &Vec<PromiseRegisterCallbackReq>) -> (r: bool)
     true
 }
 
+
 /// `spec_missing_awaited`.
 fn missing_awaited(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>) -> (r: bool)
     ensures
@@ -2818,6 +3163,7 @@ fn missing_awaited(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>) ->
     }
     false
 }
+
 
 /// `spec_unawaitable`.
 fn unawaitable(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>) -> (r: bool)
@@ -2843,6 +3189,7 @@ fn unawaitable(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>) -> (r:
     }
     false
 }
+
 
 /// `spec_any_settled`.
 fn any_settled(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>, now: u64) -> (r: bool)
@@ -2870,6 +3217,7 @@ fn any_settled(objs: &Objects, actions: &Vec<PromiseRegisterCallbackReq>, now: u
     false
 }
 
+
 /// `spec_add_callbacks` keeps the keys.
 proof fn lemma_add_callbacks_dom(map: Map<Seq<char>, ObjV>, id: Seq<char>, actions: Seq<PromiseRegisterCallbackReq>, i: int)
     ensures
@@ -2888,6 +3236,7 @@ proof fn lemma_add_callbacks_dom(map: Map<Seq<char>, ObjV>, id: Seq<char>, actio
         assert(next.dom() =~= map.dom());
     }
 }
+
 
 /// `spec_add_callbacks`: the suspended task joins each awaited promise's callbacks.
 fn add_callbacks(objs: Objects, id: &String, actions: &Vec<PromiseRegisterCallbackReq>) -> (r: Objects)
@@ -2914,7 +3263,8 @@ fn add_callbacks(objs: Objects, id: &String, actions: &Vec<PromiseRegisterCallba
     objs
 }
 
-fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCallbackReq>, now: u64) -> (r: (Doc, Response))
+
+fn suspend(doc: DocumentBody, id: &String, version: u64, actions: &Vec<PromiseRegisterCallbackReq>, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_suspend(doc@, *id, version, actions@, now),
 {
@@ -2923,11 +3273,11 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
+        Lease::Missing => (DocumentBody::Workflow(objs), status_res(404)),
+        Lease::Stale => (DocumentBody::Workflow(objs), status_res(409)),
         Lease::Ok(obj) => {
             if missing_awaited(&objs, actions) || unawaitable(&objs, actions) {
-                (Doc::Origin(objs), status_res(422))
+                (DocumentBody::Workflow(objs), status_res(422))
             } else if any_settled(&objs, actions, now) {
                 let Obj { promise, task } = obj;
                 let task = match task {
@@ -2941,7 +3291,7 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
                     },
                     None => None,
                 };
-                (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(300))
+                (DocumentBody::Workflow(objs.put(id, Obj { promise, task })), status_res(300))
             } else {
                 proof {
                     lemma_add_callbacks_dom(objs@, id@, actions@, 0);
@@ -2961,13 +3311,13 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
                             },
                             None => None,
                         };
-                        (Doc::Origin(objs.put(id, Obj { promise, task })), status_res(200))
+                        (DocumentBody::Workflow(objs.put(id, Obj { promise, task })), status_res(200))
                     },
                     None => {
                         proof {
                             assert(false);
                         }
-                        (Doc::Origin(objs), status_res(500))
+                        (DocumentBody::Workflow(objs), status_res(500))
                     },
                 }
             }
@@ -2975,7 +3325,8 @@ fn suspend(doc: Doc, id: &String, version: u64, actions: &Vec<PromiseRegisterCal
     }
 }
 
-fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64) -> (r: (Doc, Response))
+
+fn fence(doc: DocumentBody, id: &String, version: u64, action: &TaskFenceAction, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_fence(doc@, *id, version, *action, now),
 {
@@ -2988,10 +3339,10 @@ fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64
     }
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), fence_res(404, None)),
-        Lease::Stale => (Doc::Origin(objs), fence_res(409, None)),
+        Lease::Missing => (DocumentBody::Workflow(objs), fence_res(404, None)),
+        Lease::Stale => (DocumentBody::Workflow(objs), fence_res(409, None)),
         Lease::Ok(_) => {
-            let doc = Doc::Origin(objs);
+            let doc = DocumentBody::Workflow(objs);
             match action {
                 TaskFenceAction::Create(req) => {
                     let (doc, response) = promise_create(doc, req, now);
@@ -3014,24 +3365,26 @@ fn fence(doc: Doc, id: &String, version: u64, action: &TaskFenceAction, now: u64
     }
 }
 
-fn fence_check(doc: Doc, id: &String, version: u64, now: u64) -> (r: (Doc, Response))
+
+fn fence_check(doc: DocumentBody, id: &String, version: u64, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_fence_check(doc@, *id, version, now),
 {
     let objs = open(doc);
     match held(&objs, id, version, now) {
-        Lease::Missing => (Doc::Origin(objs), status_res(404)),
-        Lease::Stale => (Doc::Origin(objs), status_res(409)),
-        Lease::Ok(_) => (Doc::Origin(objs), status_res(200)),
+        Lease::Missing => (DocumentBody::Workflow(objs), status_res(404)),
+        Lease::Stale => (DocumentBody::Workflow(objs), status_res(409)),
+        Lease::Ok(_) => (DocumentBody::Workflow(objs), status_res(200)),
     }
 }
 
-fn schedule_get(doc: Doc, id: &String) -> (r: (Doc, Response))
+
+fn schedule_get(doc: DocumentBody, id: &String) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_schedule_get(doc@, *id),
 {
     let found = match &doc {
-        Doc::Schedule(Some(schedule)) => {
+        DocumentBody::Schedule(Some(schedule)) => {
             if schedule.id == *id {
                 proof {
                     axiom_string_ext(schedule.id, *id);
@@ -3049,15 +3402,19 @@ fn schedule_get(doc: Doc, id: &String) -> (r: (Doc, Response))
     }
 }
 
-fn schedule_create(doc: Doc, req: &ScheduleCreateReq, now: u64) -> (r: (Doc, Response))
+
+fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    if targeted(&req.promise_tags) && timer(&req.promise_tags) {
+    let next_run_at = next_cron(&req.cron, now);
+    if !deadline_bounded(next_run_at, req.promise_timeout)
+        || (targeted(&req.promise_tags) && timer(&req.promise_tags))
+    {
         return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }));
     }
     let existing = match &doc {
-        Doc::Schedule(Some(schedule)) => Some(copy(schedule)),
+        DocumentBody::Schedule(Some(schedule)) => Some(copy(schedule)),
         _ => None,
     };
     match existing {
@@ -3070,22 +3427,23 @@ fn schedule_create(doc: Doc, req: &ScheduleCreateReq, now: u64) -> (r: (Doc, Res
                 promise_timeout: req.promise_timeout,
                 promise_param: copy(&req.promise_param),
                 promise_tags: copy(&req.promise_tags),
-                next_run_at: next_cron(&req.cron, now),
+                next_run_at,
                 last_run_at: None,
                 created_at: now,
             };
             let answer = copy(&schedule);
-            (Doc::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(answer) }))
+            (DocumentBody::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(answer) }))
         },
     }
 }
 
-fn schedule_delete(doc: Doc, id: &String) -> (r: (Doc, Response))
+
+fn schedule_delete(doc: DocumentBody, id: &String) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_schedule_delete(doc@, *id),
 {
     let matched = match &doc {
-        Doc::Schedule(Some(schedule)) => {
+        DocumentBody::Schedule(Some(schedule)) => {
             if schedule.id == *id {
                 proof {
                     axiom_string_ext(schedule.id, *id);
@@ -3098,14 +3456,15 @@ fn schedule_delete(doc: Doc, id: &String) -> (r: (Doc, Response))
         _ => false,
     };
     if matched {
-        (Doc::Schedule(None), status_res(200))
+        (DocumentBody::Schedule(None), status_res(200))
     } else {
         (doc, status_res(404))
     }
 }
 
+
 /// `spec_handle`: the same match.
-pub fn handle(doc: Doc, request: &Request, now: u64) -> (r: (Doc, Response))
+pub fn handle(doc: DocumentBody, request: &Request, now: u64) -> (r: (DocumentBody, Response))
     ensures
         (r.0@, r.1) == spec_handle(doc@, *request, now),
 {
@@ -3132,6 +3491,7 @@ pub fn handle(doc: Doc, request: &Request, now: u64) -> (r: (Doc, Response))
     }
 }
 
+
 // ---------------------------------------------------------------------------
 // Due work: timeouts, leases, retries, callbacks, listeners, schedules
 // ---------------------------------------------------------------------------
@@ -3143,12 +3503,14 @@ proof fn lemma_notes_empty()
     assert(notes_v(Seq::<Outbound>::empty()) =~= Seq::<NoteV>::empty());
 }
 
+
 proof fn lemma_notes_one(note: Outbound)
     ensures
         notes_v(seq![note]) == seq![note@],
 {
     assert(notes_v(seq![note]) =~= seq![note@]);
 }
+
 
 proof fn lemma_pend_empty()
     ensures
@@ -3157,6 +3519,7 @@ proof fn lemma_pend_empty()
     assert(pend_v(Seq::<Pending>::empty()) =~= Seq::<PendingV>::empty());
 }
 
+
 proof fn lemma_pend_one(pending: Pending)
     ensures
         pend_v(seq![pending]) == seq![pending@],
@@ -3164,7 +3527,9 @@ proof fn lemma_pend_one(pending: Pending)
     assert(pend_v(seq![pending]) =~= seq![pending@]);
 }
 
-/// `spec_resume`: a suspended awaiter is offered again from `since`.
+
+/// `spec_resume`: a suspended awaiter is offered immediately.  A callback
+/// on a pending, acquired, or halted task only records the resume.
 fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u64) -> (r: Objects)
     ensures
         r@ == spec_resume(objs@, awaiter@, awaited@, since, now),
@@ -3188,7 +3553,7 @@ fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u6
                             pid: None,
                             ttl: None,
                             lease_timeout_at: None,
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             resumes,
                         };
                         let Obj { promise, task: _ } = found;
@@ -3208,6 +3573,7 @@ fn resume(objs: Objects, awaiter: &String, awaited: &String, since: u64, now: u6
         },
     }
 }
+
 
 /// `spec_step_object`: one object's due work.
 fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: (Objects, Vec<Outbound>))
@@ -3286,8 +3652,9 @@ fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: 
     }
 }
 
+
 /// `spec_run_due`: a schedule fires, or the first due object steps.
-pub fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+pub fn run_due(doc: DocumentBody, now: u64, retry_timeout: u64) -> (r: (DocumentBody, Vec<Pending>, Vec<Outbound>))
     ensures
         spec_run_due(doc@, now, retry_timeout) == (r.0@, None::<Response>, pend_v(r.1@), notes_v(r.2@)),
 {
@@ -3296,7 +3663,7 @@ pub fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>
         lemma_pend_empty();
     }
     match doc {
-        Doc::Schedule(Some(schedule)) => {
+        DocumentBody::Schedule(Some(schedule)) => {
             if schedule.next_run_at <= now {
                 let at = schedule.next_run_at;
                 let pending = Pending {
@@ -3314,32 +3681,33 @@ pub fn run_due(doc: Doc, now: u64, retry_timeout: u64) -> (r: (Doc, Vec<Pending>
                 next.next_run_at = next_cron(&next.cron, at);
                 let mut born: Vec<Pending> = Vec::new();
                 born.push(pending);
-                (Doc::Schedule(Some(next)), born, Vec::new())
+                (DocumentBody::Schedule(Some(next)), born, Vec::new())
             } else {
-                (Doc::Schedule(Some(schedule)), Vec::new(), Vec::new())
+                (DocumentBody::Schedule(Some(schedule)), Vec::new(), Vec::new())
             }
         },
-        Doc::Origin(objs) => {
+        DocumentBody::Workflow(objs) => {
             match objs.first_due(now) {
                 Some(id) => {
                     let (objs, notes) = step_object(objs, &id, now, retry_timeout);
-                    (Doc::Origin(objs), Vec::new(), notes)
+                    (DocumentBody::Workflow(objs), Vec::new(), notes)
                 },
-                None => (Doc::Origin(objs), Vec::new(), Vec::new()),
+                None => (DocumentBody::Workflow(objs), Vec::new(), Vec::new()),
             }
         },
-        Doc::Schedule(None) => (Doc::Schedule(None), Vec::new(), Vec::new()),
+        DocumentBody::Schedule(None) => (DocumentBody::Schedule(None), Vec::new(), Vec::new()),
     }
 }
 
+
 /// `spec_occurrence`: the promise a schedule occurrence creates, once it is due.
-pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
+pub fn create_occurrence(doc: DocumentBody, pending: &Pending, now: u64) -> (r: DocumentBody)
     ensures
         r@ == spec_occurrence(doc@, pending@, now),
 {
     let objs = open(doc);
     if objs.contains(&pending.promise) || now < pending.at {
-        return Doc::Origin(objs);
+        return DocumentBody::Workflow(objs);
     }
     let timeout_at = sat_add(pending.at, pending.timeout);
     let runnable = targeted(&pending.tags) && !timer(&pending.tags);
@@ -3353,7 +3721,7 @@ pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
         Some(t) => {
             if t.state == TaskState::Pending {
                 let mut u = t;
-                u.retry_timeout_at = Some(offer_at(&pending.tags, pending.at));
+                u.retry_timeout_at = Some(now);
                 Some(u)
             } else {
                 Some(t)
@@ -3361,12 +3729,13 @@ pub fn create_occurrence(doc: Doc, pending: &Pending, now: u64) -> (r: Doc)
         },
         None => None,
     };
-    Doc::Origin(objs.put(&pending.promise, Obj { promise, task }))
+    DocumentBody::Workflow(objs.put(&pending.promise, Obj { promise, task }))
 }
+
 
 /// `spec_sweep`: `run_due` again and again, until a step leaves the document
 /// as it was or `limit` steps have run. What the steps queue and tell, in order.
-pub fn sweep(from: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: (Doc, Vec<Pending>, Vec<Outbound>))
+pub fn sweep(from: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r: (DocumentBody, Vec<Pending>, Vec<Outbound>))
     ensures
         (r.0@, pend_v(r.1@), notes_v(r.2@)) == spec_sweep(from@, now, retry_timeout, limit as nat),
 {
@@ -3391,7 +3760,7 @@ pub fn sweep(from: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: (Doc, V
         decreases left,
     {
         let (next, mut p, mut n) = run_due(copy(&doc), now, retry_timeout);
-        if same_doc(&next, &doc) {
+        if same_body(&next, &doc) {
             proof {
                 assert(spec_run_due(doc@, now, retry_timeout).0 == doc@);
                 assert(left as nat != 0);
@@ -3422,12 +3791,447 @@ pub fn sweep(from: Doc, now: u64, retry_timeout: u64, limit: u64) -> (r: (Doc, V
     (doc, born, notes)
 }
 
+
+/// Whether a document still has work due at `now`.
+pub fn due(doc: &DocumentBody, now: u64) -> (r: bool)
+    ensures
+        r == (spec_earliest_in(doc@, now) is Some),
+{
+    earliest_in(doc, now).is_some()
+}
+
+
+fn same_key_string(a: &String, b: &String) -> (r: bool)
+    ensures
+        r == (a@ == b@),
+{
+    *a == *b
+}
+
+
+fn same_outbound_key(a: &Outbound, b: &Outbound) -> (r: bool)
+    ensures
+        r == (spec_note_key(a@) == spec_note_key(b@)),
+{
+    match (a, b) {
+        (Outbound::Execute { id: x, .. }, Outbound::Execute { id: y, .. }) =>
+            same_key_string(x, y),
+        (
+            Outbound::Unblock { address: xa, promise: xp },
+            Outbound::Unblock { address: ya, promise: yp },
+        ) => same_key_string(xa, ya) && same_key_string(&xp.id, &yp.id),
+        _ => false,
+    }
+}
+
+
+fn contains_outbound_key(notes: &Vec<Outbound>, note: &Outbound) -> (r: bool)
+    ensures
+        r == exists|i: int| 0 <= i < notes@.len()
+            && spec_note_key(notes@[i]@) == spec_note_key(note@),
+{
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            forall|j: int| 0 <= j < i ==>
+                spec_note_key(notes@[j]@) != spec_note_key(note@),
+        decreases notes@.len() - i,
+    {
+        if same_outbound_key(&notes[i], note) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+
+/// An Execute survives the atomic request only while the task it names is
+/// still pending at that version. The handler may consume work discovered by
+/// the pre-sweep (for example by acquiring or settling that task), in which
+/// case the not-yet-committed Execute must be cancelled. Unblocks describe a
+/// listener removed by closure and cannot be consumed by a later handler.
+fn outbound_relevant(doc: &DocumentBody, note: &Outbound) -> (r: bool)
+    ensures
+        r == spec_note_relevant(doc@, note@),
+{
+    match note {
+        Outbound::Execute { id, version } => match peek(doc, id) {
+            Some(object) => match object.task {
+                Some(task) => task.state == TaskState::Pending && task.version == *version,
+                None => false,
+            },
+            None => false,
+        },
+        Outbound::Unblock { .. } => true,
+    }
+}
+
+
+/// Canonical insertion-order representation of the keyed effect set.
+fn keyed_notes(doc: &DocumentBody, notes: Vec<Outbound>) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_keyed_notes(doc@, notes_v(notes@), notes@.len() as nat),
+{
+    let mut out: Vec<Outbound> = Vec::new();
+    let mut i: usize = 0;
+    while i < notes.len()
+        invariant
+            i <= notes@.len(),
+            notes_v(out@) == spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+        decreases notes@.len() - i,
+    {
+        let relevant = outbound_relevant(doc, &notes[i]);
+        let present = contains_outbound_key(&out, &notes[i]);
+        proof {
+            assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+            assert forall|j: int| 0 <= j < out@.len() implies
+                notes_v(out@)[j] == out@[j]@ by {};
+            if present {
+                let j = choose|j: int| 0 <= j < out@.len()
+                    && spec_note_key(out@[j]@) == spec_note_key(notes@[i as int]@);
+                assert(0 <= j < notes_v(out@).len());
+                assert(spec_note_key(notes_v(out@)[j])
+                    == spec_note_key(notes_v(notes@)[i as int]));
+            } else {
+                assert forall|j: int| 0 <= j < notes_v(out@).len() implies
+                    spec_note_key(notes_v(out@)[j])
+                        != spec_note_key(notes_v(notes@)[i as int]) by {
+                    assert(notes_v(out@)[j] == out@[j]@);
+                    assert(notes_v(notes@)[i as int] == notes@[i as int]@);
+                };
+            }
+            assert(spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat)
+                == spec_keyed_insert(
+                    doc@,
+                    spec_keyed_notes(doc@, notes_v(notes@), i as nat),
+                    notes_v(notes@)[i as int],
+                ));
+        }
+        if relevant && !present {
+            let ghost before = out@;
+            out.push(copy(&notes[i]));
+            proof {
+                assert(notes_v(before.push(notes@[i as int])) =~=
+                    notes_v(before).push(notes@[i as int]@));
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        } else {
+            proof {
+                assert(notes_v(out@)
+                    == spec_keyed_notes(doc@, notes_v(notes@), (i + 1) as nat));
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+
+fn offer_is_committed(
+    before: &Objects,
+    after: &Objects,
+    id: &String,
+    committed_at: u64,
+) -> (r: bool)
+    ensures
+        r == echod_concrete_spec::document::offer_committed(
+            before@,
+            after@,
+            id@,
+            committed_at,
+        ),
+{
+    let Some(new_obj) = after.get(id) else {
+        return false;
+    };
+    let Some(new_task) = &new_obj.task else {
+        return false;
+    };
+    if new_obj.promise.state != PromiseState::Pending
+        || new_task.state != TaskState::Pending
+    {
+        return false;
+    }
+    let Some(retry_at) = new_task.retry_timeout_at else {
+        return false;
+    };
+    if retry_at <= committed_at {
+        return false;
+    }
+    let Some(old_obj) = before.get(id) else {
+        return true;
+    };
+    if same_obj(&old_obj, &new_obj) {
+        return false;
+    }
+    match &old_obj.task {
+        Some(old_task) if old_task.state == TaskState::Pending => {
+            match old_task.retry_timeout_at {
+                Some(at) => at <= committed_at,
+                None => true,
+            }
+        },
+        _ => true,
+    }
+}
+
+
+fn listener_is_committed(
+    before: &Objects,
+    after: &Objects,
+    promise: &String,
+    address: &String,
+) -> (r: bool)
+    ensures
+        r == echod_concrete_spec::document::listener_committed(
+            before@,
+            after@,
+            promise@,
+            address@,
+        ),
+{
+    let Some(old_obj) = before.get(promise) else {
+        return false;
+    };
+    if !contains_str(&old_obj.promise.listeners, address) {
+        return false;
+    }
+    let Some(new_obj) = after.get(promise) else {
+        return false;
+    };
+    new_obj.promise.state != PromiseState::Pending
+        && !contains_str(&new_obj.promise.listeners, address)
+}
+
+
+proof fn lemma_notes_push(notes: Seq<Outbound>, note: Outbound)
+    ensures
+        notes_v(notes.push(note)) == notes_v(notes).push(note@),
+{
+    lemma_outbound_view(&note);
+    assert(notes_v(notes.push(note)) =~= notes_v(notes).push(note@));
+}
+
+
+fn committed_notes(
+    before: &DocumentBody,
+    after: &DocumentBody,
+    committed_at: u64,
+) -> (r: Vec<Outbound>)
+    ensures
+        notes_v(r@) == spec_committed_notes(before@, after@, committed_at),
+{
+    let (DocumentBody::Workflow(old), DocumentBody::Workflow(new)) = (before, after) else {
+        proof {
+            lemma_notes_empty();
+        }
+        return Vec::new();
+    };
+    proof {
+        use_type_invariant(old);
+        use_type_invariant(new);
+        lemma_sorted_keys(old.entries@);
+        lemma_sorted_keys(new.entries@);
+    }
+    let mut notes = Vec::new();
+    let mut i = 0;
+    while i < new.entries.len()
+        invariant
+            i <= new.entries.len(),
+            spec_sorted_present(new@) == spec_keys_of(new.entries@),
+            notes_v(notes@) == spec_execute_notes(
+                old@,
+                new@,
+                committed_at,
+                spec_sorted_present(new@),
+                i as nat,
+            ),
+        decreases new.entries.len() - i,
+    {
+        let id = &new.entries[i].0;
+        assert(spec_sorted_present(new@)[i as int] == id@);
+        assert(new@.contains_key(id@));
+        if offer_is_committed(old, new, id, committed_at) {
+            let obj = new.get(id).unwrap();
+            let task = obj.task.unwrap();
+            let ghost prior = notes@;
+            notes.push(Outbound::Execute {
+                id: id.clone(),
+                version: task.version,
+            });
+            proof {
+                lemma_notes_push(prior, notes@[prior.len() as int]);
+            }
+        }
+        assert(notes_v(notes@) == spec_execute_notes(
+            old@,
+            new@,
+            committed_at,
+            spec_sorted_present(new@),
+            (i + 1) as nat,
+        ));
+        i += 1;
+    }
+    let ghost execute_notes = notes@;
+    let mut j = 0;
+    while j < old.entries.len()
+        invariant
+            j <= old.entries.len(),
+            spec_sorted_entries(old.entries@),
+            spec_sorted_present(old@) == spec_keys_of(old.entries@),
+            notes_v(notes@) == notes_v(execute_notes)
+                + spec_unblock_notes(
+                    old@,
+                    new@,
+                    spec_sorted_present(old@),
+                    j as nat,
+                ),
+        decreases old.entries.len() - j,
+    {
+        let promise = &old.entries[j].0;
+        assert(spec_sorted_present(old@)[j as int] == promise@);
+        assert(old@.contains_key(promise@)) by {
+            lemma_objs_key(old.entries@, promise@);
+        }
+        let old_obj = old.get(promise).unwrap();
+        let mut k = 0;
+        let ghost before_promise_notes = notes@;
+        while k < old_obj.promise.listeners.len()
+            invariant
+                k <= old_obj.promise.listeners.len(),
+                old@.contains_key(promise@),
+                old_obj@ == old@[promise@],
+                notes_v(notes@) == notes_v(before_promise_notes)
+                    + spec_unblock_notes_for(
+                        old@,
+                        new@,
+                        promise@,
+                        strs_v(old_obj.promise.listeners@),
+                        k as nat,
+                    ),
+            decreases old_obj.promise.listeners.len() - k,
+        {
+            let address = &old_obj.promise.listeners[k];
+            assert(strs_v(old_obj.promise.listeners@)[k as int] == address@);
+            if listener_is_committed(old, new, promise, address) {
+                let new_obj = new.get(promise).unwrap();
+                let promise_record = record(promise, &new_obj.promise);
+                let ghost prior = notes@;
+                let outbound = Outbound::Unblock {
+                    address: address.clone(),
+                    promise: promise_record,
+                };
+                let ghost outbound_v = outbound@;
+                notes.push(outbound);
+                proof {
+                    echod_concrete_spec::model::lemma_string_of(*promise);
+                    lemma_notes_push(prior, notes@[prior.len() as int]);
+                    assert(outbound_v == NoteV::Unblock {
+                        address: address@,
+                        promise: spec_record(*promise, new_obj.promise@),
+                    });
+                    assert(new_obj@ == new@[promise@]);
+                }
+            }
+            assert(notes_v(notes@) == notes_v(before_promise_notes)
+                + spec_unblock_notes_for(
+                    old@,
+                    new@,
+                    promise@,
+                    strs_v(old_obj.promise.listeners@),
+                    (k + 1) as nat,
+                ));
+            k += 1;
+        }
+        assert(notes_v(notes@) == notes_v(execute_notes)
+            + spec_unblock_notes(
+                old@,
+                new@,
+                spec_sorted_present(old@),
+                (j + 1) as nat,
+            ));
+        j += 1;
+    }
+    notes
+}
+
+
+/// One complete request transition.
+///
+/// Workflow work already due is drained before the raw handler, so reads
+/// and errors persist the projection they observed.  Work made immediately
+/// due by the handler is drained afterwards.  This includes the first
+/// Execute (and rearm) for runnable creates, releases, continues, and
+/// suspended resumes, and all callbacks/listeners created by settlement.
+///
+/// Each drain is bounded independently.  If either bound is exhausted while
+/// work remains due, the transition is rejected as 503 and returns the
+/// original document with no occurrences or notifications.  Consequently a
+/// caller can make every returned effect conditional on the same document
+/// CAS.  A lost CAS discards the effects and re-runs this transition.
+pub fn request_transition(
+    doc: DocumentBody,
+    request: &Request,
+    now: u64,
+    retry_timeout: u64,
+    limit: u64,
+) -> (r: (DocumentBody, Response, Vec<Pending>, Vec<Outbound>))
+    ensures
+        (r.0@, r.1, pend_v(r.2@), notes_v(r.3@))
+            == spec_request_transition(doc@, *request, now, retry_timeout, limit as nat),
+{
+    let workflow = match &doc {
+        DocumentBody::Workflow(_) => true,
+        DocumentBody::Schedule(_) => false,
+    };
+    if !workflow {
+        let (doc, response) = handle(doc, request, now);
+        return (doc, response, Vec::new(), Vec::new());
+    }
+
+    proof {
+        lemma_pend_empty();
+        lemma_notes_empty();
+    }
+    let original = copy(&doc);
+    let (before, mut born, mut notes) = sweep(doc, now, retry_timeout, limit);
+    if due(&before, now) {
+        return (original, unavailable(request), Vec::new(), Vec::new());
+    }
+    let (handled, response) = handle(before, request, now);
+    let (after, mut more_born, mut more_notes) =
+        sweep(handled, now, retry_timeout, limit);
+    if due(&after, now) {
+        return (original, unavailable(request), Vec::new(), Vec::new());
+    }
+    let ghost born0 = born@;
+    let ghost notes0 = notes@;
+    let ghost more_born0 = more_born@;
+    let ghost more_notes0 = more_notes@;
+    born.append(&mut more_born);
+    notes.append(&mut more_notes);
+    proof {
+        lemma_map_values_add(born0, more_born0);
+        lemma_notes_add(notes0, more_notes0);
+    }
+    // The endpoint pair is authoritative.  Canonicalizing here cancels a
+    // pre-sweep Execute consumed by the handler and gives one sequence entry
+    // per protocol key, independent of intermediate sweep order.
+    let notes = committed_notes(&original, &after, now);
+    (after, response, born, notes)
+}
+
+
 proof fn lemma_map_values_add(a: Seq<Pending>, b: Seq<Pending>)
     ensures
         pend_v(a + b) == pend_v(a) + pend_v(b),
 {
     assert(pend_v(a + b) =~= pend_v(a) + pend_v(b));
 }
+
 
 proof fn lemma_notes_add(a: Seq<Outbound>, b: Seq<Outbound>)
     ensures
@@ -3436,25 +4240,26 @@ proof fn lemma_notes_add(a: Seq<Outbound>, b: Seq<Outbound>)
     assert(notes_v(a + b) =~= notes_v(a) + notes_v(b));
 }
 
+
 } // verus!
 
 // ---------------------------------------------------------------------------
-// The codec. Verus reads it through `spec_encode` and `spec_read`: what
+// The codec. Verus reads it through `spec_encode_body` and `spec_read`: what
 // `encode` wrote, `decode` reads back, and a body that does not parse is
 // the empty document for the key.
 // ---------------------------------------------------------------------------
 
 #[cfg(not(verus_keep_ghost))]
-fn encode(doc: &Doc) -> Vec<u8> {
+fn encode_body(doc: &DocumentBody) -> Vec<u8> {
     serde_json::to_vec(doc).unwrap_or_default()
 }
 
 #[cfg(not(verus_keep_ghost))]
-fn decode(key: &String, body: &Vec<u8>) -> Doc {
-    match serde_json::from_slice::<Doc>(body) {
-        Ok(Doc::Origin(objs)) => Doc::Origin(objs.in_order()),
+fn decode_body(key: &String, body: &Vec<u8>) -> DocumentBody {
+    match serde_json::from_slice::<DocumentBody>(body) {
+        Ok(DocumentBody::Workflow(objs)) => DocumentBody::Workflow(objs.in_order()),
         Ok(doc) => doc,
-        Err(_) => empty_doc(key),
+        Err(_) => empty_body(key),
     }
 }
 
@@ -3472,24 +4277,26 @@ impl Objects {
 
 /// Serialization is uninterpreted under Verus; the records carry no serde there.
 #[cfg(verus_keep_ghost)]
-fn encode(_doc: &Doc) -> Vec<u8> {
+fn encode_body(_doc: &DocumentBody) -> Vec<u8> {
     Vec::new()
 }
 
 #[cfg(verus_keep_ghost)]
-fn decode(key: &String, _body: &Vec<u8>) -> Doc {
-    empty_doc(key)
+fn decode_body(key: &String, _body: &Vec<u8>) -> DocumentBody {
+    empty_body(key)
 }
 
 verus! {
 
-pub assume_specification [encode](doc: &Doc) -> (r: Vec<u8>)
+pub assume_specification [encode_body](doc: &DocumentBody) -> (r: Vec<u8>)
     ensures
-        r@ == spec_encode(doc@);
+        r@ == spec_encode_body(doc@);
 
-pub assume_specification [decode](key: &String, body: &Vec<u8>) -> (r: Doc)
+
+pub assume_specification [decode_body](key: &String, body: &Vec<u8>) -> (r: DocumentBody)
     ensures
         r@ == spec_read(key@, body@);
+
 
 // ---------------------------------------------------------------------------
 // The node: what it sends
@@ -3504,6 +4311,7 @@ fn hash_key(key: &String) -> (r: u64)
     fnv1a(key.as_str())
 }
 
+
 /// `spec_reply`.
 fn reply(client: &String, id: u64, response: Response) -> (r: (Pid, Message))
     ensures
@@ -3515,6 +4323,7 @@ fn reply(client: &String, id: u64, response: Response) -> (r: (Pid, Message))
     (Pid::Outside, Message::Output(Output::Response { client: client.clone(), id, response }))
 }
 
+
 fn one(message: (Pid, Message)) -> (r: Vec<(Pid, Message)>)
     ensures
         r@ == seq![message],
@@ -3523,6 +4332,7 @@ fn one(message: (Pid, Message)) -> (r: Vec<(Pid, Message)>)
     v.push(message);
     v
 }
+
 
 /// `spec_notify`.
 fn notify(note: &Outbound) -> (r: (Pid, Message))
@@ -3545,6 +4355,7 @@ fn notify(note: &Outbound) -> (r: (Pid, Message))
     }
 }
 
+
 proof fn lemma_notes_index(notes: Seq<NoteV>)
     ensures
         spec_notes(notes).len() == notes.len(),
@@ -3562,12 +4373,6 @@ proof fn lemma_notes_index(notes: Seq<NoteV>)
     }
 }
 
-spec fn spec_sent(reply: Option<(Seq<char>, u64, Response)>, notes: Seq<NoteV>) -> Seq<(Pid, Message)> {
-    (match reply {
-        Some((client, id, response)) => seq![spec_reply(client, id, response)],
-        None => Seq::empty(),
-    }) + spec_notes(notes)
-}
 
 /// The reply, then each note: `send + spec_notes(notify)`.
 fn sent(reply_slot: &Option<(String, u64, Response)>, notes: &Vec<Outbound>) -> (r: Vec<(Pid, Message)>)
@@ -3603,6 +4408,7 @@ fn sent(reply_slot: &Option<(String, u64, Response)>, notes: &Vec<Outbound>) -> 
     out
 }
 
+
 // ---------------------------------------------------------------------------
 // The node: the cache
 // ---------------------------------------------------------------------------
@@ -3622,6 +4428,7 @@ proof fn lemma_cache_unroll(docs: Seq<CachedV>, key: Seq<char>, body: Seq<u8>, e
         lemma_cache_unroll(docs, key, body, etag, j - 1);
     }
 }
+
 
 /// The first cache entry with the key.
 fn find_cached(cache: &Vec<Cached>, key: &String) -> (r: Option<usize>)
@@ -3647,6 +4454,7 @@ fn find_cached(cache: &Vec<Cached>, key: &String) -> (r: Option<usize>)
     None
 }
 
+
 proof fn lemma_docs_index(cache: Seq<Cached>)
     ensures
         docs_v(cache).len() == cache.len(),
@@ -3654,10 +4462,11 @@ proof fn lemma_docs_index(cache: Seq<Cached>)
 {
 }
 
+
 /// `spec_remember`: the document under its key, in place or at the end.
-fn remember_in(cache: &mut Vec<Cached>, key: &String, doc: Doc, etag: Option<Etag>)
+fn remember_in(cache: &mut Vec<Cached>, key: &String, doc: DocumentBody, etag: Option<Etag>)
     ensures
-        docs_v(final(cache)@) == spec_remember(docs_v(old(cache)@), key@, spec_encode(doc@), etag_v(etag), 0),
+        docs_v(final(cache)@) == spec_remember(docs_v(old(cache)@), key@, spec_encode_body(doc@), etag_v(etag), 0),
 {
     let ghost before = docs_v(cache@);
     proof {
@@ -3689,6 +4498,7 @@ fn remember_in(cache: &mut Vec<Cached>, key: &String, doc: Doc, etag: Option<Eta
     }
 }
 
+
 /// `spec_forget`: the key leaves the cache.
 fn forget_in(cache: &mut Vec<Cached>, key: &String)
     ensures
@@ -3717,8 +4527,9 @@ fn forget_in(cache: &mut Vec<Cached>, key: &String)
     }
 }
 
+
 /// `spec_keep`: an empty document that was never written leaves the cache.
-fn keep_in(cache: &mut Vec<Cached>, key: &String, doc: Doc, etag: Option<Etag>)
+fn keep_in(cache: &mut Vec<Cached>, key: &String, doc: DocumentBody, etag: Option<Etag>)
     ensures
         docs_v(final(cache)@) == spec_keep(docs_v(old(cache)@), key@, doc@, etag_v(etag)),
 {
@@ -3729,12 +4540,14 @@ fn keep_in(cache: &mut Vec<Cached>, key: &String, doc: Doc, etag: Option<Etag>)
     }
 }
 
+
 proof fn lemma_pend_add(a: Seq<Pending>, b: Seq<Pending>)
     ensures
         pend_v(a + b) == pend_v(a) + pend_v(b),
 {
     assert(pend_v(a + b) =~= pend_v(a) + pend_v(b));
 }
+
 
 proof fn lemma_pend_skip(a: Seq<Pending>)
     requires
@@ -3744,6 +4557,7 @@ proof fn lemma_pend_skip(a: Seq<Pending>)
 {
     assert(pend_v(a.remove(0)) =~= pend_v(a).skip(1));
 }
+
 
 /// `spec_flight`: a flight just opened.
 fn new_flight(op: u64, key: String, etag: Option<Etag>, now: u64, caller: Option<(String, u64)>, job: Job) -> (r: Flight)
@@ -3769,6 +4583,7 @@ fn new_flight(op: u64, key: String, etag: Option<Etag>, now: u64, caller: Option
     }
 }
 
+
 /// `(x + 1) as u64`: the counter, wrapping where the model's cast wraps.
 fn bump(x: u64) -> (r: u64)
     ensures
@@ -3785,12 +4600,14 @@ fn bump(x: u64) -> (r: u64)
     }
 }
 
+
 spec fn best_v(best: Option<(u64, String)>) -> Option<(u64, Seq<char>)> {
     match best {
         Some((at, key)) => Some((at, key@)),
         None => None,
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // The node: flights
@@ -3806,10 +4623,10 @@ impl Node {
     }
 
     /// `spec_cached`: the document in the cache, and its etag.
-    fn cached(&self, key: &String) -> (r: Option<(Doc, Option<Etag>)>)
+    fn cached(&self, key: &String) -> (r: Option<(DocumentBody, Option<Etag>)>)
         ensures
             match r {
-                Some((doc, etag)) => spec_cached(self@, key@) == Some(CachedV { key: key@, body: spec_encode(doc@), etag: etag_v(etag) }),
+                Some((doc, etag)) => spec_cached(self@, key@) == Some(CachedV { key: key@, body: spec_encode_body(doc@), etag: etag_v(etag) }),
                 None => spec_cached(self@, key@) is None,
             },
     {
@@ -3842,7 +4659,7 @@ impl Node {
         match self.cached(&key) {
             Some((doc, etag)) => {
                 proof {
-                    axiom_decode_encode(doc@);
+                    axiom_decode_encode_body(doc@);
                 }
                 let flight = new_flight(0, key, etag, now, caller, job);
                 self.decide(flight, doc)
@@ -3856,13 +4673,13 @@ impl Node {
                 proof {
                     echod_concrete_spec::model::lemma_string_of(key);
                 }
-                (next, one((Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key } })))
+                (next, one((Pid::Store, Message::StoreReq { op, request: StoreReq::Get { key } })))
             },
         }
     }
 
     /// `spec_decide`: run the job; answer at once when the document stands, else write it back.
-    fn decide(self, flight: Flight, doc: Doc) -> (r: (Node, Vec<(Pid, Message)>))
+    fn decide(self, flight: Flight, doc: DocumentBody) -> (r: (Node, Vec<(Pid, Message)>))
         requires
             self.next_op < u64::MAX,
         ensures
@@ -3873,7 +4690,7 @@ impl Node {
             lemma_notes_empty();
         }
         let Flight { key, job, etag, now, caller, .. } = flight;
-        let (next, answer, born, notify): (Doc, Option<Response>, Vec<Pending>, Vec<Outbound>) = match &job {
+        let (next, answer, born, notify): (DocumentBody, Option<Response>, Vec<Pending>, Vec<Outbound>) = match &job {
             Job::External { request } => {
                 let (next, response) = handle(doc, request, now);
                 (next, Some(response), Vec::new(), Vec::new())
@@ -3891,16 +4708,16 @@ impl Node {
             },
             None => None,
         };
-        let previous: Doc = match self.cached(&key) {
+        let previous: DocumentBody = match self.cached(&key) {
             Some((d, _)) => {
                 proof {
-                    axiom_decode_encode(d@);
+                    axiom_decode_encode_body(d@);
                 }
                 d
             },
-            None => empty_doc(&key),
+            None => empty_body(&key),
         };
-        if same_doc(&next, &previous) && born.len() == 0 {
+        if same_body(&next, &previous) && born.len() == 0 {
             let mut node = self;
             node.flight = None;
             keep_in(&mut node.cache, &key, next, etag);
@@ -3908,20 +4725,20 @@ impl Node {
             (node, send)
         } else {
             let op = self.next_op;
-            let body = encode(&next);
+            let body = encode_body(&next);
             proof {
-                echod_concrete_spec::model::lemma_bytes_realised(spec_encode(next@));
-                axiom_vec_ext(body, spec_bytes(spec_encode(next@)));
+                echod_concrete_spec::model::lemma_bytes_realised(spec_encode_body(next@));
+                axiom_vec_ext(body, spec_bytes(spec_encode_body(next@)));
                 echod_concrete_spec::model::lemma_string_of(key);
             }
-            let call = match &etag {
+            let request = match &etag {
                 Some(tag) => {
                     proof {
                         echod_concrete_spec::model::lemma_string_of(tag.0);
                     }
-                    StoreCall::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
+                    StoreReq::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
                 },
-                None => StoreCall::PutIfNoneMatch { key: key.clone(), body },
+                None => StoreReq::PutIfNoneMatch { key: key.clone(), body },
             };
             let flight = Flight {
                 op,
@@ -3939,7 +4756,7 @@ impl Node {
             let mut node = self;
             node.flight = Some(flight);
             node.next_op = op + 1;
-            (node, one((Pid::Store, Message::StoreReq { op, call })))
+            (node, one((Pid::Store, Message::StoreReq { op, request })))
         }
     }
 
@@ -3985,11 +4802,11 @@ impl Node {
     }
 
     /// `spec_store_reply`: the open flight continues with what the store answered.
-    fn store_reply(self, op: u64, outcome: &StoreOutcome) -> (r: (Node, Vec<(Pid, Message)>))
+    fn store_reply(self, op: u64, response: &StoreRes) -> (r: (Node, Vec<(Pid, Message)>))
         requires
             self.next_op < u64::MAX,
         ensures
-            (r.0@, r.1@) == spec_store_reply(self@, op, *outcome),
+            (r.0@, r.1@) == spec_store_reply(self@, op, *response),
     {
         match &self.flight {
             None => (self, Vec::new()),
@@ -3999,11 +4816,11 @@ impl Node {
                     return (self, Vec::new());
                 }
                 if !flight.writing {
-                    match outcome {
-                        StoreOutcome::Got(got) => {
-                            let (doc, etag): (Doc, Option<Etag>) = match got {
-                                Some(pair) => (decode(&flight.key, &pair.0), Some(copy(&pair.1))),
-                                None => (empty_doc(&flight.key), None),
+                    match response {
+                        StoreRes::Get { result: Ok(got) } => {
+                            let (doc, etag): (DocumentBody, Option<Etag>) = match got {
+                                Some(pair) => (decode_body(&flight.key, &pair.0), Some(copy(&pair.1))),
+                                None => (empty_body(&flight.key), None),
                             };
                             let mut flight = flight;
                             flight.etag = etag;
@@ -4011,7 +4828,7 @@ impl Node {
                             node.flight = None;
                             node.decide(flight, doc)
                         },
-                        StoreOutcome::Failed(_) => {
+                        StoreRes::Get { result: Err(_) } => {
                             let mut node = self;
                             node.flight = None;
                             node.fail(flight)
@@ -4019,9 +4836,12 @@ impl Node {
                         _ => (self, Vec::new()),
                     }
                 } else {
-                    match outcome {
-                        StoreOutcome::Written(tag) => self.commit(flight, copy(tag)),
-                        StoreOutcome::Failed(_) => {
+                    match response {
+                        StoreRes::PutIfMatch { result: Ok(tag) }
+                        | StoreRes::PutIfNoneMatch { result: Ok(tag) } =>
+                            self.commit(flight, copy(tag)),
+                        StoreRes::PutIfMatch { result: Err(_) }
+                        | StoreRes::PutIfNoneMatch { result: Err(_) } => {
                             let mut node = self;
                             node.flight = None;
                             node.fail(flight)
@@ -4110,7 +4930,7 @@ impl Node {
             decreases self.cache.len() - i,
         {
             proof {
-                axiom_decode_encode(self.cache@[i as int].doc@);
+                axiom_decode_encode_body(self.cache@[i as int].doc@);
             }
             let entry = &self.cache[i];
             if self.owns(&entry.key) {
@@ -4160,11 +4980,11 @@ impl Node {
         {
             i -= 1;
             proof {
-                axiom_decode_encode(self.cache@[i as int].doc@);
+                axiom_decode_encode_body(self.cache@[i as int].doc@);
             }
             let entry = &self.cache[i];
             if self.owns(&entry.key) {
-                acc = min_u64(doc_deadline(&entry.doc), acc);
+                acc = min_u64(body_deadline(&entry.doc), acc);
             }
         }
         let from_pending = if self.pending.len() == 0 { None } else { Some(self.pending[0].at) };
@@ -4262,18 +5082,18 @@ impl Node {
     }
 
     /// The store-reply arm of `spec_node`.
-    fn after_store_reply(&self, now: u64, op: u64, outcome: &StoreOutcome) -> (r: (Node, Vec<(Pid, Message)>))
+    fn after_store_reply(&self, now: u64, op: u64, response: &StoreRes) -> (r: (Node, Vec<(Pid, Message)>))
         requires
             self.flight is Some,
             self.next_op < u64::MAX,
         ensures
             ({
-                let (next, send) = spec_store_reply(self@, op, *outcome);
+                let (next, send) = spec_store_reply(self@, op, *response);
                 r.0@ == (NodeV { logic: spec_clock(self@.logic, now), wake: spec_wake(next), ..next })
                 && r.1@ == send
             }),
     {
-        let (next, send) = copy(self).store_reply(op, outcome);
+        let (next, send) = copy(self).store_reply(op, response);
         let mut next = next;
         let w = next.next_wake();
         next.wake = w;
@@ -4334,11 +5154,11 @@ impl Node {
                     results_one(next, send)
                 }
             },
-            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
+            ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreRes { op, response } } => {
                 if self.flight.is_none() || self.next_op == u64::MAX {
                     results_one(copy(self), Vec::new())
                 } else {
-                    let (next, send) = self.after_store_reply(now, *op, outcome);
+                    let (next, send) = self.after_store_reply(now, *op, response);
                     results_one(next, send)
                 }
             },
@@ -4350,10 +5170,12 @@ impl Node {
     }
 }
 
+
 /// A node's results, as the specification sees them.
 pub open spec fn node_results_v(pairs: Seq<(Node, Vec<(Pid, Message)>)>) -> Seq<StepResultV<Proc, Pid, Message>> {
     pairs.map_values(|pair: (Node, Vec<(Pid, Message)>)| StepResultV { state: Proc::Node(pair.0@), send: pair.1@ })
 }
+
 
 proof fn lemma_results_empty()
     ensures
@@ -4361,6 +5183,7 @@ proof fn lemma_results_empty()
 {
     assert(node_results_v(Seq::<(Node, Vec<(Pid, Message)>)>::empty()) =~= Seq::<StepResultV<Proc, Pid, Message>>::empty());
 }
+
 
 /// `spec_one`: the one result of a step.
 fn results_one(node: Node, send: Vec<(Pid, Message)>) -> (r: Vec<(Node, Vec<(Pid, Message)>)>)
@@ -4376,5 +5199,13 @@ fn results_one(node: Node, send: Vec<(Pid, Message)>) -> (r: Vec<(Node, Vec<(Pid
     }
     r
 }
+
+
+
+
+} // verus!
+verus! {
+
+
 
 } // verus!

@@ -1,7 +1,7 @@
 //! What a node remembers between requests: the documents it read or wrote.
 //!
 //! Everything is in memory, least recently used first out, bounded by entry
-//! count and by bytes, since an origin's document grows with every promise
+//! count and by bytes, since a workflow document grows with every promise
 //! in it and a count alone bounds nothing. The entries sit in recency
 //! order, least recent first: a hit moves its entry to the end, a put adds
 //! at the end, eviction takes from the front. Each operation ensures it
@@ -10,15 +10,15 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::doc::Loaded;
+use crate::document::Loaded;
 use crate::types::Etag;
 use crate::verified::node::str_eq;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
-use crate::doc::LoadedSpec;
+use crate::document::LoadedSpec;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::EtagSpec;
+use crate::concrete::store::EtagSpec;
 
 verus! {
 

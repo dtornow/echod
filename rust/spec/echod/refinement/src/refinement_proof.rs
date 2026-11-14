@@ -4,6 +4,9 @@
 //! forward-simulation machinery is private to this module.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::Config as ConcreteConfig;
@@ -20,22 +23,25 @@ mod interpretation {
 //! interpretation lives here, in the proof.
 //!
 //! [`request_agrees`] is one request against the document it names, on both
-//! models: one abstract outcome, the same response, the next document
+//! models: one abstract response, the same response, the next document
 //! reading as the next store, every other key as before. The Lean
 //! `refinement_handlers` proves this per handler. The promise handlers are
 //! proved below. Cargo erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
-    DocV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
-    spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_origin_map,
+    DocumentBodyV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
+    spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map,
     spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
     spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
     spec_schedule_key, spec_tag_is, spec_tag_key, spec_targeted, spec_task_record, spec_timer,
-    spec_with_origin, TkV,
+    spec_with_workflow, TkV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{spec_sat_add, spec_starts};
@@ -197,21 +203,21 @@ pub(crate) open spec fn origin_prefix() -> Seq<char> {
 
 /// What the document under `key` says about the abstract store. An origin
 /// document is a finite map; an empty one is then the empty document.
-pub(crate) open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
+pub(crate) open spec fn doc_rel(key: Seq<char>, doc: DocumentBodyV, s: AStore) -> bool {
     if spec_starts(key, schedule_prefix()) {
         match doc {
-            DocV::Schedule(slot) => slot_rel(slot, key.skip(2), s),
-            DocV::Origin(_) => false,
+            DocumentBodyV::Schedule(slot) => slot_rel(slot, key.skip(2), s),
+            DocumentBodyV::Workflow(_) => false,
         }
     } else if spec_starts(key, origin_prefix()) {
         match doc {
-            DocV::Origin(map) => map.dom().finite() && origin_rel(map, key.skip(2), s),
-            DocV::Schedule(_) => false,
+            DocumentBodyV::Workflow(map) => map.dom().finite() && origin_rel(map, key.skip(2), s),
+            DocumentBodyV::Schedule(_) => false,
         }
     } else {
         match doc {
-            DocV::Origin(map) => map.dom().finite() && map.dom().len() == 0,
-            DocV::Schedule(slot) => slot is None,
+            DocumentBodyV::Workflow(map) => map.dom().finite() && map.dom().len() == 0,
+            DocumentBodyV::Schedule(slot) => slot is None,
         }
     }
 }
@@ -222,19 +228,19 @@ pub(crate) open spec fn doc_rel(key: Seq<char>, doc: DocV, s: AStore) -> bool {
 
 /// What other keys said of `s`, they say of `next`.
 pub(crate) open spec fn others_kept(key: Seq<char>, s: AStore, next: AStore) -> bool {
-    forall|other: Seq<char>, doc: DocV|
+    forall|other: Seq<char>, doc: DocumentBodyV|
         other != key && doc_rel(other, doc, s) ==> #[trigger] doc_rel(other, doc, next)
 }
 
 /// One request, on the document it names and on the abstract store. The
-/// abstract handler has one outcome, it answers what the node answers, it
+/// abstract handler has one response, it answers what the node answers, it
 /// queues and sends nothing, the next document reads as the next store,
 /// every other key reads as before, and the store stays finite.
 pub(crate) open spec fn request_agrees(
     config: AbstractConfig,
     request: Request,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 ) -> bool {
@@ -604,21 +610,21 @@ pub(crate) proof fn lemma_origin_key(origin_chars: Seq<char>)
 }
 
 /// An origin key reads as an origin document, by [`doc_rel`].
-pub(crate) proof fn lemma_origin_doc(key: Seq<char>, origin_chars: Seq<char>, doc: DocV, s: AStore)
+pub(crate) proof fn lemma_origin_doc(key: Seq<char>, origin_chars: Seq<char>, doc: DocumentBodyV, s: AStore)
     requires
         key == spec_origin_key(origin_chars),
         doc_rel(key, doc, s),
     ensures
-        doc is Origin,
-        origin_rel(spec_origin_map(doc), origin_chars, s),
+        doc is Workflow,
+        origin_rel(spec_workflow_map(doc), origin_chars, s),
         spec_opened(doc) == doc,
 {
     lemma_origin_key(origin_chars);
     match doc {
-        DocV::Origin(map) => {
-            assert(spec_opened(doc) == DocV::Origin(map));
+        DocumentBodyV::Workflow(map) => {
+            assert(spec_opened(doc) == DocumentBodyV::Workflow(map));
         },
-        DocV::Schedule(_) => {
+        DocumentBodyV::Schedule(_) => {
             assert(false);
         },
     }
@@ -665,7 +671,7 @@ pub(crate) proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char
     ensures
         others_kept(spec_origin_key(changed), s, next),
 {
-    assert forall|other: Seq<char>, doc: DocV|
+    assert forall|other: Seq<char>, doc: DocumentBodyV|
         other != spec_origin_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
         other,
         doc,
@@ -674,14 +680,14 @@ pub(crate) proof fn lemma_others_kept(s: AStore, next: AStore, changed: Seq<char
         if spec_starts(other, schedule_prefix()) {
         } else if spec_starts(other, origin_prefix()) {
             match doc {
-                DocV::Origin(map) => {
+                DocumentBodyV::Workflow(map) => {
                     let o = other.skip(2);
                     lemma_starts_split(other, origin_prefix());
                     assert(o != changed);
                     assert(same_at_origin(s, next, o));
                     lemma_origin_rel_same(map, o, s, next);
                 },
-                DocV::Schedule(_) => {},
+                DocumentBodyV::Schedule(_) => {},
             }
         } else {
         }
@@ -877,7 +883,7 @@ pub(crate) proof fn lemma_schedule_key(id: Seq<char>)
 }
 
 /// A schedule key reads as a schedule slot, by [`doc_rel`].
-pub(crate) proof fn lemma_schedule_doc(key: Seq<char>, id: Seq<char>, doc: DocV, s: AStore)
+pub(crate) proof fn lemma_schedule_doc(key: Seq<char>, id: Seq<char>, doc: DocumentBodyV, s: AStore)
     requires
         key == spec_schedule_key(id),
         doc_rel(key, doc, s),
@@ -901,7 +907,7 @@ pub(crate) proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed:
         others_kept(spec_schedule_key(changed), s, next),
 {
     lemma_schedule_key(changed);
-    assert forall|other: Seq<char>, doc: DocV|
+    assert forall|other: Seq<char>, doc: DocumentBodyV|
         other != spec_schedule_key(changed) && doc_rel(other, doc, s) implies #[trigger] doc_rel(
         other,
         doc,
@@ -914,7 +920,7 @@ pub(crate) proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed:
             assert(next.schedules.contains_key(id) == s.schedules.contains_key(id));
         } else if spec_starts(other, origin_prefix()) {
             match doc {
-                DocV::Origin(map) => {
+                DocumentBodyV::Workflow(map) => {
                     let o = other.skip(2);
                     assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {
                         &&& s.promises.contains_key(id) == next.promises.contains_key(id)
@@ -924,7 +930,7 @@ pub(crate) proof fn lemma_others_kept_schedule(s: AStore, next: AStore, changed:
                     } by {};
                     lemma_origin_rel_same(map, o, s, next);
                 },
-                DocV::Schedule(_) => {},
+                DocumentBodyV::Schedule(_) => {},
             }
         } else {
         }
@@ -971,7 +977,7 @@ pub(crate) proof fn lemma_origin_reads(key: Seq<char>, origin_chars: Seq<char>, 
         map.dom().finite(),
         origin_rel(map, origin_chars, s),
     ensures
-        doc_rel(key, DocV::Origin(map), s),
+        doc_rel(key, DocumentBodyV::Workflow(map), s),
 {
     lemma_origin_key(origin_chars);
 }
@@ -1128,7 +1134,7 @@ pub(crate) proof fn lemma_origin_insert(
 pub(crate) proof fn lemma_promise_get_agrees(
     config: AbstractConfig,
     id: String,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1149,7 +1155,7 @@ pub(crate) proof fn lemma_promise_get_agrees(
     let o = origin(id@);
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_get(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     assert(origin_rel(map, o, s));
@@ -1173,7 +1179,7 @@ pub(crate) proof fn lemma_promise_get_agrees(
 pub(crate) proof fn lemma_promise_create_agrees(
     config: AbstractConfig,
     req: echod_types::PromiseCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1194,13 +1200,13 @@ pub(crate) proof fn lemma_promise_create_agrees(
     let o = origin(req.id@);
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_create(doc, req, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_promise_create(req, s, now));
     lemma_timer(req.tags);
     lemma_targeted(req.tags);
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+    if req.timeout_at > MAX_TIME || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         assert(outs[0].next == s);
         assert(c_promise_create(doc, req, now) == (doc, c_promise_res(400, None)));
         lemma_others_same(key, s);
@@ -1242,11 +1248,11 @@ pub(crate) proof fn lemma_promise_create_agrees(
         lemma_origin_insert(map, o, s, req.id@, obj, p, t);
         assert(next.promises.dom() == s.promises.dom().insert(req.id@));
         assert(finite_store(next));
-        assert(spec_with_origin(doc, map.insert(req.id@, obj)) == DocV::Origin(map.insert(req.id@, obj)));
+        assert(spec_with_workflow(doc, map.insert(req.id@, obj)) == DocumentBodyV::Workflow(map.insert(req.id@, obj)));
         assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
         lemma_origin_key(o);
         assert(origin_rel(map.insert(req.id@, obj), key.skip(2), next));
-        assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), next));
+        assert(doc_rel(key, DocumentBodyV::Workflow(map.insert(req.id@, obj)), next));
         assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, next, other) by {
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
                 &&& s.promises.contains_key(id) == next.promises.contains_key(id)
@@ -1264,7 +1270,7 @@ pub(crate) proof fn lemma_promise_create_agrees(
 pub(crate) proof fn lemma_promise_settle_agrees(
     config: AbstractConfig,
     req: echod_types::PromiseSettleReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1285,7 +1291,7 @@ pub(crate) proof fn lemma_promise_settle_agrees(
     let o = origin(req.id@);
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     assert(spec_handle(doc, request, now) == c_promise_settle(doc, req, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_promise_settle(req, s, now));
@@ -1371,9 +1377,9 @@ pub(crate) proof fn lemma_promise_settle_agrees(
             assert(outs[0].resp == a_promise_res(200, Some(spec_promise_record(req.id, q))));
             assert(c_promise_settle(doc, req, now).1 == c_promise_res(200, Some(spec_record(req.id, obj.promise))));
             assert(outs[0].next == n);
-            assert(c_promise_settle(doc, req, now).0 == spec_with_origin(doc, map.insert(req.id@, obj)));
+            assert(c_promise_settle(doc, req, now).0 == spec_with_workflow(doc, map.insert(req.id@, obj)));
             assert(map.insert(req.id@, obj).dom() == map.dom().insert(req.id@));
-            assert(doc_rel(key, DocV::Origin(map.insert(req.id@, obj)), n));
+            assert(doc_rel(key, DocumentBodyV::Workflow(map.insert(req.id@, obj)), n));
             assert forall|other: Seq<char>| other != o implies #[trigger] same_at_origin(s, n, other) by {
                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == other implies {
                     &&& s.promises.contains_key(id) == n.promises.contains_key(id)
@@ -1393,7 +1399,7 @@ pub(crate) proof fn lemma_promise_settle_agrees(
 pub(crate) proof fn lemma_promise_handlers_agree(
     config: AbstractConfig,
     request: Request,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -1442,6 +1448,9 @@ mod relation {
 //! handlers. Cargo erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use super::interpretation::{doc_rel, finite_store, others_kept, request_agrees};
@@ -1453,12 +1462,12 @@ use echod_concrete_spec::model::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
-    CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_doc, spec_encode,
+    CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_body, spec_encode_body,
     spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{
-    Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreCall, StoreOutcome,
+    Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreReq, StoreRes,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::requests::{
@@ -1543,10 +1552,10 @@ pub(crate) proof fn lemma_single_present(world: State<AModel>)
 // ---------------------------------------------------------------------------
 
 /// The document a node decides from: its cache, or the empty document.
-pub(crate) open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
+pub(crate) open spec fn loaded(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match spec_cached(node, key) {
         Some(cached) => spec_read(key, cached.body),
-        None => spec_empty_doc(key),
+        None => spec_empty_body(key),
     }
 }
 
@@ -1555,8 +1564,8 @@ pub(crate) open spec fn loaded(node: NodeV, key: Seq<char>) -> DocV {
 /// occurrences born, the dispatches.
 /// Opaque: it holds the whole handler semantics, read where a proof needs it.
 #[verifier::opaque]
-pub(crate) open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64) -> (
-    DocV,
+pub(crate) open spec fn decision(flight: FlightV, doc: DocumentBodyV, retry_timeout: u64) -> (
+    DocumentBodyV,
     Option<Response>,
     Seq<PendingV>,
     Seq<NoteV>,
@@ -1578,7 +1587,7 @@ pub(crate) open spec fn decision(flight: FlightV, doc: DocV, retry_timeout: u64)
 
 /// The document a node stands for under `key`: what its flight on that key
 /// decides, else what it holds.
-pub(crate) open spec fn intended(node: NodeV, key: Seq<char>) -> DocV {
+pub(crate) open spec fn intended(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match node.flight {
         Some(flight) if flight.key == key => decision(flight, loaded(node, key), node.retry_timeout).0,
         _ => loaded(node, key),
@@ -1591,9 +1600,9 @@ pub(crate) open spec fn owner(fleet: ConcreteConfig, key: Seq<char>) -> int {
 }
 
 /// The document the concrete world stands for under `key`.
-pub(crate) open spec fn effective(fleet: ConcreteConfig, world: State<CModel>, key: Seq<char>) -> DocV {
+pub(crate) open spec fn effective(fleet: ConcreteConfig, world: State<CModel>, key: Seq<char>) -> DocumentBodyV {
     if fleet.nodes == 0 {
-        spec_empty_doc(key)
+        spec_empty_body(key)
     } else {
         intended(node_at(world, owner(fleet, key)), key)
     }
@@ -1761,7 +1770,7 @@ pub(crate) open spec fn flight_ok(node: NodeV) -> bool {
                 &&& spec_cached(node, flight.key) is None
             } else {
                 &&& flight.etag == cached_etag(node, flight.key)
-                &&& flight.decided == Some(spec_encode(next))
+                &&& flight.decided == Some(spec_encode_body(next))
                 &&& flight.born == born
                 &&& flight.notify == notes
                 &&& flight.reply == flight_reply(flight, reply)
@@ -1798,7 +1807,7 @@ pub(crate) open spec fn applied_write(i: int, node: NodeV, store: CStore, key: S
 /// the etag the cache quotes. A cache entry without an etag is a key the
 /// store holds absent.
 pub(crate) open spec fn cache_entry_ok(key: Seq<char>, cached: CachedV, store: CStore) -> bool {
-    &&& cached.body == spec_encode(spec_read(key, cached.body))
+    &&& cached.body == spec_encode_body(spec_read(key, cached.body))
     &&& match cached.etag {
         Some(etag) => physical(store, key) == Some(cached.body) && etag == spec_etag_chars(
             cached.body,
@@ -1857,19 +1866,19 @@ pub(crate) open spec fn flight_op(node: NodeV) -> Option<u64> {
     }
 }
 
-/// The call a flight sent: a read of its key, or the conditional write of
+/// The request a flight sent: a read of its key, or the conditional write of
 /// what it decided.
-pub(crate) open spec fn request_of(flight: FlightV) -> StoreCall {
+pub(crate) open spec fn request_of(flight: FlightV) -> StoreReq {
     if !flight.writing {
-        StoreCall::Get { key: spec_string(flight.key) }
+        StoreReq::Get { key: spec_string(flight.key) }
     } else {
         match flight.etag {
-            Some(chars) => StoreCall::PutIfMatch {
+            Some(chars) => StoreReq::PutIfMatch {
                 key: spec_string(flight.key),
                 body: echod_concrete_spec::model::spec_bytes(flight.decided.unwrap()),
                 etag: Etag(spec_string(chars)),
             },
-            None => StoreCall::PutIfNoneMatch {
+            None => StoreReq::PutIfNoneMatch {
                 key: spec_string(flight.key),
                 body: echod_concrete_spec::model::spec_bytes(flight.decided.unwrap()),
             },
@@ -1877,23 +1886,23 @@ pub(crate) open spec fn request_of(flight: FlightV) -> StoreCall {
     }
 }
 
-/// The reply the store gives a flight's call, once the caches agree with
+/// The reply the store gives a flight's request, once the caches agree with
 /// the store.
-pub(crate) open spec fn outcome_of(flight: FlightV) -> StoreOutcome {
+pub(crate) open spec fn outcome_of(flight: FlightV) -> StoreRes {
     if flight.writing {
-        StoreOutcome::Written(spec_etag(flight.decided.unwrap()))
+        if flight.etag is Some { StoreRes::PutIfMatch { result: Ok(spec_etag(flight.decided.unwrap())) } } else { StoreRes::PutIfNoneMatch { result: Ok(spec_etag(flight.decided.unwrap())) } }
     } else {
-        StoreOutcome::Got(None)
+        StoreRes::Get { result: Ok(None) }
     }
 }
 
 /// Every store request on the network is from a node, under an op that
 /// node has issued. One the store has not answered is the node's open
-/// flight's call. One under the open flight's op is that flight's call.
+/// flight's request. One under the open flight's op is that flight's request.
 pub(crate) open spec fn requests_ok(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
-            CMessage::StoreReq { op, call } => {
+            CMessage::StoreReq { op, request } => {
                 let env = world.network[k];
                 &&& env.recipient == CPid::Store
                 &&& env.sender is Node
@@ -1902,7 +1911,7 @@ pub(crate) open spec fn requests_ok(fleet: ConcreteConfig, world: State<CModel>)
                     let node = node_at(world, i);
                     &&& 0 <= i < fleet.nodes
                     &&& op < node.next_op
-                    &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                    &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                     &&& (!store_at(fleet, world).seen.contains((env.sender, op)) ==> flight_op(node)
                         == Some(op))
                 }
@@ -1917,7 +1926,7 @@ pub(crate) open spec fn requests_ok(fleet: ConcreteConfig, world: State<CModel>)
 pub(crate) open spec fn replies_ok(fleet: ConcreteConfig, world: State<CModel>) -> bool {
     forall|k: int|
         0 <= k < world.network.len() ==> match (#[trigger] world.network[k]).message {
-            CMessage::StoreReply { op, outcome } => {
+            CMessage::StoreRes { op, response } => {
                 let env = world.network[k];
                 &&& env.sender == CPid::Store
                 &&& env.recipient is Node
@@ -1926,7 +1935,7 @@ pub(crate) open spec fn replies_ok(fleet: ConcreteConfig, world: State<CModel>) 
                     let node = node_at(world, i);
                     &&& 0 <= i < fleet.nodes
                     &&& store_at(fleet, world).seen.contains((env.recipient, op))
-                    &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(
+                    &&& (flight_op(node) == Some(op) ==> response == response_of(
                         node.flight.unwrap(),
                     ))
                 }
@@ -1965,27 +1974,27 @@ pub(crate) open spec fn inv(fleet: ConcreteConfig, world: State<CModel>) -> bool
 // The boundary
 // ---------------------------------------------------------------------------
 
-/// `call` was injected at the service.
+/// `request` was injected at the service.
 pub(crate) open spec fn service_request(
     network: Seq<Envelope<APid, AMessage>>,
-    call: echod_abstract_spec::Call,
+    request: echod_abstract_spec::Call,
 ) -> bool {
     exists|j: int|
         #![trigger network[j]]
         0 <= j < network.len() && network[j] == Envelope {
             sender: APid::Outside,
             recipient: APid::Service,
-            message: AMessage::Request(call),
+            message: AMessage::Request(request),
         }
 }
 
-/// A client request on the concrete network has the same call on the service.
+/// A client request on the concrete network has the same request on the service.
 pub(crate) open spec fn carried_request(
     env: Envelope<CPid, CMessage>,
     network: Seq<Envelope<APid, AMessage>>,
 ) -> bool {
     match env.message {
-        CMessage::Request(call) => env.sender != CPid::Outside || service_request(network, call),
+        CMessage::Request(request) => env.sender != CPid::Outside || service_request(network, request),
         _ => true,
     }
 }
@@ -2021,7 +2030,7 @@ pub(crate) open spec fn outputs_covered(
         0 <= i < concrete.len() ==> carried_output(concrete[i], abstract_network)
 }
 
-/// Clock, requests, and outputs: what an injected call and an observed
+/// Clock, requests, and outputs: what an injected request and an observed
 /// output need.
 pub(crate) open spec fn coupled(concrete: State<CModel>, abstract_world: State<AModel>) -> bool {
     &&& abstract_world.now <= concrete.now
@@ -2050,7 +2059,7 @@ pub(crate) open spec fn related(fleet: ConcreteConfig, concrete: State<CModel>, 
 
 /// Every request on the document it names, by `interpretation::request_agrees`.
 pub(crate) open spec fn requests_agree(config: AbstractConfig) -> bool {
-    forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
+    forall|request: Request, key: Seq<char>, doc: DocumentBodyV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) ==> #[trigger] request_agrees(
             config,
             request,
@@ -2071,7 +2080,7 @@ pub(crate) open spec fn note_sends(notes: Seq<NoteV>) -> Seq<(APid, AMessage)> {
 pub(crate) open spec fn due_agrees(
     config: AbstractConfig,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     state: AProc,
     now: u64,
 ) -> bool {
@@ -2091,7 +2100,7 @@ pub(crate) open spec fn due_agrees(
 }
 
 pub(crate) open spec fn dues_agree(config: AbstractConfig) -> bool {
-    forall|key: Seq<char>, doc: DocV, state: AProc, now: u64|
+    forall|key: Seq<char>, doc: DocumentBodyV, state: AProc, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) ==> #[trigger] due_agrees(
             config,
             key,
@@ -2103,7 +2112,7 @@ pub(crate) open spec fn dues_agree(config: AbstractConfig) -> bool {
 
 /// One occurrence on its origin document: nothing happens, or the abstract
 /// occurrence step does the same.
-pub(crate) open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now: u64) -> bool {
+pub(crate) open spec fn occurrence_agrees(pending: PendingV, doc: DocumentBodyV, s: AStore, now: u64) -> bool {
     let key = spec_origin_key(origin(pending.promise));
     let next = spec_occurrence(doc, pending, now);
     ||| next == doc
@@ -2127,7 +2136,7 @@ pub(crate) open spec fn occurrence_agrees(pending: PendingV, doc: DocV, s: AStor
 }
 
 pub(crate) open spec fn occurrences_agree() -> bool {
-    forall|pending: PendingV, doc: DocV, s: AStore, now: u64|
+    forall|pending: PendingV, doc: DocumentBodyV, s: AStore, now: u64|
         doc_rel(spec_origin_key(origin(pending.promise)), doc, s) && finite_store(s)
             ==> #[trigger] occurrence_agrees(pending, doc, s, now)
 }
@@ -2143,6 +2152,20 @@ pub(crate) open spec fn abstract_config(concrete_config: ConcreteConfig) -> Abst
     AbstractConfig { retry_timeout: concrete_config.retry_timeout }
 }
 
+pub open spec fn response_of(flight: FlightV) -> StoreRes {
+    if flight.writing {
+        match flight.etag {
+            Some(_) => StoreRes::PutIfMatch {
+                result: Ok(spec_etag(flight.decided.unwrap())),
+            },
+            None => StoreRes::PutIfNoneMatch {
+                result: Ok(spec_etag(flight.decided.unwrap())),
+            },
+        }
+    } else {
+        StoreRes::Get { result: Ok(None) }
+    }
+}
 } // verus!
 
 }
@@ -2158,6 +2181,9 @@ mod requests {
 //! checks them.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use super::interpretation::{
@@ -2171,12 +2197,12 @@ use super::interpretation::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
-    DocV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
+    DocumentBodyV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
     spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited,
     spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check,
     spec_fulfill_task, spec_handle, spec_heartbeat as c_heartbeat, spec_held, spec_key,
     spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key,
-    spec_origin_map, spec_project_obj, spec_promise_create as c_promise_create,
+    spec_workflow_map, spec_project_obj, spec_promise_create as c_promise_create,
     spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle,
     spec_register_callback as c_register_callback, spec_register_listener as c_register_listener,
     spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete,
@@ -2184,7 +2210,7 @@ use echod_concrete_spec::node::{
     spec_targeted, spec_task_acquire as c_task_acquire, spec_task_continue as c_task_continue,
     spec_task_create as c_task_create, spec_task_fulfill as c_task_fulfill,
     spec_task_get as c_task_get, spec_task_halt as c_task_halt, spec_task_release as c_task_release,
-    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_origin, TkV,
+    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_workflow, TkV,
 };
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{
@@ -2376,7 +2402,7 @@ pub(crate) proof fn lemma_finite_at(s: AStore, next: AStore, id: Seq<char>)
 pub(crate) proof fn lemma_register_callback_agrees(
     config: AbstractConfig,
     req: PromiseRegisterCallbackReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2408,8 +2434,8 @@ pub(crate) proof fn lemma_register_callback_agrees(
     } else {
         assert(origin(awaiter@) == o);
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         if !map.contains_key(awaited@) {
             assert(!s.promises.contains_key(awaited@));
             assert(outs == spec_out(a_promise_res(404, None), s));
@@ -2466,7 +2492,7 @@ pub(crate) proof fn lemma_register_callback_agrees(
                     lemma_origin_update(map, o, s, awaited@, obj2, q, ta, next);
                     assert(map.insert(awaited@, obj2).dom() == map.dom().insert(awaited@));
                     lemma_origin_reads(key, o, map.insert(awaited@, obj2), next);
-                    assert(c_register_callback(doc, awaited, awaiter, now).0 == DocV::Origin(map.insert(awaited@, obj2)));
+                    assert(c_register_callback(doc, awaited, awaiter, now).0 == DocumentBodyV::Workflow(map.insert(awaited@, obj2)));
                     lemma_within_one(s, next, awaited@);
                     lemma_others_kept_within(s, next, o);
                     assert(next.promises.dom() == s.promises.dom().insert(awaited@));
@@ -2483,7 +2509,7 @@ pub(crate) proof fn lemma_register_callback_agrees(
 pub(crate) proof fn lemma_register_listener_agrees(
     config: AbstractConfig,
     req: echod_types::PromiseRegisterListenerReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2509,8 +2535,8 @@ pub(crate) proof fn lemma_register_listener_agrees(
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_register_listener(awaited, address, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(awaited@) {
         assert(!s.promises.contains_key(awaited@));
         assert(outs == spec_out(a_promise_res(404, None), s));
@@ -2549,7 +2575,7 @@ pub(crate) proof fn lemma_register_listener_agrees(
                 lemma_origin_update(map, o, s, awaited@, obj2, q, ta, next);
                 assert(map.insert(awaited@, obj2).dom() == map.dom().insert(awaited@));
                 lemma_origin_reads(key, o, map.insert(awaited@, obj2), next);
-                assert(c_register_listener(doc, awaited, address, now).0 == DocV::Origin(map.insert(awaited@, obj2)));
+                assert(c_register_listener(doc, awaited, address, now).0 == DocumentBodyV::Workflow(map.insert(awaited@, obj2)));
                 lemma_within_one(s, next, awaited@);
                 lemma_others_kept_within(s, next, o);
                 assert(next.promises.dom() == s.promises.dom().insert(awaited@));
@@ -2608,7 +2634,7 @@ pub(crate) proof fn lemma_acquire_rel(ct: TkV, at: TaskV, pid: Seq<char>, ttl: u
     lemma_sat_add(now, ttl);
 }
 
-pub(crate) proof fn lemma_task_get_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_get_agrees(config: AbstractConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -2628,8 +2654,8 @@ pub(crate) proof fn lemma_task_get_agrees(config: AbstractConfig, id: String, do
     assert(spec_handle(doc, request, now) == c_task_get(doc, id, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(id@) {
         assert(!s.promises.contains_key(id@));
         assert(!s.tasks.contains_key(id@));
@@ -2664,7 +2690,7 @@ pub(crate) proof fn lemma_task_get_agrees(config: AbstractConfig, id: String, do
 pub(crate) proof fn lemma_task_create_agrees(
     config: AbstractConfig,
     req: echod_types::TaskCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2693,14 +2719,15 @@ pub(crate) proof fn lemma_task_create_agrees(
     assert(outs == a_task_create(pid, ttl, action, s, now));
     lemma_targeted(action.tags);
     lemma_timer(action.tags);
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !spec_targeted(action.tags) || spec_timer(action.tags) {
         assert(outs == spec_out(spec_claim_res(400, None, None), s));
         assert(c_task_create(doc, pid, ttl, action, now) == (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None })));
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         let (doc1, created) = c_promise_create(doc, action, now);
         if map.contains_key(x) {
             assert(doc1 == doc);
@@ -2735,6 +2762,10 @@ pub(crate) proof fn lemma_task_create_agrees(
                             lemma_record(action.id, seen.promise, seen_p);
                             assert(outs[0].next == s);
                             lemma_others_same(key, s);
+                        } else if t.state == TaskState::Pending && t.version >= MAX_VERSION {
+                            assert(stored.version >= MAX_VERSION);
+                            assert(outs == spec_out(spec_claim_res(409, None, None), s));
+                            lemma_others_same(key, s);
                         } else if t.state == TaskState::Pending {
                             lemma_unfulfilled_is_stored(map[x], p, ta, now);
                             assert(seen == map[x]);
@@ -2757,7 +2788,7 @@ pub(crate) proof fn lemma_task_create_agrees(
                                 spec_claim_res(200, Some(a_task_record(action.id, u_a)), Some(spec_promise_record(action.id, seen_p))),
                                 n,
                             ));
-                            assert(c_task_create(doc, pid, ttl, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                            assert(c_task_create(doc, pid, ttl, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                             lemma_within_one(s, n, x);
                             lemma_others_kept_within(s, n, o);
                             assert(n.tasks.dom() == s.tasks.dom().insert(x));
@@ -2777,8 +2808,8 @@ pub(crate) proof fn lemma_task_create_agrees(
             assert(!s.tasks.contains_key(x));
             let obj = spec_new_obj(action.timeout_at, now, action.param, action.tags, true);
             assert(spec_targeted(action.tags));
-            assert(doc1 == spec_with_origin(doc, map.insert(x, obj)));
-            assert(doc1 == DocV::Origin(map.insert(x, obj)));
+            assert(doc1 == spec_with_workflow(doc, map.insert(x, obj)));
+            assert(doc1 == DocumentBodyV::Workflow(map.insert(x, obj)));
             let map1 = map.insert(x, obj);
             assert(map1.contains_key(x));
             assert(map1[x] == obj);
@@ -2831,7 +2862,7 @@ pub(crate) proof fn lemma_task_create_agrees(
                 lemma_record(action.id, obj2.promise, p_a);
                 lemma_origin_update(map, o, s, x, obj2, p_a, Some(t_a), n);
                 assert(map1.insert(x, obj2) =~= map.insert(x, obj2));
-                assert(c_task_create(doc, pid, ttl, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                assert(c_task_create(doc, pid, ttl, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 assert(map.insert(x, obj2).dom() == map.dom().insert(x));
                 lemma_origin_reads(key, o, map.insert(x, obj2), n);
                 lemma_within_one(s, n, x);
@@ -2870,7 +2901,7 @@ pub(crate) proof fn lemma_task_create_agrees(
 pub(crate) proof fn lemma_task_acquire_agrees(
     config: AbstractConfig,
     req: echod_types::TaskAcquireReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -2887,9 +2918,14 @@ pub(crate) proof fn lemma_task_acquire_agrees(
     assert(spec_handle(doc, request, now) == c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now));
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_acquire(req.id, req.version, req.pid, req.ttl, s, now));
+    if req.ttl == 0 || req.ttl > MAX_TIME {
+        assert(outs == spec_out(spec_claim_res(400, None, None), s));
+        lemma_others_same(key, s);
+        return;
+    }
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.promises.contains_key(x));
         assert(!s.tasks.contains_key(x));
@@ -2913,7 +2949,8 @@ pub(crate) proof fn lemma_task_acquire_agrees(
                 let seen_t = spec_project_task(stored, seen_p);
                 assert(task_rel(t, seen_t));
                 assert(seen_t.version == stored.version);
-                if t.state != TaskState::Pending || t.version != req.version || seen.promise.state != PromiseState::Pending {
+                if t.state != TaskState::Pending || t.version != req.version
+                    || seen.promise.state != PromiseState::Pending || t.version >= MAX_VERSION {
                     assert(outs == spec_out(spec_claim_res(409, None, None), s));
                     lemma_others_same(key, s);
                 } else {
@@ -2938,7 +2975,7 @@ pub(crate) proof fn lemma_task_acquire_agrees(
                         spec_claim_res(200, Some(a_task_record(req.id, u_a)), Some(spec_promise_record(req.id, p))),
                         n,
                     ));
-                    assert(c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_acquire(doc, req.id, req.version, req.pid, req.ttl, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                     lemma_within_one(s, n, x);
                     lemma_others_kept_within(s, n, o);
                     assert(n.tasks.dom() == s.tasks.dom().insert(x));
@@ -2977,7 +3014,7 @@ pub(crate) proof fn lemma_held_update(
     ensures
         ({
             let n = AStore { promises: s.promises.insert(x, q), tasks: s.tasks.insert(x, u), ..s };
-            &&& doc_rel(key, DocV::Origin(map.insert(x, obj2)), n)
+            &&& doc_rel(key, DocumentBodyV::Workflow(map.insert(x, obj2)), n)
             &&& super::interpretation::others_kept(key, s, n)
             &&& finite_store(n)
         }),
@@ -2996,7 +3033,7 @@ pub(crate) proof fn lemma_held_update(
 pub(crate) proof fn lemma_task_release_agrees(
     config: AbstractConfig,
     req: echod_types::TaskReleaseReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -3014,11 +3051,11 @@ pub(crate) proof fn lemma_task_release_agrees(
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_release(req.id, req.version, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     lemma_held(map, o, s, x, req.version, now);
     let (_, held) = spec_held(map, x, req.version, now);
-    assert(spec_with_origin(doc, map) == doc);
+    assert(spec_with_workflow(doc, map) == doc);
     match held {
         Held::Missing => {
             assert(outs == spec_out(spec_status_res(404), s));
@@ -3042,7 +3079,7 @@ pub(crate) proof fn lemma_task_release_agrees(
             assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
             assert(outs == spec_out(spec_status_res(200), n));
             lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-            assert(c_task_release(doc, req.id, req.version, now).0 == DocV::Origin(map.insert(x, obj2)));
+            assert(c_task_release(doc, req.id, req.version, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
         },
     }
 }
@@ -3050,7 +3087,7 @@ pub(crate) proof fn lemma_task_release_agrees(
 pub(crate) proof fn lemma_task_fulfill_agrees(
     config: AbstractConfig,
     req: echod_types::TaskFulfillReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -3073,11 +3110,11 @@ pub(crate) proof fn lemma_task_fulfill_agrees(
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(a_promise_res(404, None), s));
@@ -3108,13 +3145,13 @@ pub(crate) proof fn lemma_task_fulfill_agrees(
                 assert(outs == spec_out(a_promise_res(200, Some(spec_promise_record(req.id, q))), n));
                 assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(echod_concrete_spec::node::spec_record(req.id, promise))));
                 lemma_held_update(key, o, map, s, x, obj2, q, u);
-                assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocV::Origin(map.insert(x, obj2)));
+                assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
             },
         }
     }
 }
 
-pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -3136,8 +3173,8 @@ pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, d
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_halt(id, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.tasks.contains_key(x));
         assert(outs == spec_out(spec_status_res(404), s));
@@ -3180,7 +3217,7 @@ pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, d
                     assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
                     assert(outs == spec_out(spec_status_res(200), n));
                     lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-                    assert(c_task_halt(doc, id, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_halt(doc, id, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 }
             },
             _ => {
@@ -3190,7 +3227,7 @@ pub(crate) proof fn lemma_task_halt_agrees(config: AbstractConfig, id: String, d
     }
 }
 
-pub(crate) proof fn lemma_task_continue_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_task_continue_agrees(config: AbstractConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(id@)), doc, s),
         finite_store(s),
@@ -3212,8 +3249,8 @@ pub(crate) proof fn lemma_task_continue_agrees(config: AbstractConfig, id: Strin
     let outs = spec_handler(config, request, s, now);
     assert(outs == a_task_continue(id, s, now));
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     if !map.contains_key(x) {
         assert(!s.tasks.contains_key(x));
         assert(outs == spec_out(spec_status_res(404), s));
@@ -3261,7 +3298,7 @@ pub(crate) proof fn lemma_task_continue_agrees(config: AbstractConfig, id: Strin
                     assert(n == AStore { tasks: s.tasks.insert(x, u_a), ..s });
                     assert(outs == spec_out(spec_status_res(200), n));
                     lemma_held_update(key, o, map, s, x, obj2, p, u_a);
-                    assert(c_task_continue(doc, id, now).0 == DocV::Origin(map.insert(x, obj2)));
+                    assert(c_task_continue(doc, id, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
                 }
             },
             _ => {
@@ -3457,7 +3494,7 @@ pub(crate) proof fn lemma_extend(
 pub(crate) proof fn lemma_heartbeat_agrees(
     config: AbstractConfig,
     req: echod_types::TaskHeartbeatReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -3491,15 +3528,15 @@ pub(crate) proof fn lemma_heartbeat_agrees(
         lemma_others_same(key, s);
     } else {
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         assert(extending(map, o, s, map, s.tasks));
         lemma_extend(map, o, s, pid@, refs, now, 0, map, s.tasks);
         let map2 = c_extend(map, pid@, refs, now, 0);
         let tasks2 = a_extend(s, pid@, refs, now, 0, s.tasks);
         let n = AStore { tasks: tasks2, ..s };
         assert(outs == spec_out(spec_status_res(200), n));
-        assert(c_heartbeat(doc, pid, refs, now) == (DocV::Origin(map2), Response::Status(StatusRes { status: 200 })));
+        assert(c_heartbeat(doc, pid, refs, now) == (DocumentBodyV::Workflow(map2), Response::Status(StatusRes { status: 200 })));
         assert(map2.dom() =~= map.dom());
         lemma_origin_reads(key, o, map2, n);
         assert(changed_within(s, n, o));
@@ -3712,7 +3749,7 @@ pub(crate) proof fn lemma_add_callbacks(
 pub(crate) proof fn lemma_suspend_agrees(
     config: AbstractConfig,
     req: echod_types::TaskSuspendReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -3786,11 +3823,11 @@ pub(crate) proof fn lemma_suspend_agrees(
             }
         };
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(spec_status_res(404), s));
@@ -3872,7 +3909,7 @@ pub(crate) proof fn lemma_suspend_agrees(
                             assert(n == AStore { tasks: s.tasks.insert(x, u), ..s });
                             assert(outs == spec_out(spec_status_res(300), n));
                             lemma_held_update(key, o, map, s, x, obj2, p, u);
-                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocV::Origin(map.insert(x, obj2)), Response::Status(StatusRes { status: 300 })));
+                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocumentBodyV::Workflow(map.insert(x, obj2)), Response::Status(StatusRes { status: 300 })));
                         } else {
                             assert(adding(map, o, s, x, map, s.promises));
                             lemma_add_callbacks(map, o, s, x, actions, 0, map, s.promises);
@@ -3904,7 +3941,7 @@ pub(crate) proof fn lemma_suspend_agrees(
                             assert(map2.dom() =~= map.dom());
                             assert(map2.insert(x, obj3).dom() == map2.dom().insert(x));
                             lemma_origin_reads(key, o, map2.insert(x, obj3), n);
-                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocV::Origin(map2.insert(x, obj3)), Response::Status(StatusRes { status: 200 })));
+                            assert(c_suspend(doc, req.id, req.version, actions, now) == (DocumentBodyV::Workflow(map2.insert(x, obj3)), Response::Status(StatusRes { status: 200 })));
                             assert(changed_within(s, n, o)) by {
                                 assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) != o implies {
                                     &&& s.promises.contains_key(id) == n.promises.contains_key(id)
@@ -3932,7 +3969,7 @@ pub(crate) proof fn lemma_suspend_agrees(
 // ---------------------------------------------------------------------------
 
 /// The promise handlers answer a promise response.
-pub(crate) proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, now: Time)
+pub(crate) proof fn lemma_promise_answers(doc: DocumentBodyV, action: TaskFenceAction, now: Time)
     ensures
         match action {
             TaskFenceAction::Create(c) => c_promise_create(doc, c, now).1 is Promise,
@@ -3944,7 +3981,7 @@ pub(crate) proof fn lemma_promise_answers(doc: DocV, action: TaskFenceAction, no
 pub(crate) proof fn lemma_fence_agrees(
     config: AbstractConfig,
     req: echod_types::TaskFenceReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -3973,11 +4010,11 @@ pub(crate) proof fn lemma_fence_agrees(
     } else {
         assert(origin(target@) == o);
         lemma_origin_doc(key, o, doc, s);
-        let map = spec_origin_map(doc);
-        assert(doc == DocV::Origin(map));
+        let map = spec_workflow_map(doc);
+        assert(doc == DocumentBodyV::Workflow(map));
         lemma_held(map, o, s, x, req.version, now);
         let (_, held) = spec_held(map, x, req.version, now);
-        assert(spec_with_origin(doc, map) == doc);
+        assert(spec_with_workflow(doc, map) == doc);
         match held {
             Held::Missing => {
                 assert(outs == spec_out(spec_fence_res(404, None), s));
@@ -4027,7 +4064,7 @@ pub(crate) proof fn lemma_fence_agrees(
 pub(crate) proof fn lemma_fence_check_agrees(
     config: AbstractConfig,
     req: echod_types::TaskFenceCheckReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -4044,10 +4081,10 @@ pub(crate) proof fn lemma_fence_check_agrees(
     assert(spec_handle(doc, request, now) == c_fence_check(doc, req.id, req.version, now));
     let outs = spec_handler(config, request, s, now);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     lemma_held(map, o, s, x, req.version, now);
-    assert(spec_with_origin(doc, map) == doc);
+    assert(spec_with_workflow(doc, map) == doc);
     assert(outs[0].next == s);
     lemma_others_same(key, s);
 }
@@ -4068,7 +4105,7 @@ pub(crate) proof fn lemma_schedule_value(c: Schedule, a: ScheduleV)
     lemma_string_of(c.promise_id);
 }
 
-pub(crate) proof fn lemma_schedule_get_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_schedule_get_agrees(config: AbstractConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -4108,7 +4145,7 @@ pub(crate) proof fn lemma_schedule_get_agrees(config: AbstractConfig, id: String
 pub(crate) proof fn lemma_schedule_create_agrees(
     config: AbstractConfig,
     req: ScheduleCreateReq,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -4128,7 +4165,9 @@ pub(crate) proof fn lemma_schedule_create_agrees(
     lemma_schedule_doc(key, req.id@, doc, s);
     lemma_schedule_key(req.id@);
     let slot = doc->Schedule_0;
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+    let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         assert(outs == spec_out(spec_schedule_res(400, None), s));
         lemma_others_same(key, s);
     } else {
@@ -4142,7 +4181,6 @@ pub(crate) proof fn lemma_schedule_create_agrees(
             },
             None => {
                 assert(!s.schedules.contains_key(req.id@));
-                let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
                 let schedule = Schedule {
                     id: req.id,
                     cron: req.cron,
@@ -4167,10 +4205,10 @@ pub(crate) proof fn lemma_schedule_create_agrees(
                 };
                 let next = AStore { schedules: s.schedules.insert(req.id@, c), ..s };
                 assert(outs == spec_out(spec_schedule_res(200, Some(schedule)), next));
-                assert(c_schedule_create(doc, req, now) == (DocV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })));
+                assert(c_schedule_create(doc, req, now) == (DocumentBodyV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })));
                 assert(schedule_rel(schedule, c));
                 assert(slot_rel(Some(schedule), req.id@, next));
-                assert(doc_rel(key, DocV::Schedule(Some(schedule)), next));
+                assert(doc_rel(key, DocumentBodyV::Schedule(Some(schedule)), next));
                 lemma_others_kept_schedule(s, next, req.id@);
                 assert(next.schedules.dom() == s.schedules.dom().insert(req.id@));
                 assert(finite_store(next));
@@ -4179,7 +4217,7 @@ pub(crate) proof fn lemma_schedule_create_agrees(
     }
 }
 
-pub(crate) proof fn lemma_schedule_delete_agrees(config: AbstractConfig, id: String, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_schedule_delete_agrees(config: AbstractConfig, id: String, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_schedule_key(id@), doc, s),
         finite_store(s),
@@ -4207,10 +4245,10 @@ pub(crate) proof fn lemma_schedule_delete_agrees(config: AbstractConfig, id: Str
             assert(s.schedules.contains_key(id@));
             let next = AStore { schedules: s.schedules.remove(id@), ..s };
             assert(outs == spec_out(spec_status_res(200), next));
-            assert(c_schedule_delete(doc, id) == (DocV::Schedule(None), Response::Status(StatusRes { status: 200 })));
+            assert(c_schedule_delete(doc, id) == (DocumentBodyV::Schedule(None), Response::Status(StatusRes { status: 200 })));
             assert(!next.schedules.contains_key(id@));
             assert(slot_rel(None, id@, next));
-            assert(doc_rel(key, DocV::Schedule(None), next));
+            assert(doc_rel(key, DocumentBodyV::Schedule(None), next));
             lemma_others_kept_schedule(s, next, id@);
             assert(next.schedules.dom() == s.schedules.dom().remove(id@));
             assert(finite_store(next));
@@ -4232,7 +4270,7 @@ pub(crate) proof fn lemma_request_agrees(
     config: AbstractConfig,
     request: Request,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     s: AStore,
     now: Time,
 )
@@ -4274,7 +4312,7 @@ pub(crate) proof fn lemma_requests_agree(config: AbstractConfig)
     ensures
         super::relation::requests_agree(config),
 {
-    assert forall|request: Request, key: Seq<char>, doc: DocV, s: AStore, now: u64|
+    assert forall|request: Request, key: Seq<char>, doc: DocumentBodyV, s: AStore, now: u64|
         spec_key(request) == Some(key) && doc_rel(key, doc, s) && finite_store(s) implies #[trigger] request_agrees(
         config,
         request,
@@ -4306,6 +4344,9 @@ mod work {
 //! bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use super::requests::{
@@ -4325,9 +4366,9 @@ use super::interpretation::{
 use echod_concrete_spec::model::{spec_string as c_string};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
-    lemma_min_key_present as c_lemma_min_key, DocV, NoteV, ObjV, PendingV, PromV, spec_due_id,
+    lemma_min_key_present as c_lemma_min_key, DocumentBodyV, NoteV, ObjV, PendingV, PromV, spec_due_id,
     spec_min_key as c_min_key, spec_new_obj, spec_obj_due, spec_occurrence, spec_offer_at,
-    spec_opened, spec_origin_key, spec_origin_map, spec_project_obj, spec_record, spec_resume,
+    spec_opened, spec_origin_key, spec_workflow_map, spec_project_obj, spec_record, spec_resume,
     spec_run_due, spec_schedule_key, spec_sorted as c_sorted, spec_step_object, spec_targeted,
     spec_timer, spec_unlease as c_unlease, TkV,
 };
@@ -4514,7 +4555,7 @@ pub(crate) proof fn lemma_due_id(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>
 // Membership in the offers
 // ---------------------------------------------------------------------------
 
-/// The outcome of `work`, when due, is among `results`.
+/// The response of `work`, when due, is among `results`.
 pub(crate) open spec fn offered(
     config: AbstractConfig,
     state: Proc,
@@ -4522,8 +4563,8 @@ pub(crate) open spec fn offered(
     work: InternalV,
     results: Seq<AResult>,
 ) -> bool {
-    let outcome = spec_process_work(config, work, state.store, now);
-    !outcome.not_due ==> results.contains(spec_due_result(state, outcome))
+    let response = spec_process_work(config, work, state.store, now);
+    !response.not_due ==> results.contains(spec_due_result(state, response))
 }
 
 pub(crate) proof fn lemma_contains_left<T>(a: Seq<T>, b: Seq<T>, x: T)
@@ -4559,9 +4600,9 @@ pub(crate) proof fn lemma_offered_left(
     ensures
         offered(config, state, now, work, a + b),
 {
-    let outcome = spec_process_work(config, work, state.store, now);
-    if !outcome.not_due {
-        lemma_contains_left(a, b, spec_due_result(state, outcome));
+    let response = spec_process_work(config, work, state.store, now);
+    if !response.not_due {
+        lemma_contains_left(a, b, spec_due_result(state, response));
     }
 }
 
@@ -4578,9 +4619,9 @@ pub(crate) proof fn lemma_offered_right(
     ensures
         offered(config, state, now, work, a + b),
 {
-    let outcome = spec_process_work(config, work, state.store, now);
-    if !outcome.not_due {
-        lemma_contains_right(a, b, spec_due_result(state, outcome));
+    let response = spec_process_work(config, work, state.store, now);
+    if !response.not_due {
+        lemma_contains_right(a, b, spec_due_result(state, response));
     }
 }
 
@@ -4588,9 +4629,9 @@ pub(crate) proof fn lemma_keep_offered(config: AbstractConfig, state: Proc, now:
     ensures
         offered(config, state, now, work, spec_keep(config, state, now, work, Seq::empty())),
 {
-    let outcome = spec_process_work(config, work, state.store, now);
-    if !outcome.not_due {
-        let r = spec_due_result(state, outcome);
+    let response = spec_process_work(config, work, state.store, now);
+    if !response.not_due {
+        let r = spec_due_result(state, response);
         let kept = spec_keep(config, state, now, work, Seq::empty());
         assert(kept == seq![r] + Seq::<AResult>::empty());
         assert(kept[0] == r);
@@ -5121,21 +5162,21 @@ pub(crate) open spec fn sends_of(send: Seq<DispatchV>) -> Seq<(APid, AMessage)> 
 }
 
 /// A due result sends the lift of each dispatch.
-pub(crate) proof fn lemma_sends_of(state: Proc, outcome: InOutV)
+pub(crate) proof fn lemma_sends_of(state: Proc, response: InOutV)
     ensures
-        spec_due_result(state, outcome).send == sends_of(outcome.send),
+        spec_due_result(state, response).send == sends_of(response.send),
 {
-    let a = spec_due_result(state, outcome).send;
-    let b = sends_of(outcome.send);
+    let a = spec_due_result(state, response).send;
+    let b = sends_of(response.send);
     assert(a.len() == b.len());
     assert forall|i: int| 0 <= i < a.len() implies a[i] == b[i] by {
         assert(a[i] == (
             APid::Outside,
-            AMessage::Output(Output::Dispatch(lift_dispatch(outcome.send[i]))),
+            AMessage::Output(Output::Dispatch(lift_dispatch(response.send[i]))),
         ));
         assert(b[i] == (
             APid::Outside,
-            AMessage::Output(Output::Dispatch(lift_dispatch(outcome.send[i]))),
+            AMessage::Output(Output::Dispatch(lift_dispatch(response.send[i]))),
         ));
     };
     assert(a =~= b);
@@ -5184,7 +5225,7 @@ pub(crate) proof fn lemma_sends_unblock(address: Seq<char>, promise: PromiseReco
 pub(crate) open spec fn due_matched(
     config: AbstractConfig,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     state: Proc,
     now: Time,
     r: AResult,
@@ -5201,7 +5242,7 @@ pub(crate) open spec fn due_matched(
 pub(crate) proof fn lemma_matched(
     config: AbstractConfig,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     state: Proc,
     now: Time,
     r: AResult,
@@ -5235,33 +5276,33 @@ pub(crate) proof fn lemma_origin_matched(
         finite_store(state.store),
         offered(config, state, now, work, spec_run_timeout(config, state, now)),
         ({
-            let outcome = spec_process_work(config, work, state.store, now);
-            &&& !outcome.not_due
-            &&& outcome.work.len() == 0
-            &&& outcome.next.schedules == state.store.schedules
-            &&& origin_rel(map2, o, outcome.next)
-            &&& changed_within(state.store, outcome.next, o)
-            &&& finite_store(outcome.next)
-            &&& sends_of(outcome.send) == note_sends(notes)
+            let response = spec_process_work(config, work, state.store, now);
+            &&& !response.not_due
+            &&& response.work.len() == 0
+            &&& response.next.schedules == state.store.schedules
+            &&& origin_rel(map2, o, response.next)
+            &&& changed_within(state.store, response.next, o)
+            &&& finite_store(response.next)
+            &&& sends_of(response.send) == note_sends(notes)
         }),
-        spec_run_due(DocV::Origin(map), now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
+        spec_run_due(DocumentBodyV::Workflow(map), now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes),
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
-    let outcome = spec_process_work(config, work, s, now);
-    let r = spec_due_result(state, outcome);
-    let n = outcome.next;
-    assert(r.state.pending == state.pending + outcome.work);
-    assert(state.pending + outcome.work =~= state.pending);
+    let response = spec_process_work(config, work, s, now);
+    let r = spec_due_result(state, response);
+    let n = response.next;
+    assert(r.state.pending == state.pending + response.work);
+    assert(state.pending + response.work =~= state.pending);
     assert(items(Seq::<PendingV>::empty()) =~= Seq::<Sched<InternalV>>::empty());
     assert(state.pending + items(Seq::<PendingV>::empty()) =~= state.pending);
-    lemma_sends_of(state, outcome);
-    assert(r.send == sends_of(outcome.send));
+    lemma_sends_of(state, response);
+    assert(r.send == sends_of(response.send));
     lemma_origin_reads(key, o, map2, n);
     lemma_others_kept_within(s, n, o);
-    assert(due_matched(config, key, DocV::Origin(map), state, now, r));
-    lemma_matched(config, key, DocV::Origin(map), state, now, r);
+    assert(due_matched(config, key, DocumentBodyV::Workflow(map), state, now, r));
+    lemma_matched(config, key, DocumentBodyV::Workflow(map), state, now, r);
 }
 
 /// The store changed at one id of the origin: the next document reads as
@@ -5369,7 +5410,7 @@ pub(crate) proof fn lemma_promise_due(
         map[id].promise.state == PromiseState::Pending,
         map[id].promise.timeout_at <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -5390,8 +5431,8 @@ pub(crate) proof fn lemma_promise_due(
         s.tasks
     };
     let n = AStore { promises: s.promises.insert(id, q), tasks, ..s };
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_did(n, Seq::empty(), Seq::empty()));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_did(n, Seq::empty(), Seq::empty()));
     let obj2 = spec_project_obj(obj, now);
     lemma_project_object(obj, p, ta, now);
     let t2 = match ta {
@@ -5435,7 +5476,7 @@ pub(crate) proof fn lemma_lease_due(
         map[id].task.unwrap().lease_timeout_at is Some,
         map[id].task.unwrap().lease_timeout_at.unwrap() <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -5461,9 +5502,9 @@ pub(crate) proof fn lemma_lease_due(
     assert(spec_lease_at(t_a) == at);
     let u = a_unlease(t_a, TaskState::Pending, Some(now));
     let n = AStore { tasks: s.tasks.insert(id, u), ..s };
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_lease(s, id, now));
-    assert(outcome == spec_did(n, Seq::empty(), Seq::empty()));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_lease(s, id, now));
+    assert(response == spec_did(n, Seq::empty(), Seq::empty()));
     let t2 = c_unlease(t, TaskState::Pending, Some(now));
     let obj2 = ObjV { task: Some(t2), ..obj };
     assert(task_rel(t2, u));
@@ -5496,7 +5537,7 @@ pub(crate) proof fn lemma_retry_due(
         map[id].task.unwrap().retry_timeout_at is Some,
         map[id].task.unwrap().retry_timeout_at.unwrap() <= now,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -5521,9 +5562,9 @@ pub(crate) proof fn lemma_retry_due(
     assert(again == spec_sat_add(now, config.retry_timeout));
     let u = TaskV { retry_timeout_at: Some(again), ..t_a };
     let n = AStore { tasks: s.tasks.insert(id, u), ..s };
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_retry(config, s, id, now));
-    assert(outcome == spec_did(n, Seq::empty(), seq![DispatchV::Execute { id, version: t_a.version }]));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_retry(config, s, id, now));
+    assert(response == spec_did(n, Seq::empty(), seq![DispatchV::Execute { id, version: t_a.version }]));
     let t2 = TkV { retry_timeout_at: Some(spec_sat_add(now, config.retry_timeout)), ..t };
     let obj2 = ObjV { task: Some(t2), ..obj };
     assert(task_rel(t2, u));
@@ -5554,7 +5595,7 @@ pub(crate) proof fn lemma_callback_due(
         map[id].promise.state != PromiseState::Pending,
         map[id].promise.callbacks.len() > 0,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -5580,9 +5621,9 @@ pub(crate) proof fn lemma_callback_due(
     // The awaited side.
     assert(spec_project_promise(p, now) == p);
     let q = PromiseV { callbacks: p.callbacks.remove(awaiter), ..p };
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_callback(s, id, awaiter, now));
-    assert(outcome == spec_callback_apply(s, id, awaiter, q, since, now));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_callback(s, id, awaiter, now));
+    assert(response == spec_callback_apply(s, id, awaiter, q, since, now));
     let tasks0 = if s.tasks.contains_key(id) {
         s.tasks.insert(id, spec_project_task(s.tasks[id], q))
     } else {
@@ -5614,10 +5655,10 @@ pub(crate) proof fn lemma_callback_due(
     assert(spec_step_object(map, id, now, config.retry_timeout) == (map2, Seq::<NoteV>::empty()));
     lemma_sends_none();
     // The awaiter side.
-    let n = AStore { promises: s.promises.insert(id, q), tasks: outcome.next.tasks, ..s };
-    assert(outcome.next == n);
-    assert(outcome.send.len() == 0);
-    assert(outcome.work.len() == 0);
+    let n = AStore { promises: s.promises.insert(id, q), tasks: response.next.tasks, ..s };
+    assert(response.next == n);
+    assert(response.send.len() == 0);
+    assert(response.work.len() == 0);
     if !map.contains_key(awaiter) {
         assert(!s.tasks.contains_key(awaiter));
         assert(n.tasks == tasks0);
@@ -5678,7 +5719,7 @@ pub(crate) proof fn lemma_callback_due(
                         let u = TaskV {
                             state: TaskState::Pending,
                             resumes: seq![id],
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             ..t
                         };
                         assert(n.tasks == tasks0.insert(awaiter, u));
@@ -5687,7 +5728,7 @@ pub(crate) proof fn lemma_callback_due(
                             pid: None,
                             ttl: None,
                             lease_timeout_at: None,
-                            retry_timeout_at: Some(since),
+                            retry_timeout_at: Some(now),
                             resumes: seq![id],
                             ..tp
                         };
@@ -5767,7 +5808,7 @@ pub(crate) proof fn lemma_listener_due(
         map[id].promise.callbacks.len() == 0,
         map[id].promise.listeners.len() > 0,
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
     let s = state.store;
     let obj = map[id];
@@ -5808,9 +5849,9 @@ pub(crate) proof fn lemma_listener_due(
         }
     };
     let n = AStore { promises: s.promises.insert(id, q), tasks, ..s };
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_listener(s, id, address, now));
-    assert(outcome == spec_did(n, Seq::empty(), seq![DispatchV::Unblock { address, promise: rec }]));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_listener(s, id, address, now));
+    assert(response == spec_did(n, Seq::empty(), seq![DispatchV::Unblock { address, promise: rec }]));
     lemma_skip_no_duplicates(listeners);
     let obj2 = ObjV { promise: PromV { listeners: listeners.skip(1), ..obj.promise }, ..obj };
     assert(promise_rel(obj2.promise, q));
@@ -5839,9 +5880,9 @@ pub(crate) proof fn lemma_origin_due(
         origin_rel(map, o, state.store),
         finite_store(state.store),
     ensures
-        due_agrees(config, key, DocV::Origin(map), state, now),
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
-    let doc = DocV::Origin(map);
+    let doc = DocumentBodyV::Workflow(map);
     let keys = c_sorted(map.dom());
     lemma_sorted(map.dom());
     assert forall|i: int| 0 <= i < keys.len() implies map.contains_key(#[trigger] keys[i]) by {
@@ -5857,7 +5898,7 @@ pub(crate) proof fn lemma_origin_due(
             assert(due_context(key, o, map, state.store, id));
             let obj = map[id];
             let (map2, notes) = spec_step_object(map, id, now, config.retry_timeout);
-            assert(spec_run_due(doc, now, config.retry_timeout) == (DocV::Origin(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
+            assert(spec_run_due(doc, now, config.retry_timeout) == (DocumentBodyV::Workflow(map2), None::<Response>, Seq::<PendingV>::empty(), notes));
             if obj.promise.state == PromiseState::Pending && obj.promise.timeout_at <= now {
                 lemma_promise_due(config, key, o, map, state, now, id);
             } else if obj.promise.state == PromiseState::Pending {
@@ -5911,10 +5952,10 @@ pub(crate) proof fn lemma_schedule_due(
         finite_store(state.store),
         sch.next_run_at <= now,
     ensures
-        due_agrees(config, key, DocV::Schedule(Some(sch)), state, now),
+        due_agrees(config, key, DocumentBodyV::Schedule(Some(sch)), state, now),
 {
     let s = state.store;
-    let doc = DocV::Schedule(Some(sch));
+    let doc = DocumentBodyV::Schedule(Some(sch));
     assert(s.schedules.contains_key(id));
     let c = s.schedules[id];
     assert(schedule_rel(sch, c));
@@ -5925,8 +5966,8 @@ pub(crate) proof fn lemma_schedule_due(
     let results = spec_run_timeout(config, state, now);
     lemma_work_offered(config, state, now, work);
     assert(offered(config, state, now, work, results));
-    let outcome = spec_process_work(config, work, s, now);
-    assert(outcome == spec_schedule_step(s, id, now));
+    let response = spec_process_work(config, work, s, now);
+    assert(response == spec_schedule_step(s, id, now));
     let d = ScheduleV { last_run_at: Some(at), next_run_at: spec_next_cron(c.cron, at), ..c };
     let occ = Sched::Timer(
         at,
@@ -5939,8 +5980,8 @@ pub(crate) proof fn lemma_schedule_due(
         },
     );
     let n = AStore { schedules: s.schedules.insert(id, d), ..s };
-    assert(outcome == spec_did(n, seq![occ], Seq::empty()));
-    let r = spec_due_result(state, outcome);
+    assert(response == spec_did(n, seq![occ], Seq::empty()));
+    let r = spec_due_result(state, response);
     let (next, _, born, notes) = spec_run_due(doc, now, config.retry_timeout);
     let pending = PendingV {
         promise: spec_expand(sch.promise_id@, sch.id@, at),
@@ -5950,11 +5991,11 @@ pub(crate) proof fn lemma_schedule_due(
         tags: sch.promise_tags,
     };
     let sch2 = Schedule { last_run_at: Some(at), next_run_at: spec_next_cron(sch.cron@, at), ..sch };
-    assert(next == DocV::Schedule(Some(sch2)));
+    assert(next == DocumentBodyV::Schedule(Some(sch2)));
     assert(born == seq![pending]);
     assert(notes.len() == 0);
     lemma_sends_none();
-    lemma_sends_of(state, outcome);
+    lemma_sends_of(state, response);
     assert(r.send == sends_of(Seq::empty()));
     assert(r.send == note_sends(notes)) by {
         assert(notes =~= Seq::<NoteV>::empty());
@@ -5977,7 +6018,7 @@ pub(crate) proof fn lemma_schedule_due(
 // Every due step
 // ---------------------------------------------------------------------------
 
-pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc: DocV, state: Proc, now: Time)
+pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc: DocumentBodyV, state: Proc, now: Time)
     requires
         doc_rel(key, doc, state.store),
         finite_store(state.store),
@@ -5990,7 +6031,7 @@ pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc
         lemma_starts_split(key, schedule_prefix());
         assert(key == spec_schedule_key(id));
         match doc {
-            DocV::Schedule(Some(sch)) => {
+            DocumentBodyV::Schedule(Some(sch)) => {
                 if sch.next_run_at <= now {
                     lemma_schedule_due(config, key, id, sch, state, now);
                 } else {
@@ -6006,20 +6047,20 @@ pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc
         lemma_starts_split(key, origin_prefix());
         assert(key == spec_origin_key(o));
         match doc {
-            DocV::Origin(map) => {
+            DocumentBodyV::Workflow(map) => {
                 lemma_origin_due(config, key, o, map, state, now);
             },
             _ => {},
         }
     } else {
         match doc {
-            DocV::Origin(map) => {
+            DocumentBodyV::Workflow(map) => {
                 lemma_sorted(map.dom());
                 assert(c_sorted(map.dom()).len() == 0);
                 assert(spec_due_id(map, c_sorted(map.dom()), now) is None);
                 assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
-            DocV::Schedule(_) => {
+            DocumentBodyV::Schedule(_) => {
                 assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));
             },
         }
@@ -6030,7 +6071,7 @@ pub(crate) proof fn lemma_dues_agree(config: AbstractConfig)
     ensures
         dues_agree(config),
 {
-    assert forall|key: Seq<char>, doc: DocV, state: Proc, now: u64|
+    assert forall|key: Seq<char>, doc: DocumentBodyV, state: Proc, now: u64|
         doc_rel(key, doc, state.store) && finite_store(state.store) implies #[trigger] due_agrees(
         config,
         key,
@@ -6063,7 +6104,7 @@ pub(crate) proof fn lemma_born(pending: PendingV, now: Time)
             };
             let task = match born.task {
                 Some(t) if t.state == TaskState::Pending => Some(TkV {
-                    retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)),
+                    retry_timeout_at: Some(now),
                     ..t
                 }),
                 other => other,
@@ -6097,7 +6138,7 @@ pub(crate) proof fn lemma_born(pending: PendingV, now: Time)
     };
     let task = match born.task {
         Some(t) if t.state == TaskState::Pending => Some(TkV {
-            retry_timeout_at: Some(spec_offer_at(tags, at)),
+            retry_timeout_at: Some(now),
             ..t
         }),
         other => other,
@@ -6120,7 +6161,7 @@ pub(crate) proof fn lemma_born(pending: PendingV, now: Time)
     assert(object_rel(ObjV { promise, task }, p, t));
 }
 
-pub(crate) proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocV, s: AStore, now: Time)
+pub(crate) proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocumentBodyV, s: AStore, now: Time)
     requires
         doc_rel(spec_origin_key(origin(pending.promise)), doc, s),
         finite_store(s),
@@ -6131,8 +6172,8 @@ pub(crate) proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocV, s: ASt
     let o = origin(x);
     let key = spec_origin_key(o);
     lemma_origin_doc(key, o, doc, s);
-    let map = spec_origin_map(doc);
-    assert(doc == DocV::Origin(map));
+    let map = spec_workflow_map(doc);
+    assert(doc == DocumentBodyV::Workflow(map));
     assert(spec_opened(doc) == doc);
     let next = spec_occurrence(doc, pending, now);
     if map.contains_key(x) || now < pending.at {
@@ -6151,13 +6192,13 @@ pub(crate) proof fn lemma_occurrence_agrees(pending: PendingV, doc: DocV, s: ASt
         };
         let task = match born.task {
             Some(t) if t.state == TaskState::Pending => Some(TkV {
-                retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)),
+                retry_timeout_at: Some(now),
                 ..t
             }),
             other => other,
         };
         let obj = ObjV { promise, task };
-        assert(next == DocV::Origin(map.insert(x, obj)));
+        assert(next == DocumentBodyV::Workflow(map.insert(x, obj)));
         let (p, t) = spec_new_object(
             sat_add(pending.at, pending.timeout),
             pending.at,
@@ -6199,7 +6240,7 @@ pub(crate) proof fn lemma_occurrences_agree()
     ensures
         occurrences_agree(),
 {
-    assert forall|pending: PendingV, doc: DocV, s: AStore, now: u64|
+    assert forall|pending: PendingV, doc: DocumentBodyV, s: AStore, now: u64|
         doc_rel(spec_origin_key(origin(pending.promise)), doc, s) && finite_store(s) implies #[trigger] occurrence_agrees(
         pending,
         doc,
@@ -6233,12 +6274,12 @@ mod simulation {
 //! Forward simulation from the Echod concrete model to the Echod abstract model.
 //!
 //! The relation is `relation::related`. An injected `Request` is one abstract
-//! input of that call; `Stop`, and an outside step whose message is not an
+//! input of that request; `Stop`, and an outside step whose message is not an
 //! output, are empty abstract executions; an observed output is one abstract
 //! outside step of that output. A store step is an empty abstract execution.
 //! A node step that begins a flight is one abstract step, taken at the time
 //! the flight's handler runs with: a served request, or one timeout result.
-//! A node step that answers a call without a flight is one abstract shed, or
+//! A node step that answers a request without a flight is one abstract shed, or
 //! one served empty heartbeat. Every other node step is an empty abstract
 //! execution: a read, a write, and the reply when the write lands change
 //! nothing the relation reads.
@@ -6251,6 +6292,9 @@ mod simulation {
 //! erases these bodies; a Verus run is what checks them.
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use super::interpretation::{doc_rel, finite_store, lemma_others_same, others_kept, request_agrees};
@@ -6265,15 +6309,15 @@ use echod_concrete_spec::model::{
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::node::{
-    axiom_decode_encode, CachedV, DocV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
+    axiom_decode_encode_body, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
     spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
-    spec_empty_doc, spec_encode, spec_flight, spec_forget, spec_handle, spec_is_empty, spec_keep,
+    spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep,
     spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
     spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
 };
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::store::{
-    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreCall, StoreOutcome,
+    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreReq, StoreRes,
 };
 #[cfg(verus_keep_ghost)]
 use super::relation::*;
@@ -6359,10 +6403,10 @@ pub(crate) open spec fn extends<P, M>(later: Seq<Envelope<P, M>>, earlier: Seq<E
 
 /// The document a node holds under `key`: its cache, or the empty document.
 /// `relation::loaded` is this.
-pub(crate) open spec fn held(node: NodeV, key: Seq<char>) -> DocV {
+pub(crate) open spec fn held(node: NodeV, key: Seq<char>) -> DocumentBodyV {
     match spec_cached(node, key) {
         Some(cached) => spec_read(key, cached.body),
-        None => spec_empty_doc(key),
+        None => spec_empty_body(key),
     }
 }
 
@@ -6387,7 +6431,7 @@ pub(crate) open spec fn reply_send(reply: Option<(Seq<char>, u64, Response)>) ->
 }
 
 /// The writing flight `spec_decide` opens from `flight` on `doc`.
-pub(crate) open spec fn written(node: NodeV, flight: FlightV, doc: DocV) -> FlightV {
+pub(crate) open spec fn written(node: NodeV, flight: FlightV, doc: DocumentBodyV) -> FlightV {
     let (next, reply, born, notes) = decision(flight, doc, node.retry_timeout);
     FlightV {
         op: node.next_op,
@@ -6395,7 +6439,7 @@ pub(crate) open spec fn written(node: NodeV, flight: FlightV, doc: DocV) -> Flig
         born,
         reply: flight_reply(flight, reply),
         notify: notes,
-        decided: Some(spec_encode(next)),
+        decided: Some(spec_encode_body(next)),
         ..flight
     }
 }
@@ -6413,7 +6457,7 @@ pub(crate) open spec fn node_pid(i: int) -> CPid {
 }
 
 pub(crate) open spec fn no_store_traffic(env: Envelope<CPid, CMessage>) -> bool {
-    !(env.message is StoreReq) && !(env.message is StoreReply)
+    !(env.message is StoreReq) && !(env.message is StoreRes)
 }
 
 pub(crate) open spec fn process_label(label: Label<CPid, CMessage>) -> bool {
@@ -6427,16 +6471,16 @@ pub(crate) open spec fn sent(sender: CPid, entry: (CPid, CMessage)) -> Envelope<
     Envelope { sender, recipient: entry.0, message: entry.1 }
 }
 
-/// `call` is still a client request on `network`. The network only grows.
-pub(crate) open spec fn request_carried(network: Seq<Envelope<CPid, CMessage>>, call: Call) -> bool {
+/// `request` is still a client request on `network`. The network only grows.
+pub(crate) open spec fn request_carried(network: Seq<Envelope<CPid, CMessage>>, request: Call) -> bool {
     exists|i: int|
         #![trigger network[i]]
         0 <= i < network.len() && network[i].sender == CPid::Outside && network[i].message
-            == CMessage::Request(call)
+            == CMessage::Request(request)
 }
 
-pub(crate) open spec fn empty_heartbeat(call: Call) -> bool {
-    match call.request {
+pub(crate) open spec fn empty_heartbeat(request: Call) -> bool {
+    match request.request {
         echod_types::Request::TaskHeartbeat(q) => q.tasks@.len() == 0,
         _ => false,
     }
@@ -6540,17 +6584,17 @@ pub(crate) proof fn lemma_request_monotone(
         carried_request(env, later),
 {
     match env.message {
-        CMessage::Request(call) => {
+        CMessage::Request(request) => {
             if env.sender == CPid::Outside {
                 let j = choose|j: int|
                     #![trigger earlier[j]]
                     0 <= j < earlier.len() && earlier[j] == Envelope {
                         sender: APid::Outside,
                         recipient: APid::Service,
-                        message: AMessage::Request(call),
+                        message: AMessage::Request(request),
                     };
                 assert(later[j] == earlier[j]);
-                assert(service_request(later, call));
+                assert(service_request(later, request));
             }
         },
         _ => {},
@@ -6641,21 +6685,21 @@ pub(crate) proof fn lemma_push_keeps_coverage(
     lemma_append_keeps_coverage(before, suffix, earlier, later);
 }
 
-pub(crate) proof fn lemma_pushed_request(network: Seq<Envelope<APid, AMessage>>, call: Call)
+pub(crate) proof fn lemma_pushed_request(network: Seq<Envelope<APid, AMessage>>, request: Call)
     ensures
         service_request(
             network.push(Envelope {
                 sender: APid::Outside,
                 recipient: APid::Service,
-                message: AMessage::Request(call),
+                message: AMessage::Request(request),
             }),
-            call,
+            request,
         ),
 {
     let added = Envelope {
         sender: APid::Outside,
         recipient: APid::Service,
-        message: AMessage::Request(call),
+        message: AMessage::Request(request),
     };
     let later = network.push(added);
     let j = network.len() as int;
@@ -6770,7 +6814,7 @@ pub(crate) proof fn lemma_matches_same_visible(
     assert(project::<AModel>(abstract_model(), execution) == same);
 }
 
-/// A process step with the outcome at `j`, stated over the model's trait: the
+/// A process step with the response at `j`, stated over the model's trait: the
 /// witness `step` asks for is in the form `step` names it.
 pub(crate) proof fn lemma_process_step<M: Spec>(
     m: M,
@@ -6790,21 +6834,21 @@ pub(crate) proof fn lemma_process_step<M: Spec>(
     ensures
         ({
             let process = world.process[i].0;
-            let outcome = world.process[i].1.on_event(config, at, event)[j];
+            let response = world.process[i].1.on_event(config, at, event)[j];
             world.step(
                 m,
                 config,
-                Label::Process { process, at, event, send: outcome.send },
-                land(world, i, process, at, outcome),
+                Label::Process { process, at, event, send: response.send },
+                land(world, i, process, at, response),
             )
         }),
 {
     rover_spec::rover::spec::process_step(m, config, world, i, at, event, j);
 }
 
-/// One abstract process step of the service, with the outcome at `index`.
-/// The world it lands in: the one slot holds the outcome's state, the
-/// network grew by the outcome's sends, the clock is `at`.
+/// One abstract process step of the service, with the response at `index`.
+/// The world it lands in: the one slot holds the response's state, the
+/// network grew by the response's sends, the clock is `at`.
 pub(crate) proof fn lemma_service_step(
     config: AbstractConfig,
     before_a: State<AModel>,
@@ -6819,11 +6863,11 @@ pub(crate) proof fn lemma_service_step(
         0 <= index < astate(before_a).on_event(config, at, event).len(),
     ensures
         ({
-            let outcome = astate(before_a).on_event(config, at, event)[index];
-            &&& after_a == land(before_a, 0, APid::Service, at, outcome)
+            let response = astate(before_a).on_event(config, at, event)[index];
+            &&& after_a == land(before_a, 0, APid::Service, at, response)
             &&& single(after_a)
-            &&& astate(after_a) == outcome.state
-            &&& after_a.network == before_a.network + envelopes(APid::Service, outcome.send)
+            &&& astate(after_a) == response.state
+            &&& after_a.network == before_a.network + envelopes(APid::Service, response.send)
             &&& after_a.now == at
             &&& extends(after_a.network, before_a.network)
             &&& matches(abstract_model(), config, before_a, Seq::<BoundaryEvent>::empty(), after_a)
@@ -6831,18 +6875,18 @@ pub(crate) proof fn lemma_service_step(
 {
     reveal(State::step);
     let outcomes = astate(before_a).on_event(config, at, event);
-    let outcome = outcomes[index];
+    let response = outcomes[index];
     lemma_single_present(before_a);
-    let label = Label::Process { process: APid::Service, at, event, send: outcome.send };
-    let after_a = land(before_a, 0, APid::Service, at, outcome);
+    let label = Label::Process { process: APid::Service, at, event, send: response.send };
+    let after_a = land(before_a, 0, APid::Service, at, response);
     assert(before_a.process[0].1 == astate(before_a));
     lemma_process_step(abstract_model(), config, before_a, 0, at, event, index);
     assert(before_a.step(abstract_model(), config, label, after_a));
     assert(abstract_model().observe(label) =~= Seq::<BoundaryEvent>::empty());
     lemma_matched_step(config, before_a, label, after_a, Seq::<BoundaryEvent>::empty());
     assert(after_a.process.len() == 1);
-    assert(after_a.process[0] == (APid::Service, outcome.state));
-    lemma_extends_add(before_a.network, envelopes(APid::Service, outcome.send));
+    assert(after_a.process[0] == (APid::Service, response.state));
+    lemma_extends_add(before_a.network, envelopes(APid::Service, response.send));
     after_a
 }
 
@@ -7181,7 +7225,7 @@ pub(crate) proof fn lemma_forget(docs: Seq<CachedV>, key: Seq<char>, i: int)
 pub(crate) proof fn lemma_keep(
     docs: Seq<CachedV>,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     etag: Option<Seq<char>>,
 )
     requires
@@ -7190,9 +7234,9 @@ pub(crate) proof fn lemma_keep(
         ({
             let next = spec_keep(docs, key, doc, etag);
             &&& forall|j: int, k: int| 0 <= j < k < next.len() ==> #[trigger] next[j].key != #[trigger] next[k].key
-            &&& (spec_is_empty(doc) && etag is None ==> spec_cached_from(next, key, 0) is None)
-            &&& (!(spec_is_empty(doc) && etag is None) ==> spec_cached_from(next, key, 0) == Some(
-                CachedV { key, body: spec_encode(doc), etag },
+            &&& (spec_body_is_empty(doc) && etag is None ==> spec_cached_from(next, key, 0) is None)
+            &&& (!(spec_body_is_empty(doc) && etag is None) ==> spec_cached_from(next, key, 0) == Some(
+                CachedV { key, body: spec_encode_body(doc), etag },
             ))
             &&& forall|other: Seq<char>| other != key ==> #[trigger] spec_cached_from(next, other, 0)
                 == spec_cached_from(docs, other, 0)
@@ -7200,7 +7244,7 @@ pub(crate) proof fn lemma_keep(
                 0 <= m < docs.len() && #[trigger] docs[m] == next[k]
         }),
 {
-    if spec_is_empty(doc) && etag is None {
+    if spec_body_is_empty(doc) && etag is None {
         lemma_forget(docs, key, 0);
         let next = spec_forget(docs, key, 0);
         assert forall|k: int| 0 <= k < next.len() implies #[trigger] next[k].key == key || exists|m: int|
@@ -7209,7 +7253,7 @@ pub(crate) proof fn lemma_keep(
             assert(docs[m] == next[k]);
         };
     } else {
-        lemma_remember(docs, key, spec_encode(doc), etag, 0);
+        lemma_remember(docs, key, spec_encode_body(doc), etag, 0);
     }
 }
 
@@ -7512,29 +7556,29 @@ pub(crate) proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
 // ---------------------------------------------------------------------------
 
 /// An empty document that reads as `s` under `key` is the empty document.
-pub(crate) proof fn lemma_empty_doc_rel(key: Seq<char>, doc: DocV, s: echod_abstract_spec::state::StoreV)
+pub(crate) proof fn lemma_empty_body_rel(key: Seq<char>, doc: DocumentBodyV, s: echod_abstract_spec::state::StoreV)
     requires
         doc_rel(key, doc, s),
-        spec_is_empty(doc),
+        spec_body_is_empty(doc),
     ensures
-        doc_rel(key, spec_empty_doc(key), s),
+        doc_rel(key, spec_empty_body(key), s),
 {
     match doc {
-        DocV::Origin(map) => {
+        DocumentBodyV::Workflow(map) => {
             assert(!echod_concrete_spec::store::spec_starts(key, super::interpretation::schedule_prefix()));
             assert(map.dom().finite());
             assert(map.dom().len() == 0);
             assert(map.dom() =~= Set::<Seq<char>>::empty());
             assert(map =~= Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty());
-            assert(spec_empty_doc(key) == DocV::Origin(Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty()));
+            assert(spec_empty_body(key) == DocumentBodyV::Workflow(Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty()));
         },
-        DocV::Schedule(slot) => {
+        DocumentBodyV::Schedule(slot) => {
             assert(slot is None);
             if echod_concrete_spec::store::spec_starts(key, super::interpretation::schedule_prefix()) {
-                assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+                assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
             } else {
                 let map = Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty();
-                assert(spec_empty_doc(key) == DocV::Origin(map));
+                assert(spec_empty_body(key) == DocumentBodyV::Workflow(map));
                 assert(map.dom() =~= Set::<Seq<char>>::empty());
             }
         },
@@ -7600,25 +7644,25 @@ pub(crate) proof fn lemma_notes(notes: Seq<NoteV>)
     }
 }
 
-/// A node's reply is the service's output of the same call.
-pub(crate) proof fn lemma_reply_is_output(call: Call, response: Response)
+/// A node's reply is the service's output of the same request.
+pub(crate) proof fn lemma_reply_is_output(request: Call, response: Response)
     ensures
-        spec_reply(call.client@, call.id, response) == (
+        spec_reply(request.client@, request.id, response) == (
             CPid::Outside,
-            CMessage::Output(Output::Response { client: call.client, id: call.id, response }),
+            CMessage::Output(Output::Response { client: request.client, id: request.id, response }),
         ),
-        reply_output(call.client@, call.id, response) == (Output::Response {
-            client: call.client,
-            id: call.id,
+        reply_output(request.client@, request.id, response) == (Output::Response {
+            client: request.client,
+            id: request.id,
             response,
         }),
 {
-    lemma_string(call.client@);
-    axiom_string_ext(spec_string(call.client@), call.client);
+    lemma_string(request.client@);
+    axiom_string_ext(spec_string(request.client@), request.client);
 }
 
 /// `decision` reads the job and the time of a flight.
-pub(crate) proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocV, retry_timeout: u64)
+pub(crate) proof fn lemma_decision_same(a: FlightV, b: FlightV, doc: DocumentBodyV, retry_timeout: u64)
     requires
         a.job == b.job,
         a.now == b.now,
@@ -7640,7 +7684,7 @@ pub(crate) proof fn lemma_reply_same(a: FlightV, b: FlightV, reply: Option<Respo
 /// The empty document is empty.
 pub(crate) proof fn lemma_empty_is_empty(key: Seq<char>)
     ensures
-        spec_is_empty(spec_empty_doc(key)),
+        spec_body_is_empty(spec_empty_body(key)),
 {
     if echod_concrete_spec::store::spec_starts(key, seq!['s', '/']) {
     } else {
@@ -7667,7 +7711,7 @@ pub(crate) proof fn lemma_forget_absent(docs: Seq<CachedV>, key: Seq<char>, i: i
 
 /// `spec_decide` from a reading flight: the node keeps the document and
 /// answers, or opens the write of what it decided.
-pub(crate) proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
+pub(crate) proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV)
     requires
         !flight.writing,
     ensures
@@ -7684,7 +7728,7 @@ pub(crate) proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
             } else {
                 let w = written(node, flight, doc);
                 &&& after == NodeV { flight: Some(w), next_op: (node.next_op + 1) as u64, ..node }
-                &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node.next_op, call: request_of(w) })]
+                &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node.next_op, request: request_of(w) })]
             }
         }),
 {
@@ -7694,20 +7738,20 @@ pub(crate) proof fn lemma_decide(node: NodeV, flight: FlightV, doc: DocV)
     if next == held(node, flight.key) && born.len() == 0 {
     } else {
         let w = written(node, flight, doc);
-        assert(w.decided == Some(spec_encode(next)));
+        assert(w.decided == Some(spec_encode_body(next)));
         assert(w.writing);
         match flight.etag {
             Some(chars) => {
-                assert(request_of(w) == StoreCall::PutIfMatch {
+                assert(request_of(w) == StoreReq::PutIfMatch {
                     key: spec_string(flight.key),
-                    body: spec_bytes(spec_encode(next)),
+                    body: spec_bytes(spec_encode_body(next)),
                     etag: Etag(spec_string(chars)),
                 });
             },
             None => {
-                assert(request_of(w) == StoreCall::PutIfNoneMatch {
+                assert(request_of(w) == StoreReq::PutIfNoneMatch {
                     key: spec_string(flight.key),
-                    body: spec_bytes(spec_encode(next)),
+                    body: spec_bytes(spec_encode_body(next)),
                 });
             },
         }
@@ -7755,15 +7799,15 @@ pub(crate) proof fn lemma_queue_from(config: AbstractConfig, state: AProc, now: 
     ensures
         ({
             let results = spec_queue(config, state, now, m);
-            let outcome = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
+            let response = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
             exists|j: int|
-                0 <= j < results.len() && #[trigger] results[j] == spec_internal_result(state, k, outcome)
+                0 <= j < results.len() && #[trigger] results[j] == spec_internal_result(state, k, response)
         }),
     decreases k - m,
 {
     let results = spec_queue(config, state, now, m);
-    let outcome = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
-    let wanted = spec_internal_result(state, k, outcome);
+    let response = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
+    let wanted = spec_internal_result(state, k, response);
     if m == k {
         assert(results[0] == wanted);
     } else {
@@ -7791,15 +7835,15 @@ pub(crate) proof fn lemma_queue_offers(config: AbstractConfig, state: AProc, now
     ensures
         ({
             let outcomes = state.on_event(config, now, ProcessEvent::Timeout);
-            let outcome = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
+            let response = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
             &&& 0 <= j < outcomes.len()
-            &&& outcomes[j] == spec_internal_result(state, k, outcome)
+            &&& outcomes[j] == spec_internal_result(state, k, response)
         }),
 {
     lemma_queue_from(config, state, now, 0, k);
     let queued = spec_queue(config, state, now, 0);
-    let outcome = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
-    let wanted = spec_internal_result(state, k, outcome);
+    let response = spec_process_work(config, spec_body(state.pending[k]), state.store, now);
+    let wanted = spec_internal_result(state, k, response);
     let j = choose|j: int| 0 <= j < queued.len() && #[trigger] queued[j] == wanted;
     let results = spec_run_timeout(config, state, now);
     assert(results == queued + self::derived(config, state, now));
@@ -7814,7 +7858,7 @@ pub(crate) open spec fn derived(config: AbstractConfig, state: AProc, now: Time)
     echod_abstract_spec::rover::spec_derived(config, state, now)
 }
 
-/// A timeout result at `j` is an outcome of the service's timeout step.
+/// A timeout result at `j` is an response of the service's timeout step.
 pub(crate) proof fn lemma_timeout_offers(config: AbstractConfig, state: AProc, now: Time, j: int)
     requires
         0 <= j < spec_run_timeout(config, state, now).len(),
@@ -8034,7 +8078,7 @@ pub(crate) proof fn lemma_invariant_grow(fleet: ConcreteConfig, cb: State<CModel
         assert(node_ok(k, node_at(cb, k), store_at(fleet, cb)));
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -8043,7 +8087,7 @@ pub(crate) proof fn lemma_invariant_grow(fleet: ConcreteConfig, cb: State<CModel
                 let node = node_at(ca, i);
                 &&& 0 <= i < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -8056,7 +8100,7 @@ pub(crate) proof fn lemma_invariant_grow(fleet: ConcreteConfig, cb: State<CModel
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -8065,7 +8109,7 @@ pub(crate) proof fn lemma_invariant_grow(fleet: ConcreteConfig, cb: State<CModel
                 let node = node_at(ca, i);
                 &&& 0 <= i < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == outcome_of(node.flight.unwrap()))
             }
         },
         _ => true,
@@ -8215,7 +8259,7 @@ pub(crate) proof fn lemma_cache_ok_keep(
     store: CStore,
     key: Seq<char>,
     c: CachedV,
-    next: DocV,
+    next: DocumentBodyV,
 )
     requires
         cache_ok(i, node0, store),
@@ -8225,10 +8269,10 @@ pub(crate) proof fn lemma_cache_ok_keep(
         node2.nodes == node0.nodes,
         spec_cached(node0, key) == Some(c),
         cache_entry_ok(key, c, store),
-        c.body == spec_encode(next),
-        spec_is_empty(next) && c.etag is None ==> spec_cached(node2, key) is None,
-        !(spec_is_empty(next) && c.etag is None) ==> spec_cached(node2, key) == Some(
-            CachedV { key, body: spec_encode(next), etag: c.etag },
+        c.body == spec_encode_body(next),
+        spec_body_is_empty(next) && c.etag is None ==> spec_cached(node2, key) is None,
+        !(spec_body_is_empty(next) && c.etag is None) ==> spec_cached(node2, key) == Some(
+            CachedV { key, body: spec_encode_body(next), etag: c.etag },
         ),
         forall|other: Seq<char>| other != key ==> #[trigger] spec_cached(node2, other)
             == spec_cached(node0, other),
@@ -8247,12 +8291,12 @@ pub(crate) proof fn lemma_cache_ok_keep(
         assert(spec_owns(node0, k));
         assert(!applied_write(i, node0, store, k));
         if k == key {
-            if spec_is_empty(next) && c.etag is None {
+            if spec_body_is_empty(next) && c.etag is None {
                 assert(physical(store, key) is None);
             } else {
                 lemma_cached_from(node0.documents, key, 0);
                 assert(c.key == key);
-                assert(CachedV { key, body: spec_encode(next), etag: c.etag } == c);
+                assert(CachedV { key, body: spec_encode_body(next), etag: c.etag } == c);
             }
         } else {
             assert(spec_cached(node2, k) == spec_cached(node0, k));
@@ -8304,7 +8348,7 @@ pub(crate) proof fn lemma_silent(
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -8313,7 +8357,7 @@ pub(crate) proof fn lemma_silent(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -8321,7 +8365,7 @@ pub(crate) proof fn lemma_silent(
     } by {
         assert(ca.network[k] == cb.network[k]);
         match cb.network[k].message {
-            CMessage::StoreReq { op, call } => {
+            CMessage::StoreReq { op, request } => {
                 let n = cb.network[k].sender->Node_0 as int;
                 if n == i {
                     assert(node_at(ca, n).flight == node_at(cb, n).flight);
@@ -8332,7 +8376,7 @@ pub(crate) proof fn lemma_silent(
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -8341,14 +8385,14 @@ pub(crate) proof fn lemma_silent(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == outcome_of(node.flight.unwrap()))
             }
         },
         _ => true,
     } by {
         assert(ca.network[k] == cb.network[k]);
         match cb.network[k].message {
-            CMessage::StoreReply { op, outcome } => {
+            CMessage::StoreRes { op, response } => {
                 let n = cb.network[k].recipient->Node_0 as int;
                 if n == i {
                     assert(node_at(ca, n).flight == node_at(cb, n).flight);
@@ -8645,7 +8689,7 @@ pub(crate) proof fn lemma_traffic_ok(
                 recipient: CPid::Store,
                 message: CMessage::StoreReq {
                     op: node2.flight.unwrap().op,
-                    call: request_of(node2.flight.unwrap()),
+                    request: request_of(node2.flight.unwrap()),
                 },
             }),
     ensures
@@ -8656,7 +8700,7 @@ pub(crate) proof fn lemma_traffic_ok(
     let node0 = node_at(cb, i);
     let store = store_at(fleet, cb);
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReq { op, call } => {
+        CMessage::StoreReq { op, request } => {
             let env = ca.network[k];
             &&& env.recipient == CPid::Store
             &&& env.sender is Node
@@ -8665,7 +8709,7 @@ pub(crate) proof fn lemma_traffic_ok(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& op < node.next_op
-                &&& (flight_op(node) == Some(op) ==> call == request_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> request == request_of(node.flight.unwrap()))
                 &&& (!store_at(fleet, ca).seen.contains((env.sender, op)) ==> flight_op(node) == Some(op))
             }
         },
@@ -8674,7 +8718,7 @@ pub(crate) proof fn lemma_traffic_ok(
         if k < cb.network.len() {
             assert(ca.network[k] == cb.network[k]);
             match cb.network[k].message {
-                CMessage::StoreReq { op, call } => {
+                CMessage::StoreReq { op, request } => {
                     let n = cb.network[k].sender->Node_0 as int;
                     if n == i {
                         assert(requested(cb, node_pid(i), op));
@@ -8693,13 +8737,13 @@ pub(crate) proof fn lemma_traffic_ok(
         } else {
             if !no_store_traffic(ca.network[k]) {
                 let flight = node2.flight.unwrap();
-                assert(ca.network[k].message == CMessage::StoreReq { op: flight.op, call: request_of(flight) });
+                assert(ca.network[k].message == CMessage::StoreReq { op: flight.op, request: request_of(flight) });
                 assert(flight_op(node2) == Some(flight.op));
             }
         }
     };
     assert forall|k: int| 0 <= k < ca.network.len() implies match (#[trigger] ca.network[k]).message {
-        CMessage::StoreReply { op, outcome } => {
+        CMessage::StoreRes { op, response } => {
             let env = ca.network[k];
             &&& env.sender == CPid::Store
             &&& env.recipient is Node
@@ -8708,7 +8752,7 @@ pub(crate) proof fn lemma_traffic_ok(
                 let node = node_at(ca, n);
                 &&& 0 <= n < fleet.nodes
                 &&& store_at(fleet, ca).seen.contains((env.recipient, op))
-                &&& (flight_op(node) == Some(op) ==> outcome == outcome_of(node.flight.unwrap()))
+                &&& (flight_op(node) == Some(op) ==> response == outcome_of(node.flight.unwrap()))
             }
         },
         _ => true,
@@ -8716,7 +8760,7 @@ pub(crate) proof fn lemma_traffic_ok(
         if k < cb.network.len() {
             assert(ca.network[k] == cb.network[k]);
             match cb.network[k].message {
-                CMessage::StoreReply { op, outcome } => {
+                CMessage::StoreRes { op, response } => {
                     let n = cb.network[k].recipient->Node_0 as int;
                     if n == i {
                         lemma_seen_issued(fleet, cb, i, op);
@@ -8731,7 +8775,7 @@ pub(crate) proof fn lemma_traffic_ok(
                 _ => {},
             }
         } else {
-            assert(!(ca.network[k].message is StoreReply));
+            assert(!(ca.network[k].message is StoreRes));
         }
     };
     assert forall|pair: (CPid, u64)| #[trigger] store_at(fleet, ca).seen.contains(pair) implies requested(
@@ -8866,11 +8910,11 @@ pub(crate) proof fn lemma_begin_related(
             let r = spec_flight(op, key, None, at, caller, job);
             assert(node2 == NodeV { flight: Some(r), next_op: (op + 1) as u64, ..node1 });
             assert(send == seq![spec_get(op, key)]);
-            assert(request_of(r) == StoreCall::Get { key: spec_string(key) });
+            assert(request_of(r) == StoreReq::Get { key: spec_string(key) });
             lemma_decision_same(r, probe_flight, doc, node0.retry_timeout);
             lemma_reply_same(r, probe_flight, reply);
             assert(loaded(node2, key) == doc);
-            assert(doc == spec_empty_doc(key));
+            assert(doc == spec_empty_body(key));
             // facts of the node
             assert(flight_ok(node2));
             assert(cache_owned(node2));
@@ -8895,7 +8939,7 @@ pub(crate) proof fn lemma_begin_related(
                     recipient: CPid::Store,
                     message: CMessage::StoreReq {
                         op: node2.flight.unwrap().op,
-                        call: request_of(node2.flight.unwrap()),
+                        request: request_of(node2.flight.unwrap()),
                     },
                 }) by {
                 assert(k == cb.network.len());
@@ -8934,7 +8978,7 @@ pub(crate) proof fn lemma_begin_related(
             lemma_decide(node1, f, doc);
             assert(held(node1, key) == doc);
             assert(cache_entry_ok(key, c, store));
-            assert(c.body == spec_encode(doc));
+            assert(c.body == spec_encode_body(doc));
             if next == doc && born.len() == 0 {
                 // the node keeps the document and answers
                 assert(node2 == NodeV {
@@ -8970,7 +9014,7 @@ pub(crate) proof fn lemma_begin_related(
                         recipient: CPid::Store,
                         message: CMessage::StoreReq {
                             op: node2.flight.unwrap().op,
-                            call: request_of(node2.flight.unwrap()),
+                            request: request_of(node2.flight.unwrap()),
                         },
                     }) by {
                     let m = k - cb.network.len();
@@ -8987,12 +9031,12 @@ pub(crate) proof fn lemma_begin_related(
                 };
                 lemma_traffic_ok(fleet, cb, ca, i, node2);
                 // the store, read through the nodes
-                if spec_is_empty(next) && c.etag is None {
-                    assert(intended(node2, key) == spec_empty_doc(key));
-                    lemma_empty_doc_rel(key, next, next_store);
+                if spec_body_is_empty(next) && c.etag is None {
+                    assert(intended(node2, key) == spec_empty_body(key));
+                    lemma_empty_body_rel(key, next, next_store);
                 } else {
-                    axiom_decode_encode(next);
-                    assert(intended(node2, key) == spec_read(key, spec_encode(next)));
+                    axiom_decode_encode_body(next);
+                    assert(intended(node2, key) == spec_read(key, spec_encode_body(next)));
                     assert(intended(node2, key) == next);
                 }
                 assert(doc_rel(key, effective(fleet, ca, key), next_store));
@@ -9029,7 +9073,7 @@ pub(crate) proof fn lemma_begin_related(
                 // the node opens the write
                 let w = written(node1, f, doc);
                 assert(node2 == NodeV { flight: Some(w), next_op: (op + 1) as u64, ..node1 });
-                assert(send == seq![(CPid::Store, CMessage::StoreReq { op, call: request_of(w) })]);
+                assert(send == seq![(CPid::Store, CMessage::StoreReq { op, request: request_of(w) })]);
                 assert(w.op == op);
                 assert(w.key == key);
                 assert(w.job == job);
@@ -9064,7 +9108,7 @@ pub(crate) proof fn lemma_begin_related(
                         recipient: CPid::Store,
                         message: CMessage::StoreReq {
                             op: node2.flight.unwrap().op,
-                            call: request_of(node2.flight.unwrap()),
+                            request: request_of(node2.flight.unwrap()),
                         },
                     }) by {
                     assert(k == cb.network.len());
@@ -9118,17 +9162,17 @@ pub(crate) proof fn lemma_begin_related(
 // A client request
 // ---------------------------------------------------------------------------
 
-/// The one send of a served or shed call is the service's output of its reply.
-pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, call: Call, response: Response)
+/// The one send of a served or shed request is the service's output of its reply.
+pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, request: Call, response: Response)
     ensures
         ({
-            let send = spec_send(call, response, Seq::empty());
+            let send = spec_send(request, response, Seq::empty());
             &&& send.len() == 1
-            &&& service_output(network + envelopes(APid::Service, send), reply_output(call.client@, call.id, response))
+            &&& service_output(network + envelopes(APid::Service, send), reply_output(request.client@, request.id, response))
         }),
 {
-    let send = spec_send(call, response, Seq::empty());
-    let output = Output::Response { client: call.client, id: call.id, response };
+    let send = spec_send(request, response, Seq::empty());
+    let output = Output::Response { client: request.client, id: request.id, response };
     assert(Seq::<echod_abstract_spec::state::DispatchV>::empty().map_values(
         |dispatch: echod_abstract_spec::state::DispatchV| (
             APid::Outside,
@@ -9138,10 +9182,10 @@ pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, 
     assert(send =~= seq![(APid::Outside, AMessage::Output(output))]);
     assert(send[0] == (APid::Outside, AMessage::Output(output)));
     lemma_sent_outputs(network, send, 0);
-    lemma_reply_is_output(call, response);
+    lemma_reply_is_output(request, response);
 }
 
-/// A node that answered a call without a flight, against an abstract world
+/// A node that answered a request without a flight, against an abstract world
 /// whose state stayed and whose network carries that reply.
 pub(crate) proof fn lemma_answered_idle(
     fleet: ConcreteConfig,
@@ -9153,7 +9197,7 @@ pub(crate) proof fn lemma_answered_idle(
     i: int,
     at: Time,
     node2: NodeV,
-    call: Call,
+    request: Call,
     response: Response,
 )
     requires
@@ -9161,16 +9205,16 @@ pub(crate) proof fn lemma_answered_idle(
         0 <= i < fleet.nodes,
         cb.now <= at,
         node2 == node_at(cb, i),
-        ca == land(cb, i, node_pid(i), at, node_result(node2, seq![spec_reply(call.client@, call.id, response)])),
+        ca == land(cb, i, node_pid(i), at, node_result(node2, seq![spec_reply(request.client@, request.id, response)])),
         single(aa),
         aa.process == ab.process,
         aa.now <= at,
         extends(aa.network, ab.network),
-        service_output(aa.network, reply_output(call.client@, call.id, response)),
+        service_output(aa.network, reply_output(request.client@, request.id, response)),
     ensures
         related(fleet, ca, aa),
 {
-    let send = seq![spec_reply(call.client@, call.id, response)];
+    let send = seq![spec_reply(request.client@, request.id, response)];
     let cm = land(cb, i, node_pid(i), at, node_result(node2, Seq::empty()));
     lemma_same_work(fleet, config, cb, ab, i, at, node2, cm);
     assert(ca.process == cm.process);
@@ -9180,7 +9224,7 @@ pub(crate) proof fn lemma_answered_idle(
     assert(ca.network == cm.network + sent);
     lemma_extends_add(cm.network, sent);
     lemma_envelope_at(node_pid(i), send, 0);
-    assert(sent[0].message == CMessage::Output(reply_output(call.client@, call.id, response)));
+    assert(sent[0].message == CMessage::Output(reply_output(request.client@, request.id, response)));
     assert forall|k: int| cm.network.len() <= k < ca.network.len() implies no_store_traffic(#[trigger] ca.network[k]) by {
         assert(ca.network[k] == sent[0]);
     };
@@ -9194,8 +9238,8 @@ pub(crate) proof fn lemma_answered_idle(
     lemma_carry(fleet, cm, ab, ca, aa);
 }
 
-/// A call whose handler the node runs: the service serves it, with the
-/// first outcome, at the same time, on the store the node's document reads as.
+/// A request whose handler the node runs: the service serves it, with the
+/// first response, at the same time, on the store the node's document reads as.
 pub(crate) proof fn lemma_request_served(
     fleet: ConcreteConfig,
     config: AbstractConfig,
@@ -9203,7 +9247,7 @@ pub(crate) proof fn lemma_request_served(
     ab: State<AModel>,
     i: int,
     at: Time,
-    call: Call,
+    request: Call,
     key: Seq<char>,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
@@ -9214,17 +9258,17 @@ pub(crate) proof fn lemma_request_served(
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
         cb.now <= at,
-        service_request(ab.network, call),
+        service_request(ab.network, request),
         node_at(cb, i).flight is None,
         node_at(cb, i).next_op < u64::MAX,
-        spec_key(call.request) == Some(key),
+        spec_key(request.request) == Some(key),
         spec_owns(node_at(cb, i), key),
         (node2, send) == spec_begin(
             node_at(cb, i),
             key,
-            JobV::External(call.request),
+            JobV::External(request.request),
             at,
-            Some((call.client@, call.id)),
+            Some((request.client@, request.id)),
         ),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
@@ -9235,34 +9279,34 @@ pub(crate) proof fn lemma_request_served(
     let node0 = node_at(cb, i);
     let state = astate(ab);
     let s = state.store;
-    let caller = Some((call.client@, call.id));
-    let job = JobV::External(call.request);
+    let caller = Some((request.client@, request.id));
+    let job = JobV::External(request.request);
     let doc = held(node0, key);
     lemma_owner(fleet, cb, i, key);
     assert(effective(fleet, cb, key) == doc);
     assert(doc_rel(key, doc, s));
-    assert(request_agrees(config, call.request, key, doc, s, at));
-    let (next, response) = spec_handle(doc, call.request, at);
-    let outs = spec_handler(config, call.request, s, at);
+    assert(request_agrees(config, request.request, key, doc, s, at));
+    let (next, response) = spec_handle(doc, request.request, at);
+    let outs = spec_handler(config, request.request, s, at);
     assert(outs.len() == 1);
     assert(outs[0].resp == response);
-    let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(call) };
+    let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(request) };
     assert(event_valid(ab, APid::Service, event));
     let outcomes = state.on_event(config, at, event);
-    let served = spec_run(config, state, call, at);
+    let served = spec_run(config, state, request, at);
     assert(served.len() == 1);
-    assert(served[0] == spec_request_outcome(state, call, outs[0]));
-    assert(outcomes == served + echod_abstract_spec::rover::spec_losses(state, call, outs) + seq![spec_shed(state, call)]);
+    assert(served[0] == spec_request_outcome(state, request, outs[0]));
+    assert(outcomes == served + echod_abstract_spec::rover::spec_losses(state, request, outs) + seq![spec_shed(state, request)]);
     assert(outcomes[0] == served[0]);
     let aa = lemma_service_step(config, ab, at, event, 0);
-    let outcome = outcomes[0];
+    let step_result = outcomes[0];
     assert(outs[0].work =~= Seq::<Sched<InternalV>>::empty());
     assert(outs[0].send =~= Seq::<echod_abstract_spec::state::DispatchV>::empty());
     assert(astate(aa).pending =~= state.pending);
     assert(astate(aa).store == outs[0].next);
     assert(finite_store(astate(aa).store));
-    assert(outcome.send == spec_send(call, response, Seq::empty()));
-    lemma_send_is_reply(ab.network, call, response);
+    assert(step_result.send == spec_send(request, response, Seq::empty()));
+    lemma_send_is_reply(ab.network, request, response);
     // the decision the flight stands for
     let probe_flight = probe(key, at, caller, job);
     let (dnext, dreply, born, notes) = decision(probe_flight, doc, node0.retry_timeout);
@@ -9270,7 +9314,7 @@ pub(crate) proof fn lemma_request_served(
     assert(dreply == Some(response));
     assert(born.len() == 0);
     assert(notes.len() == 0);
-    assert(flight_reply(probe_flight, dreply) == Some((call.client@, call.id, response)));
+    assert(flight_reply(probe_flight, dreply) == Some((request.client@, request.id, response)));
     // the occurrences: nothing changes
     assert forall|item: Sched<InternalV>|
         owed(fleet, cb, item, 0) - owed_by(node0, item) + items(node0.pending + born).to_multiset().count(item)
@@ -9292,7 +9336,7 @@ pub(crate) proof fn lemma_request(
     ab: State<AModel>,
     i: int,
     at: Time,
-    call: Call,
+    request: Call,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
     ca: State<CModel>,
@@ -9302,10 +9346,10 @@ pub(crate) proof fn lemma_request(
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
         cb.now <= at,
-        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(call) }),
+        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(request) }),
         node_at(cb, i).flight is None,
         node_at(cb, i).next_op < u64::MAX,
-        (node2, send) == spec_request(node_at(cb, i), at, call),
+        (node2, send) == spec_request(node_at(cb, i), at, request),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
         matches(abstract_model(), config, ab, Seq::<BoundaryEvent>::empty(), aa),
@@ -9313,63 +9357,63 @@ pub(crate) proof fn lemma_request(
 {
     let node0 = node_at(cb, i);
     let state = astate(ab);
-    let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(call) };
-    let wanted = Envelope { sender: CPid::Outside, recipient: node_pid(i), message: CMessage::Request(call) };
+    let event = ProcessEvent::Receive { sender: APid::Outside, message: AMessage::Request(request) };
+    let wanted = Envelope { sender: CPid::Outside, recipient: node_pid(i), message: CMessage::Request(request) };
     let k = choose|k: int| 0 <= k < cb.network.len() && #[trigger] cb.network[k] == wanted;
     assert(carried_request(cb.network[k], ab.network));
-    assert(service_request(ab.network, call));
+    assert(service_request(ab.network, request));
     let m = choose|m: int|
         #![trigger ab.network[m]]
         0 <= m < ab.network.len() && ab.network[m] == Envelope {
             sender: APid::Outside,
             recipient: APid::Service,
-            message: AMessage::Request(call),
+            message: AMessage::Request(request),
         };
     assert(event_valid(ab, APid::Service, event));
     let outcomes = state.on_event(config, at, event);
-    match spec_key(call.request) {
+    match spec_key(request.request) {
         None => {
             assert(node2 == node0);
-            let response = spec_pure(call.request);
-            assert(send == seq![spec_reply(call.client@, call.id, response)]);
-            if empty_heartbeat(call) {
-                lemma_empty_heartbeat_is_first(config, state, at, call);
+            let response = spec_pure(request.request);
+            assert(send == seq![spec_reply(request.client@, request.id, response)]);
+            if empty_heartbeat(request) {
+                lemma_empty_heartbeat_is_first(config, state, at, request);
                 let aa = lemma_service_step(config, ab, at, event, 0);
                 assert(response == Response::Status(echod_types::StatusRes { status: 200 }));
                 assert(astate(aa) == state);
                 assert(aa.process =~= ab.process);
-                lemma_send_is_reply(ab.network, call, response);
-                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, call, response);
+                lemma_send_is_reply(ab.network, request, response);
+                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, request, response);
                 aa
             } else {
-                lemma_shed_is_last(config, state, at, call);
+                lemma_shed_is_last(config, state, at, request);
                 let last = outcomes.len() as int - 1;
                 let aa = lemma_service_step(config, ab, at, event, last);
-                assert(outcomes[last] == spec_shed(state, call));
-                assert(response == spec_unavailable(call.request));
+                assert(outcomes[last] == spec_shed(state, request));
+                assert(response == spec_unavailable(request.request));
                 assert(astate(aa) == state);
                 assert(aa.process =~= ab.process);
-                lemma_send_is_reply(ab.network, call, response);
-                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, call, response);
+                lemma_send_is_reply(ab.network, request, response);
+                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, request, response);
                 aa
             }
         },
         Some(key) => {
             if !spec_owns(node0, key) {
                 assert(node2 == node0);
-                let response = spec_unavailable(call.request);
-                assert(send == seq![spec_reply(call.client@, call.id, response)]);
-                lemma_shed_is_last(config, state, at, call);
+                let response = spec_unavailable(request.request);
+                assert(send == seq![spec_reply(request.client@, request.id, response)]);
+                lemma_shed_is_last(config, state, at, request);
                 let last = outcomes.len() as int - 1;
                 let aa = lemma_service_step(config, ab, at, event, last);
-                assert(outcomes[last] == spec_shed(state, call));
+                assert(outcomes[last] == spec_shed(state, request));
                 assert(astate(aa) == state);
                 assert(aa.process =~= ab.process);
-                lemma_send_is_reply(ab.network, call, response);
-                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, call, response);
+                lemma_send_is_reply(ab.network, request, response);
+                lemma_answered_idle(fleet, config, cb, ab, ca, aa, i, at, node2, request, response);
                 aa
             } else {
-                lemma_request_served(fleet, config, cb, ab, i, at, call, key, node2, send, ca)
+                lemma_request_served(fleet, config, cb, ab, i, at, request, key, node2, send, ca)
             }
         },
     }
@@ -9497,13 +9541,13 @@ pub(crate) proof fn lemma_occurrence_begin(
         assert(spec_process_work(config, work, s, at) == out);
         let j = lemma_queue_offers(config, state, at, k);
         let aa = lemma_service_step(config, ab, at, ProcessEvent::Timeout, j);
-        let outcome = state.on_event(config, at, ProcessEvent::Timeout)[j];
-        assert(outcome == spec_internal_result(state, k, out));
+        let response = state.on_event(config, at, ProcessEvent::Timeout)[j];
+        assert(response == spec_internal_result(state, k, out));
         assert(astate(aa).store == out.next);
         assert(finite_store(astate(aa).store));
         assert(astate(aa).pending == remove_at(state.pending, k) + out.work);
         assert(out.work =~= Seq::<Sched<InternalV>>::empty());
-        assert(outcome.send =~= Seq::<(APid, AMessage)>::empty());
+        assert(response.send =~= Seq::<(APid, AMessage)>::empty());
         assert forall|item: Sched<InternalV>|
             owed(fleet, cb, item, 0) - owed_by(node0, item) + items(node1.pending + born).to_multiset().count(item)
                 <= #[trigger] astate(aa).pending.to_multiset().count(item) by {
@@ -9857,9 +9901,9 @@ pub(crate) proof fn lemma_write_after_read(
             let node0 = node_at(cb, i);
             let flight = node0.flight.unwrap();
             let rest = NodeV { flight: None, ..node0 };
-            let w = written(rest, flight, spec_empty_doc(flight.key));
+            let w = written(rest, flight, spec_empty_body(flight.key));
             &&& node2 == NodeV { flight: Some(w), next_op: (node0.next_op + 1) as u64, ..rest }
-            &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node0.next_op, call: request_of(w) })]
+            &&& send == seq![(CPid::Store, CMessage::StoreReq { op: node0.next_op, request: request_of(w) })]
         }),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
@@ -9875,7 +9919,7 @@ pub(crate) proof fn lemma_write_after_read(
     let s = astate(ab).store;
     let op = node0.next_op;
     let rest = NodeV { flight: None, ..node0 };
-    let doc = spec_empty_doc(key);
+    let doc = spec_empty_body(key);
     let w = written(rest, flight, doc);
     assert(flight_ok(node0));
     assert(spec_cached(node0, key) is None);
@@ -9893,7 +9937,7 @@ pub(crate) proof fn lemma_write_after_read(
     assert(w.caller == flight.caller);
     assert(w.etag == flight.etag);
     assert(w.writing);
-    assert(w.decided == Some(spec_encode(next)));
+    assert(w.decided == Some(spec_encode_body(next)));
     assert(w.born == born);
     assert(w.notify == notes);
     assert(w.reply == flight_reply(flight, reply));
@@ -9930,7 +9974,7 @@ pub(crate) proof fn lemma_write_after_read(
             recipient: CPid::Store,
             message: CMessage::StoreReq {
                 op: node2.flight.unwrap().op,
-                call: request_of(node2.flight.unwrap()),
+                request: request_of(node2.flight.unwrap()),
             },
         }) by {
         assert(k == cb.network.len());
@@ -9991,7 +10035,7 @@ pub(crate) proof fn lemma_store_reply(
     i: int,
     at: Time,
     op: u64,
-    outcome: StoreOutcome,
+    response: StoreRes,
     node2: NodeV,
     send: Seq<(CPid, CMessage)>,
     ca: State<CModel>,
@@ -10000,10 +10044,10 @@ pub(crate) proof fn lemma_store_reply(
         related(fleet, cb, ab),
         0 <= i < fleet.nodes,
         cb.now <= at,
-        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } }),
+        event_valid(cb, node_pid(i), ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreRes { op, response } }),
         node_at(cb, i).flight is Some,
         node_at(cb, i).next_op < u64::MAX,
-        (node2, send) == spec_store_reply(node_at(cb, i), op, outcome),
+        (node2, send) == spec_store_reply(node_at(cb, i), op, response),
         ca == land(cb, i, node_pid(i), at, node_result(node2, send)),
     ensures
         matches(abstract_model(), config, ab, Seq::<BoundaryEvent>::empty(), ab),
@@ -10022,20 +10066,20 @@ pub(crate) proof fn lemma_store_reply(
         let wanted = Envelope {
             sender: CPid::Store,
             recipient: node_pid(i),
-            message: CMessage::StoreReply { op, outcome },
+            message: CMessage::StoreRes { op, response },
         };
         let k = choose|k: int| 0 <= k < cb.network.len() && #[trigger] cb.network[k] == wanted;
         assert(store.seen.contains((node_pid(i), op)));
         assert(flight_op(node0) == Some(op));
-        assert(outcome == outcome_of(flight));
+        assert(response == outcome_of(flight));
         assert(flight_ok(node0));
         let doc0 = loaded(node0, key);
         let (next, reply, born, notes) = decision(flight, doc0, node0.retry_timeout);
         if !flight.writing {
-            assert(outcome == StoreOutcome::Got(None));
+            assert(response == StoreRes::Get { result: Ok(None) });
             assert(flight.etag is None);
             assert(spec_cached(node0, key) is None);
-            assert(doc0 == spec_empty_doc(key));
+            assert(doc0 == spec_empty_body(key));
             let rest = NodeV { flight: None, ..node0 };
             assert(FlightV { etag: None, ..flight } == flight);
             assert((node2, send) == spec_decide(rest, flight, doc0));
@@ -10043,7 +10087,7 @@ pub(crate) proof fn lemma_store_reply(
             assert(held(rest, key) == doc0);
             if next == doc0 && born.len() == 0 {
                 lemma_empty_is_empty(key);
-                assert(spec_is_empty(next));
+                assert(spec_body_is_empty(next));
                 assert(spec_keep(rest.documents, key, next, None) == spec_forget(rest.documents, key, 0));
                 lemma_cached_from(node0.documents, key, 0);
                 lemma_forget_absent(node0.documents, key, 0);
@@ -10070,9 +10114,9 @@ pub(crate) proof fn lemma_store_reply(
             }
         } else {
             let decided = flight.decided.unwrap();
-            assert(decided == spec_encode(next));
+            assert(decided == spec_encode_body(next));
             let tag = spec_etag(decided);
-            assert(outcome == StoreOutcome::Written(tag));
+            assert(response == if flight.etag is Some { StoreRes::PutIfMatch { result: Ok(tag) } } else { StoreRes::PutIfNoneMatch { result: Ok(tag) } });
             assert((node2, send) == spec_commit(node0, flight, tag));
             lemma_string(spec_etag_chars(decided));
             let chars = spec_etag_chars(decided);
@@ -10082,7 +10126,7 @@ pub(crate) proof fn lemma_store_reply(
             lemma_remember(node0.documents, key, decided, Some(chars), 0);
             let entry = CachedV { key, body: decided, etag: Some(chars) };
             assert(spec_cached(node2, key) == Some(entry));
-            axiom_decode_encode(next);
+            axiom_decode_encode_body(next);
             assert(spec_read(key, decided) == next);
             assert(loaded(node2, key) == next);
             assert(applied_write(i, node0, store, key));
@@ -10124,7 +10168,7 @@ pub(crate) proof fn lemma_push_contains<A>(s: Seq<A>, x: A, y: A)
     }
 }
 
-/// The store's answer to the live flight's call: a read of an absent key,
+/// The store's answer to the live flight's request: a read of an absent key,
 /// or a write that lands.
 pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CModel>, n: int)
     requires
@@ -10136,8 +10180,8 @@ pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CMod
         ({
             let flight = node_at(world, n).flight.unwrap();
             let store = store_at(fleet, world);
-            let (next, outcome) = spec_apply(store, request_of(flight));
-            &&& outcome == outcome_of(flight)
+            let (next, response) = spec_apply(store, request_of(flight));
+            &&& response == outcome_of(flight)
             &&& entries_distinct(next)
             &&& next.seen == store.seen
             &&& if flight.writing {
@@ -10161,13 +10205,13 @@ pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CMod
         assert(spec_cached(node, key) is None);
         assert(physical(store, key) is None);
         assert(spec_find(store.entries, key, 0) is None);
-        assert(request_of(flight) == StoreCall::Get { key: spec_string(key) });
+        assert(request_of(flight) == StoreReq::Get { key: spec_string(key) });
     } else {
         let decided = flight.decided.unwrap();
         lemma_bytes(decided);
         match flight.etag {
             None => {
-                assert(request_of(flight) == StoreCall::PutIfNoneMatch {
+                assert(request_of(flight) == StoreReq::PutIfNoneMatch {
                     key: spec_string(key),
                     body: spec_bytes(decided),
                 });
@@ -10185,7 +10229,7 @@ pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CMod
                 lemma_put(store, entry);
             },
             Some(chars) => {
-                assert(request_of(flight) == StoreCall::PutIfMatch {
+                assert(request_of(flight) == StoreReq::PutIfMatch {
                     key: spec_string(key),
                     body: spec_bytes(decided),
                     etag: Etag(spec_string(chars)),
@@ -10199,9 +10243,9 @@ pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CMod
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
                 assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
                 let entry = EntryV { key, body: decided, version: echod_concrete_spec::store::spec_bump(store.entries[idx].version) };
-                let (next, outcome) = spec_apply(store, request_of(flight));
+                let (next, response) = spec_apply(store, request_of(flight));
                 assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
-                assert(outcome == StoreOutcome::Written(spec_etag(decided)));
+                assert(response == StoreRes::PutIfMatch { result: Ok(spec_etag(decided)) });
                 lemma_put(store, entry);
                 assert(physical(next, key) == Some(decided));
                 assert(entries_distinct(next));
@@ -10236,8 +10280,8 @@ pub(crate) proof fn lemma_store(
     let store = store_at(fleet, cb);
     let slot = fleet.nodes as int;
     match event {
-        ProcessEvent::Receive { sender, message: CMessage::StoreReq { op, call } } => {
-            let wanted = Envelope { sender, recipient: CPid::Store, message: CMessage::StoreReq { op, call } };
+        ProcessEvent::Receive { sender, message: CMessage::StoreReq { op, request } } => {
+            let wanted = Envelope { sender, recipient: CPid::Store, message: CMessage::StoreReq { op, request } };
             let k = choose|k: int| 0 <= k < cb.network.len() && #[trigger] cb.network[k] == wanted;
             assert(sender is Node);
             let n = sender->Node_0 as int;
@@ -10259,20 +10303,20 @@ pub(crate) proof fn lemma_store(
                 assert(flight_op(node) == Some(op));
                 let flight = node.flight.unwrap();
                 assert(flight.op == op);
-                assert(call == request_of(flight));
+                assert(request == request_of(flight));
                 let key = flight.key;
                 assert(node_ok(n, node, store));
                 assert(flight_ok(node));
                 assert(spec_owns(node, key));
-                let (next, outcome) = spec_apply(store, call);
+                let (next, response) = spec_apply(store, request);
                 let store2 = CStore { seen: store.seen.push((sender, op)), ..next };
-                let send = seq![(sender, CMessage::StoreReply { op, outcome })];
+                let send = seq![(sender, CMessage::StoreRes { op, response })];
                 assert(spec_store(store, event) == spec_one(CProc::Store(store2), send));
                 assert(j == 0);
                 assert(ca == land(cb, slot, CPid::Store, at, store_result(store2, send)));
                 lemma_land_store(fleet, cb, at, store2, send);
                 lemma_store_answers(fleet, cb, n);
-                assert(outcome == outcome_of(flight));
+                assert(response == outcome_of(flight));
                 assert(entries_distinct(store2));
                 assert forall|other: Seq<char>| #[trigger] physical(store2, other) == physical(next, other) by {};
                 assert forall|x: (CPid, u64)| #[trigger] store2.seen.contains(x) == (store.seen.contains(x) || x == (sender, op)) by {
@@ -10323,9 +10367,9 @@ pub(crate) proof fn lemma_store(
                 // the traffic
                 lemma_envelope_at(CPid::Store, send, 0);
                 let sent = envelopes(CPid::Store, send);
-                assert(sent[0] == Envelope { sender: CPid::Store, recipient: sender, message: CMessage::StoreReply { op, outcome } });
+                assert(sent[0] == Envelope { sender: CPid::Store, recipient: sender, message: CMessage::StoreRes { op, response } });
                 assert forall|m: int| 0 <= m < ca.network.len() implies match (#[trigger] ca.network[m]).message {
-                    CMessage::StoreReq { op: op2, call: call2 } => {
+                    CMessage::StoreReq { op: op2, request: call2 } => {
                         let env = ca.network[m];
                         &&& env.recipient == CPid::Store
                         &&& env.sender is Node
@@ -10343,7 +10387,7 @@ pub(crate) proof fn lemma_store(
                     if m < cb.network.len() {
                         assert(ca.network[m] == cb.network[m]);
                         match cb.network[m].message {
-                            CMessage::StoreReq { op: op2, call: call2 } => {
+                            CMessage::StoreReq { op: op2, request: call2 } => {
                                 let q = cb.network[m].sender->Node_0 as int;
                                 assert(node_at(ca, q) == node_at(cb, q));
                                 if !store2.seen.contains((cb.network[m].sender, op2)) {
@@ -10357,7 +10401,7 @@ pub(crate) proof fn lemma_store(
                     }
                 };
                 assert forall|m: int| 0 <= m < ca.network.len() implies match (#[trigger] ca.network[m]).message {
-                    CMessage::StoreReply { op: op2, outcome: outcome2 } => {
+                    CMessage::StoreRes { op: op2, response: outcome2 } => {
                         let env = ca.network[m];
                         &&& env.sender == CPid::Store
                         &&& env.recipient is Node
@@ -10374,7 +10418,7 @@ pub(crate) proof fn lemma_store(
                     if m < cb.network.len() {
                         assert(ca.network[m] == cb.network[m]);
                         match cb.network[m].message {
-                            CMessage::StoreReply { op: op2, outcome: outcome2 } => {
+                            CMessage::StoreRes { op: op2, response: outcome2 } => {
                                 let q = cb.network[m].recipient->Node_0 as int;
                                 assert(node_at(ca, q) == node_at(cb, q));
                                 assert(store.seen.contains((cb.network[m].recipient, op2)));
@@ -10490,7 +10534,7 @@ pub(crate) proof fn lemma_node(
                 },
             }
         },
-        ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(call) } => {
+        ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Request(request) } => {
             if node.flight is Some || node.next_op == u64::MAX {
                 assert(results == spec_one(CProc::Node(node), Seq::empty()));
                 assert(j == 0);
@@ -10498,7 +10542,7 @@ pub(crate) proof fn lemma_node(
                 lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
                 ab
             } else {
-                let (next, send) = spec_request(node, at, call);
+                let (next, send) = spec_request(node, at, request);
                 let node2 = NodeV {
                     logic: echod_concrete_spec::model::spec_clock(node.logic, at),
                     next_request: (node.next_request + 1) as u64,
@@ -10509,12 +10553,12 @@ pub(crate) proof fn lemma_node(
                 assert(j == 0);
                 assert(results[0] == node_result(node2, send));
                 let cw = land(cb, i, node_pid(i), at, node_result(next, send));
-                let aa = lemma_request(fleet, config, cb, ab, i, at, call, next, send, cw);
+                let aa = lemma_request(fleet, config, cb, ab, i, at, request, next, send, cw);
                 lemma_reshell(fleet, config, cb, aa, i, at, next, node2, send, ca);
                 aa
             }
         },
-        ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreReply { op, outcome } } => {
+        ProcessEvent::Receive { sender: CPid::Store, message: CMessage::StoreRes { op, response } } => {
             if node.flight is None || node.next_op == u64::MAX {
                 assert(results == spec_one(CProc::Node(node), Seq::empty()));
                 assert(j == 0);
@@ -10522,7 +10566,7 @@ pub(crate) proof fn lemma_node(
                 lemma_same_work(fleet, config, cb, ab, i, at, node, ca);
                 ab
             } else {
-                let (next, send) = spec_store_reply(node, op, outcome);
+                let (next, send) = spec_store_reply(node, op, response);
                 let node2 = NodeV {
                     logic: echod_concrete_spec::model::spec_clock(node.logic, at),
                     wake: echod_concrete_spec::node::spec_wake(next),
@@ -10532,7 +10576,7 @@ pub(crate) proof fn lemma_node(
                 assert(j == 0);
                 assert(results[0] == node_result(node2, send));
                 let cw = land(cb, i, node_pid(i), at, node_result(next, send));
-                lemma_store_reply(fleet, config, cb, ab, i, at, op, outcome, next, send, cw);
+                lemma_store_reply(fleet, config, cb, ab, i, at, op, response, next, send, cw);
                 lemma_reshell(fleet, config, cb, ab, i, at, next, node2, send, ca);
                 ab
             }
@@ -10592,14 +10636,14 @@ pub(crate) proof fn lemma_input(
     };
     lemma_invariant_grow(fleet, cb, ca);
     match message {
-        CMessage::Request(call) => {
-            let amessage = AMessage::Request(call);
+        CMessage::Request(request) => {
+            let amessage = AMessage::Request(request);
             let alabel = Label::<APid, AMessage>::Input { recipient: APid::Service, at, message: amessage };
             let aa = inject(ab, APid::Outside, APid::Service, at, amessage);
             lemma_single_present(ab);
             assert(abstract_model().injectable(config, amessage));
             assert(ab.step(abstract_model(), config, alabel, aa));
-            let visible = seq![BoundaryEvent::Input { at, call }];
+            let visible = seq![BoundaryEvent::Input { at, call: request }];
             assert(abstract_model().observe(alabel) =~= visible);
             assert(concrete_model().observe(label) =~= visible);
             lemma_matched_step(config, ab, alabel, aa, visible);
@@ -10607,7 +10651,7 @@ pub(crate) proof fn lemma_input(
             let aenv = Envelope { sender: APid::Outside, recipient: APid::Service, message: amessage };
             assert(aa.network == ab.network.push(aenv));
             lemma_extends_push(ab.network, aenv);
-            lemma_pushed_request(ab.network, call);
+            lemma_pushed_request(ab.network, request);
             assert(carried_request(added, aa.network));
             assert(carried_output(added, aa.network));
             lemma_push_keeps_coverage(cb.network, added, ab.network, aa.network);
@@ -10842,15 +10886,15 @@ pub(crate) proof fn lemma_owed_zero(fleet: ConcreteConfig, world: State<CModel>,
 /// The empty document reads as the empty store under every key.
 pub(crate) proof fn lemma_empty_reads(key: Seq<char>)
     ensures
-        doc_rel(key, spec_empty_doc(key), empty_store()),
+        doc_rel(key, spec_empty_body(key), empty_store()),
 {
     let s = empty_store();
     if echod_concrete_spec::store::spec_starts(key, seq!['s', '/']) {
-        assert(spec_empty_doc(key) == DocV::Schedule(None::<echod_types::Schedule>));
+        assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
         assert(!s.schedules.contains_key(key.skip(2)));
     } else {
         let map = Map::<Seq<char>, echod_concrete_spec::node::ObjV>::empty();
-        assert(spec_empty_doc(key) == DocV::Origin(map));
+        assert(spec_empty_body(key) == DocumentBodyV::Workflow(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
         if echod_concrete_spec::store::spec_starts(key, super::interpretation::origin_prefix()) {
@@ -10943,7 +10987,7 @@ pub(crate) proof fn lemma_initial(fleet: ConcreteConfig, config: AbstractConfig)
             let node = node_at(cw, o);
             assert(node.flight is None);
             assert(spec_cached(node, key) is None);
-            assert(effective(fleet, cw, key) == spec_empty_doc(key));
+            assert(effective(fleet, cw, key) == spec_empty_body(key));
         }
         lemma_empty_reads(key);
     };
@@ -11077,3 +11121,1190 @@ pub proof fn refinement_proof(concrete_config: ConcreteConfig)
 }
 
 } // verus!
+
+mod effects_proof {
+//! Local correspondence between imperative notifications and document effects.
+
+use vstd::prelude::*;
+
+use echod_types::{PromiseRecord, Request};
+
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::document::{
+    document_effects, well_formed, workflow_effects, ObjV, PromiseEffectV, ProtocolEffectKeyV,
+    ProtocolEffectV, StoredDocumentV,
+};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::node::{
+    spec_committed_notes, spec_execute_notes, spec_keyed_notes, spec_note_key,
+    spec_request_commits, spec_request_transition, spec_sorted_present, spec_stored_body,
+    spec_stored_committed_at, spec_unavailable, spec_unblock_notes, spec_unblock_notes_for,
+    DocumentBodyV, NoteV,
+};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::request_claim::{on_request, routed};
+
+
+use echod_concrete_spec::effects_claim::*;
+
+use super::requests::*;
+verus! {
+
+
+proof fn lemma_note_keys_agree(left: NoteV, right: NoteV)
+    ensures
+        spec_note_key(left) == spec_note_key(right)
+            <==> echod_concrete_spec::document::protocol_effect_key(note_effect(left))
+                == echod_concrete_spec::document::protocol_effect_key(note_effect(right)),
+{
+}
+
+
+/// Keyed-note filtering both removes duplicates and preserves that property
+/// while discarding Executes consumed by the same atomic request.
+pub proof fn lemma_keyed_notes_no_duplicate_effect_keys(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+)
+    requires
+        count <= notes.len(),
+    ensures
+        note_effect_keys(spec_keyed_notes(doc, notes, count)).no_duplicates(),
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_keyed_notes(doc, notes, (count - 1) as nat);
+        let note = notes[count as int - 1];
+        lemma_keyed_notes_no_duplicate_effect_keys(
+            doc,
+            notes,
+            (count - 1) as nat,
+        );
+        if echod_concrete_spec::node::spec_note_relevant(doc, note)
+            && !(exists|i: int| 0 <= i < prior.len()
+                && spec_note_key(prior[i]) == spec_note_key(note))
+        {
+            assert forall|i: int| 0 <= i < prior.len() implies
+                echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i]))
+                    != echod_concrete_spec::document::protocol_effect_key(note_effect(note)) by {
+                lemma_note_keys_agree(prior[i], note);
+            }
+            assert(note_effect_keys(prior.push(note))
+                == note_effect_keys(prior).push(
+                    echod_concrete_spec::document::protocol_effect_key(note_effect(note)),
+                ));
+        }
+    }
+}
+
+
+proof fn lemma_note_effects_add(first: Seq<NoteV>, second: Seq<NoteV>)
+    ensures
+        forall|effect: ProtocolEffectV|
+            note_effects(first + second).contains(effect)
+                <==> note_effects(first).contains(effect)
+                    || note_effects(second).contains(effect),
+{
+    assert forall|effect: ProtocolEffectV|
+        note_effects(first + second).contains(effect)
+            <==> note_effects(first).contains(effect)
+                || note_effects(second).contains(effect) by {
+        if note_effects(first + second).contains(effect) {
+            let i = choose|i: int| 0 <= i < (first + second).len()
+                && note_effect((first + second)[i]) == effect;
+            if i < first.len() {
+                assert((first + second)[i] == first[i]);
+                assert(note_effects(first).contains(effect));
+            } else {
+                assert((first + second)[i] == second[i - first.len()]);
+                assert(note_effects(second).contains(effect));
+            }
+        }
+        if note_effects(first).contains(effect) {
+            let i = choose|i: int| 0 <= i < first.len()
+                && note_effect(first[i]) == effect;
+            assert((first + second)[i] == first[i]);
+            assert(note_effects(first + second).contains(effect));
+        }
+        if note_effects(second).contains(effect) {
+            let i = choose|i: int| 0 <= i < second.len()
+                && note_effect(second[i]) == effect;
+            assert((first + second)[first.len() + i] == second[i]);
+            assert(note_effects(first + second).contains(effect));
+        }
+    };
+}
+
+
+proof fn lemma_note_effects_push(notes: Seq<NoteV>, note: NoteV)
+    ensures
+        forall|effect: ProtocolEffectV|
+            note_effects(notes.push(note)).contains(effect)
+                <==> note_effects(notes).contains(effect)
+                    || effect == note_effect(note),
+{
+    lemma_note_effects_add(notes, seq![note]);
+    assert(notes.push(note) =~= notes + seq![note]);
+    assert forall|effect: ProtocolEffectV|
+        note_effects(seq![note]).contains(effect)
+            <==> effect == note_effect(note) by {
+        if note_effects(seq![note]).contains(effect) {
+            let i = choose|i: int| 0 <= i < 1
+                && note_effect(seq![note][i]) == effect;
+            assert(i == 0);
+        }
+        if effect == note_effect(note) {
+            assert(seq![note][0] == note);
+            assert(0 <= 0 < seq![note].len());
+            assert(note_effects(seq![note]).contains(effect));
+        }
+    };
+}
+
+
+proof fn lemma_nodup_last_not_in_prefix<A>(values: Seq<A>, count: nat)
+    requires
+        0 < count <= values.len(),
+        values.take(count as int).no_duplicates(),
+    ensures
+        !values.take(count as int - 1).contains(values[count as int - 1]),
+{
+    if values.take(count as int - 1).contains(values[count as int - 1]) {
+        let i = choose|i: int| 0 <= i < values.take(count as int - 1).len()
+            && #[trigger] values.take(count as int - 1)[i]
+                == values[count as int - 1];
+        assert(values.take(count as int)[i]
+            == values.take(count as int)[count as int - 1]);
+        assert(i != count as int - 1);
+    }
+}
+
+
+proof fn lemma_execute_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    committed_at: u64,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+        keys.take(count as int).no_duplicates(),
+        forall|i: int| 0 <= i < count ==> after.contains_key(#[trigger] keys[i]),
+    ensures
+        ({
+            let notes = spec_execute_notes(before, after, committed_at, keys, count);
+            &&& forall|effect: ProtocolEffectV|
+                note_effects(notes).contains(effect) <==> match effect {
+                    ProtocolEffectV::Execute { id, version } =>
+                        keys.take(count as int).contains(id)
+                            && echod_concrete_spec::document::offer_committed(
+                                before,
+                                after,
+                                id,
+                                committed_at,
+                            )
+                            && after[id].task.unwrap().version == version,
+                    ProtocolEffectV::Unblock { .. } => false,
+                }
+            &&& note_effect_keys(notes).no_duplicates()
+        }),
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_execute_notes(
+            before,
+            after,
+            committed_at,
+            keys,
+            (count - 1) as nat,
+        );
+        let id = keys[count as int - 1];
+        lemma_execute_notes(before, after, committed_at, keys, (count - 1) as nat);
+        lemma_nodup_last_not_in_prefix(keys, count);
+        assert(keys.take(count as int)
+            == keys.take(count as int - 1).push(id));
+        if echod_concrete_spec::document::offer_committed(before, after, id, committed_at) {
+            let note = NoteV::Execute {
+                id,
+                version: after[id].task.unwrap().version,
+            };
+            lemma_note_effects_push(prior, note);
+            lemma_note_effects_add(prior, seq![note]);
+            assert(prior + seq![note] =~= prior.push(note));
+            assert(spec_execute_notes(before, after, committed_at, keys, count)
+                == prior.push(note));
+            assert(note_effect_keys(prior.push(note))
+                == note_effect_keys(prior).push(
+                    ProtocolEffectKeyV::Execute { id },
+                ));
+            assert(!note_effect_keys(prior).contains(
+                ProtocolEffectKeyV::Execute { id },
+            )) by {
+                if note_effect_keys(prior).contains(
+                    ProtocolEffectKeyV::Execute { id },
+                ) {
+                    let i = choose|i: int| 0 <= i < prior.len()
+                        && note_effect_keys(prior)[i]
+                            == ProtocolEffectKeyV::Execute { id };
+                    assert(note_effect_keys(prior)[i]
+                        == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+                    assert(note_effects(prior).contains(note_effect(prior[i])));
+                    match note_effect(prior[i]) {
+                        ProtocolEffectV::Execute { id: prior_id, .. } => {
+                            assert(prior_id == id);
+                            assert(keys.take(count as int - 1).contains(prior_id));
+                        },
+                        ProtocolEffectV::Unblock { .. } => {
+                            assert(false);
+                        },
+                    }
+                }
+            };
+        } else {
+            assert(spec_execute_notes(before, after, committed_at, keys, count)
+                == prior);
+        }
+        assert forall|candidate: Seq<char>|
+            keys.take(count as int).contains(candidate)
+                <==> keys.take(count as int - 1).contains(candidate)
+                    || candidate == id by {
+            super::simulation::lemma_push_contains(
+                keys.take(count as int - 1),
+                id,
+                candidate,
+            );
+            if keys.take(count as int).contains(candidate) {
+                let i = choose|i: int| 0 <= i < keys.take(count as int).len()
+                    && keys.take(count as int)[i] == candidate;
+                if i < count as int - 1 {
+                    assert(keys.take(count as int - 1)[i] == candidate);
+                } else {
+                    assert(i == count as int - 1);
+                }
+            }
+            if keys.take(count as int - 1).contains(candidate) {
+                let i = choose|i: int| 0 <= i < keys.take(count as int - 1).len()
+                    && #[trigger] keys.take(count as int - 1)[i] == candidate;
+                assert(keys.take(count as int)[i] == candidate);
+            }
+        };
+        assert forall|effect: ProtocolEffectV|
+            note_effects(spec_execute_notes(before, after, committed_at, keys, count))
+                .contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { id, version } =>
+                    keys.take(count as int).contains(id)
+                        && echod_concrete_spec::document::offer_committed(
+                            before,
+                            after,
+                            id,
+                            committed_at,
+                        )
+                        && after[id].task.unwrap().version == version,
+                ProtocolEffectV::Unblock { .. } => false,
+            } by {
+            assert(note_effects(prior).contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { id, version } =>
+                    keys.take(count as int - 1).contains(id)
+                        && echod_concrete_spec::document::offer_committed(
+                            before,
+                            after,
+                            id,
+                            committed_at,
+                        )
+                        && after[id].task.unwrap().version == version,
+                ProtocolEffectV::Unblock { .. } => false,
+            });
+            match effect {
+                ProtocolEffectV::Execute { id: effect_id, version } => {
+                    if echod_concrete_spec::document::offer_committed(
+                        before,
+                        after,
+                        id,
+                        committed_at,
+                    ) {
+                        let note = NoteV::Execute {
+                            id,
+                            version: after[id].task.unwrap().version,
+                        };
+                        lemma_note_effects_push(prior, note);
+                        assert(spec_execute_notes(
+                            before,
+                            after,
+                            committed_at,
+                            keys,
+                            count,
+                        ) == prior.push(note));
+                        assert(note_effects(prior.push(note)).contains(effect)
+                            <==> note_effects(prior).contains(effect)
+                                || effect == note_effect(note));
+                        assert(effect == note_effect(note)
+                            <==> effect_id == id
+                                && version == after[id].task.unwrap().version);
+                    } else {
+                        assert(spec_execute_notes(
+                            before,
+                            after,
+                            committed_at,
+                            keys,
+                            count,
+                        ) == prior);
+                    }
+                    if effect_id == id
+                        && echod_concrete_spec::document::offer_committed(
+                            before,
+                            after,
+                            id,
+                            committed_at,
+                        )
+                    {
+                        assert(!keys.take(count as int - 1).contains(id));
+                    }
+                },
+                ProtocolEffectV::Unblock { .. } => {},
+            }
+        };
+    }
+}
+
+
+proof fn lemma_unblock_notes_for(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    promise: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= listeners.len(),
+        listeners.take(count as int).no_duplicates(),
+    ensures
+        ({
+            let notes =
+                spec_unblock_notes_for(before, after, promise, listeners, count);
+            &&& forall|effect: ProtocolEffectV|
+                note_effects(notes).contains(effect) <==> match effect {
+                    ProtocolEffectV::Execute { .. } => false,
+                    ProtocolEffectV::Unblock {
+                        promise: effect_promise,
+                        address,
+                        record,
+                    } =>
+                        effect_promise == promise
+                            && listeners.take(count as int).contains(address)
+                            && echod_concrete_spec::document::listener_committed(
+                                before,
+                                after,
+                                promise,
+                                address,
+                            )
+                            && record == echod_concrete_spec::document::promise_effect(
+                                promise,
+                                after[promise].promise,
+                            ),
+                }
+            &&& note_effect_keys(notes).no_duplicates()
+        }),
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            (count - 1) as nat,
+        );
+        let address = listeners[count as int - 1];
+        lemma_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            (count - 1) as nat,
+        );
+        lemma_nodup_last_not_in_prefix(listeners, count);
+        assert(listeners.take(count as int)
+            == listeners.take(count as int - 1).push(address));
+        if echod_concrete_spec::document::listener_committed(
+            before,
+            after,
+            promise,
+            address,
+        ) {
+            super::interpretation::lemma_string_view(promise);
+            let note = NoteV::Unblock {
+                address,
+                promise: echod_concrete_spec::node::spec_record(
+                    echod_concrete_spec::model::spec_string(promise),
+                    after[promise].promise,
+                ),
+            };
+            lemma_note_effects_push(prior, note);
+            assert(record_effect(echod_concrete_spec::node::spec_record(
+                echod_concrete_spec::model::spec_string(promise),
+                after[promise].promise,
+            )) == echod_concrete_spec::document::promise_effect(
+                promise,
+                after[promise].promise,
+            ));
+            lemma_note_effects_add(prior, seq![note]);
+            assert(prior + seq![note] =~= prior.push(note));
+            assert(spec_unblock_notes_for(
+                before,
+                after,
+                promise,
+                listeners,
+                count,
+            ) == prior.push(note));
+            assert(note_effect_keys(prior.push(note))
+                == note_effect_keys(prior).push(
+                    ProtocolEffectKeyV::Unblock { promise, address },
+                ));
+            assert(!note_effect_keys(prior).contains(
+                ProtocolEffectKeyV::Unblock { promise, address },
+            )) by {
+                if note_effect_keys(prior).contains(
+                    ProtocolEffectKeyV::Unblock { promise, address },
+                ) {
+                    let i = choose|i: int| 0 <= i < prior.len()
+                        && note_effect_keys(prior)[i]
+                            == ProtocolEffectKeyV::Unblock { promise, address };
+                    assert(note_effect_keys(prior)[i]
+                        == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+                    assert(note_effects(prior).contains(note_effect(prior[i])));
+                    match note_effect(prior[i]) {
+                        ProtocolEffectV::Unblock {
+                            promise: prior_promise,
+                            address: prior_address,
+                            ..
+                        } => {
+                            assert(prior_promise == promise);
+                            assert(prior_address == address);
+                            assert(listeners.take(count as int - 1)
+                                .contains(prior_address));
+                        },
+                        ProtocolEffectV::Execute { .. } => {
+                            assert(false);
+                        },
+                    }
+                }
+            };
+        } else {
+            assert(spec_unblock_notes_for(
+                before,
+                after,
+                promise,
+                listeners,
+                count,
+            ) == prior);
+        }
+        assert forall|candidate: Seq<char>|
+            listeners.take(count as int).contains(candidate)
+                <==> listeners.take(count as int - 1).contains(candidate)
+                    || candidate == address by {
+            super::simulation::lemma_push_contains(
+                listeners.take(count as int - 1),
+                address,
+                candidate,
+            );
+            if listeners.take(count as int).contains(candidate) {
+                let i = choose|i: int| 0 <= i < listeners.take(count as int).len()
+                    && listeners.take(count as int)[i] == candidate;
+                if i < count as int - 1 {
+                    assert(listeners.take(count as int - 1)[i] == candidate);
+                } else {
+                    assert(i == count as int - 1);
+                }
+            }
+            if listeners.take(count as int - 1).contains(candidate) {
+                let i = choose|i: int|
+                    0 <= i < listeners.take(count as int - 1).len()
+                        && #[trigger] listeners.take(count as int - 1)[i] == candidate;
+                assert(listeners.take(count as int)[i] == candidate);
+            }
+        };
+        assert forall|effect: ProtocolEffectV|
+            note_effects(spec_unblock_notes_for(
+                before,
+                after,
+                promise,
+                listeners,
+                count,
+            )).contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { .. } => false,
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address: effect_address,
+                    record,
+                } =>
+                    effect_promise == promise
+                        && listeners.take(count as int).contains(effect_address)
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            promise,
+                            effect_address,
+                        )
+                        && record == echod_concrete_spec::document::promise_effect(
+                            promise,
+                            after[promise].promise,
+                        ),
+            } by {
+            assert(note_effects(prior).contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { .. } => false,
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address: effect_address,
+                    record,
+                } =>
+                    effect_promise == promise
+                        && listeners.take(count as int - 1).contains(effect_address)
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            promise,
+                            effect_address,
+                        )
+                        && record == echod_concrete_spec::document::promise_effect(
+                            promise,
+                            after[promise].promise,
+                        ),
+            });
+            match effect {
+                ProtocolEffectV::Execute { .. } => {},
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address: effect_address,
+                    record,
+                } => {
+                    if echod_concrete_spec::document::listener_committed(
+                        before,
+                        after,
+                        promise,
+                        address,
+                    ) {
+                        super::interpretation::lemma_string_view(promise);
+                        let note = NoteV::Unblock {
+                            address,
+                            promise: echod_concrete_spec::node::spec_record(
+                                echod_concrete_spec::model::spec_string(promise),
+                                after[promise].promise,
+                            ),
+                        };
+                        lemma_note_effects_push(prior, note);
+                        assert(spec_unblock_notes_for(
+                            before,
+                            after,
+                            promise,
+                            listeners,
+                            count,
+                        ) == prior.push(note));
+                        assert(note_effects(prior.push(note)).contains(effect)
+                            <==> note_effects(prior).contains(effect)
+                                || effect == note_effect(note));
+                        assert(effect == note_effect(note) <==> {
+                            &&& effect_promise == promise
+                            &&& effect_address == address
+                            &&& record == echod_concrete_spec::document::promise_effect(
+                                promise,
+                                after[promise].promise,
+                            )
+                        });
+                    } else {
+                        assert(spec_unblock_notes_for(
+                            before,
+                            after,
+                            promise,
+                            listeners,
+                            count,
+                        ) == prior);
+                    }
+                },
+            }
+        }
+    }
+}
+
+
+proof fn lemma_add_no_duplicates<A>(first: Seq<A>, second: Seq<A>)
+    requires
+        first.no_duplicates(),
+        second.no_duplicates(),
+        forall|i: int, j: int|
+            0 <= i < first.len() && 0 <= j < second.len()
+                ==> first[i] != second[j],
+    ensures
+        (first + second).no_duplicates(),
+{
+    assert forall|i: int, j: int|
+        0 <= i < (first + second).len()
+            && 0 <= j < (first + second).len()
+            && (first + second)[i] == (first + second)[j]
+                implies i == j by {
+        if i < first.len() && j < first.len() {
+            assert((first + second)[i] == first[i]);
+            assert((first + second)[j] == first[j]);
+        } else if i >= first.len() && j >= first.len() {
+            assert((first + second)[i] == second[i - first.len()]);
+            assert((first + second)[j] == second[j - first.len()]);
+        } else if i < first.len() {
+            assert((first + second)[i] == first[i]);
+            assert((first + second)[j] == second[j - first.len()]);
+        } else {
+            assert((first + second)[j] == first[j]);
+            assert((first + second)[i] == second[i - first.len()]);
+        }
+    };
+}
+
+
+proof fn lemma_unblock_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+        keys.take(count as int).no_duplicates(),
+        forall|i: int| 0 <= i < count ==> {
+            &&& before.contains_key(#[trigger] keys[i])
+            &&& before[keys[i]].promise.listeners.no_duplicates()
+        },
+    ensures
+        ({
+            let notes = spec_unblock_notes(before, after, keys, count);
+            &&& forall|effect: ProtocolEffectV|
+                note_effects(notes).contains(effect) <==> match effect {
+                    ProtocolEffectV::Execute { .. } => false,
+                    ProtocolEffectV::Unblock {
+                        promise,
+                        address,
+                        record,
+                    } =>
+                        keys.take(count as int).contains(promise)
+                            && echod_concrete_spec::document::listener_committed(
+                                before,
+                                after,
+                                promise,
+                                address,
+                            )
+                            && record == echod_concrete_spec::document::promise_effect(
+                                promise,
+                                after[promise].promise,
+                            ),
+                }
+            &&& note_effect_keys(notes).no_duplicates()
+        }),
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_unblock_notes(before, after, keys, (count - 1) as nat);
+        let promise = keys[count as int - 1];
+        let listeners = before[promise].promise.listeners;
+        let current = spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            listeners.len(),
+        );
+        lemma_unblock_notes(before, after, keys, (count - 1) as nat);
+        lemma_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            listeners.len(),
+        );
+        lemma_nodup_last_not_in_prefix(keys, count);
+        assert(keys.take(count as int)
+            == keys.take(count as int - 1).push(promise));
+        assert(spec_unblock_notes(before, after, keys, count) == prior + current);
+        lemma_note_effects_add(prior, current);
+        assert(note_effect_keys(prior + current)
+            == note_effect_keys(prior) + note_effect_keys(current));
+        assert forall|i: int, j: int|
+            0 <= i < note_effect_keys(prior).len()
+                && 0 <= j < note_effect_keys(current).len()
+                implies note_effect_keys(prior)[i] != note_effect_keys(current)[j] by {
+            assert(note_effect_keys(prior)[i]
+                == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+            assert(note_effect_keys(current)[j]
+                == echod_concrete_spec::document::protocol_effect_key(note_effect(current[j])));
+            assert(note_effects(prior).contains(note_effect(prior[i])));
+            assert(note_effects(current).contains(note_effect(current[j])));
+            match (note_effect(prior[i]), note_effect(current[j])) {
+                (
+                    ProtocolEffectV::Unblock { promise: left, .. },
+                    ProtocolEffectV::Unblock { promise: right, .. },
+                ) => {
+                    assert(keys.take(count as int - 1).contains(left));
+                    assert(right == promise);
+                    assert(left != right);
+                },
+                _ => {},
+            }
+        };
+        lemma_add_no_duplicates(
+            note_effect_keys(prior),
+            note_effect_keys(current),
+        );
+        assert forall|candidate: Seq<char>|
+            keys.take(count as int).contains(candidate)
+                <==> keys.take(count as int - 1).contains(candidate)
+                    || candidate == promise by {
+            super::simulation::lemma_push_contains(
+                keys.take(count as int - 1),
+                promise,
+                candidate,
+            );
+        };
+        assert forall|effect: ProtocolEffectV|
+            note_effects(spec_unblock_notes(before, after, keys, count))
+                .contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { .. } => false,
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address,
+                    record,
+                } =>
+                    keys.take(count as int).contains(effect_promise)
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            effect_promise,
+                            address,
+                        )
+                        && record == echod_concrete_spec::document::promise_effect(
+                            effect_promise,
+                            after[effect_promise].promise,
+                        ),
+            } by {
+            assert(note_effects(prior + current).contains(effect)
+                <==> note_effects(prior).contains(effect)
+                    || note_effects(current).contains(effect));
+            lemma_note_effects_add(prior, current);
+            assert(note_effects(prior).contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { .. } => false,
+                ProtocolEffectV::Unblock {
+                    promise,
+                    address,
+                    record,
+                } =>
+                    keys.take(count as int - 1).contains(promise)
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            promise,
+                            address,
+                        )
+                        && record == echod_concrete_spec::document::promise_effect(
+                            promise,
+                            after[promise].promise,
+                        ),
+            });
+            assert(listeners.take(listeners.len() as int) == listeners);
+            assert(note_effects(current).contains(effect) <==> match effect {
+                ProtocolEffectV::Execute { .. } => false,
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address,
+                    record,
+                } =>
+                    effect_promise == promise
+                        && listeners.contains(address)
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            promise,
+                            address,
+                        )
+                        && record == echod_concrete_spec::document::promise_effect(
+                            promise,
+                            after[promise].promise,
+                        ),
+            });
+            match effect {
+                ProtocolEffectV::Execute { .. } => {},
+                ProtocolEffectV::Unblock {
+                    promise: effect_promise,
+                    address,
+                    ..
+                } => {
+                    if effect_promise == promise
+                        && echod_concrete_spec::document::listener_committed(
+                            before,
+                            after,
+                            promise,
+                            address,
+                        )
+                    {
+                        assert(listeners.contains(address));
+                    }
+                },
+            }
+        }
+    }
+}
+
+
+proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
+    ensures
+        echod_concrete_spec::node::spec_sorted(keys).no_duplicates(),
+    decreases keys.len(),
+{
+    if keys.len() > 0 {
+        super::work::lemma_min_key(keys);
+        let first = echod_concrete_spec::node::spec_min_key(keys);
+        let rest = keys.remove(first);
+        lemma_sorted_no_duplicates(rest);
+        super::work::lemma_sorted(rest);
+        assert(!echod_concrete_spec::node::spec_sorted(rest).contains(first)) by {
+            if echod_concrete_spec::node::spec_sorted(rest).contains(first) {
+                let i = choose|i: int|
+                    0 <= i < echod_concrete_spec::node::spec_sorted(rest).len()
+                        && #[trigger] echod_concrete_spec::node::spec_sorted(rest)[i] == first;
+                assert(rest.contains(first));
+            }
+        };
+        assert(echod_concrete_spec::node::spec_sorted(keys)
+            == seq![first] + echod_concrete_spec::node::spec_sorted(rest));
+    }
+}
+
+
+proof fn lemma_committed_notes_match(
+    before: DocumentBodyV,
+    after: DocumentBodyV,
+    committed_at: u64,
+)
+    requires
+        match before {
+            DocumentBodyV::Workflow(old) =>
+                forall|id: Seq<char>| old.contains_key(id) ==>
+                    old[id].promise.listeners.no_duplicates(),
+            DocumentBodyV::Schedule(_) => true,
+        },
+    ensures
+        ({
+            let notes = spec_committed_notes(before, after, committed_at);
+            &&& note_effects(notes) == match (before, after) {
+                (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) =>
+                    workflow_effects(old, new, committed_at),
+                _ => ISet::empty(),
+            }
+            &&& note_effect_keys(notes).no_duplicates()
+        }),
+{
+    match (before, after) {
+        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) => {
+            let new_keys = spec_sorted_present(new);
+            let old_keys = spec_sorted_present(old);
+            super::work::lemma_sorted(new.dom());
+            super::work::lemma_sorted(old.dom());
+            lemma_sorted_no_duplicates(new.dom());
+            lemma_sorted_no_duplicates(old.dom());
+            lemma_execute_notes(
+                old,
+                new,
+                committed_at,
+                new_keys,
+                new_keys.len(),
+            );
+            lemma_unblock_notes(old, new, old_keys, old_keys.len());
+            let executes = spec_execute_notes(
+                old,
+                new,
+                committed_at,
+                new_keys,
+                new_keys.len(),
+            );
+            let unblocks =
+                spec_unblock_notes(old, new, old_keys, old_keys.len());
+            lemma_note_effects_add(executes, unblocks);
+            assert(new_keys.take(new_keys.len() as int) == new_keys);
+            assert(old_keys.take(old_keys.len() as int) == old_keys);
+            assert(note_effect_keys(executes + unblocks)
+                == note_effect_keys(executes) + note_effect_keys(unblocks));
+            assert forall|i: int, j: int|
+                0 <= i < note_effect_keys(executes).len()
+                    && 0 <= j < note_effect_keys(unblocks).len()
+                    implies note_effect_keys(executes)[i]
+                        != note_effect_keys(unblocks)[j] by {
+                assert(note_effect_keys(executes)[i]
+                    == echod_concrete_spec::document::protocol_effect_key(
+                        note_effect(executes[i]),
+                    ));
+                assert(note_effect_keys(unblocks)[j]
+                    == echod_concrete_spec::document::protocol_effect_key(
+                        note_effect(unblocks[j]),
+                    ));
+                assert(note_effects(executes).contains(note_effect(executes[i])));
+                assert(note_effects(unblocks).contains(note_effect(unblocks[j])));
+            };
+            lemma_add_no_duplicates(
+                note_effect_keys(executes),
+                note_effect_keys(unblocks),
+            );
+            assert forall|effect: ProtocolEffectV|
+                note_effects(executes + unblocks).contains(effect)
+                    <==> workflow_effects(old, new, committed_at).contains(effect) by {
+                assert(note_effects(executes + unblocks).contains(effect)
+                    <==> note_effects(executes).contains(effect)
+                        || note_effects(unblocks).contains(effect));
+                assert(note_effects(executes).contains(effect) <==> match effect {
+                    ProtocolEffectV::Execute { id, version } =>
+                        new_keys.contains(id)
+                            && echod_concrete_spec::document::offer_committed(
+                                old,
+                                new,
+                                id,
+                                committed_at,
+                            )
+                            && new[id].task.unwrap().version == version,
+                    ProtocolEffectV::Unblock { .. } => false,
+                });
+                assert(note_effects(unblocks).contains(effect) <==> match effect {
+                    ProtocolEffectV::Execute { .. } => false,
+                    ProtocolEffectV::Unblock {
+                        promise,
+                        address,
+                        record,
+                    } =>
+                        old_keys.contains(promise)
+                            && echod_concrete_spec::document::listener_committed(
+                                old,
+                                new,
+                                promise,
+                                address,
+                            )
+                            && record == echod_concrete_spec::document::promise_effect(
+                                promise,
+                                new[promise].promise,
+                            ),
+                });
+                match effect {
+                    ProtocolEffectV::Execute { id, .. } => {
+                        if new.contains_key(id) {
+                            assert(new_keys.contains(id));
+                        }
+                        if new_keys.contains(id) {
+                            let i = choose|i: int| 0 <= i < new_keys.len()
+                                && #[trigger] new_keys[i] == id;
+                            assert(new.dom().contains(new_keys[i]));
+                            assert(new.contains_key(id));
+                        }
+                    },
+                    ProtocolEffectV::Unblock { promise, .. } => {
+                        if old.contains_key(promise) {
+                            assert(old_keys.contains(promise));
+                        }
+                        if old_keys.contains(promise) {
+                            let i = choose|i: int| 0 <= i < old_keys.len()
+                                && #[trigger] old_keys[i] == promise;
+                            assert(old.dom().contains(old_keys[i]));
+                            assert(old.contains_key(promise));
+                        }
+                    },
+                }
+            };
+            assert(note_effects(executes + unblocks)
+                =~= workflow_effects(old, new, committed_at));
+        },
+        _ => {
+            assert(spec_committed_notes(before, after, committed_at)
+                =~= Seq::<NoteV>::empty());
+            assert(note_effects(Seq::<NoteV>::empty())
+                =~= ISet::<ProtocolEffectV>::empty());
+        },
+    }
+}
+
+
+/// Complete endpoint correspondence for one atomic request transition.
+#[verifier::rlimit(20)]
+pub proof fn lemma_request_transition_effects(
+    document: StoredDocumentV,
+    request: Request,
+    now: u64,
+    retry_timeout: u64,
+    limit: nat,
+)
+    requires
+        well_formed(document),
+        routed(document, request),
+        spec_stored_committed_at(document) <= now,
+        safe_effect_config(now, retry_timeout),
+    ensures
+        ({
+            let final_document =
+                on_request(document, request, now, retry_timeout, limit);
+            let (_, _, _, notes) = spec_request_transition(
+                spec_stored_body(document),
+                request,
+                now,
+                retry_timeout,
+                limit,
+            );
+            effects_match(document, final_document, notes)
+        }),
+{
+    let initial_body = spec_stored_body(document);
+    let (final_body, response, _, notes) = spec_request_transition(
+        initial_body,
+        request,
+        now,
+        retry_timeout,
+        limit,
+    );
+    assert(match initial_body {
+        DocumentBodyV::Workflow(old) =>
+            forall|id: Seq<char>| old.contains_key(id) ==>
+                old[id].promise.listeners.no_duplicates(),
+        DocumentBodyV::Schedule(_) => true,
+    }) by {
+        match document {
+            StoredDocumentV::Workflow(workflow) => {
+                reveal(echod_concrete_spec::document::workflow_well_formed);
+                reveal(echod_concrete_spec::document::workflow_body_well_formed);
+                assert(echod_concrete_spec::document::workflow_well_formed(workflow));
+                assert(echod_concrete_spec::document::workflow_body_well_formed(
+                    workflow.document,
+                    workflow.objects,
+                    workflow.committed_at,
+                ));
+                assert forall|id: Seq<char>|
+                    workflow.objects.contains_key(id) implies
+                        workflow.objects[id].promise.listeners.no_duplicates() by {
+                    assert({
+                        &&& echod_types::origin(id) == workflow.document
+                        &&& echod_concrete_spec::document::promise_well_formed(
+                            id,
+                            workflow.objects[id],
+                            workflow.committed_at,
+                        )
+                        &&& echod_concrete_spec::document::task_well_formed(
+                            workflow.objects[id],
+                            workflow.committed_at,
+                        )
+                        &&& echod_concrete_spec::document::callback_targets_well_formed(
+                            workflow.objects,
+                            workflow.objects[id],
+                        )
+                        &&& echod_concrete_spec::document::suspended_rung_well_formed(
+                            workflow.objects,
+                            id,
+                            workflow.objects[id],
+                        )
+                    });
+                    assert(echod_concrete_spec::document::promise_well_formed(
+                        id,
+                        workflow.objects[id],
+                        workflow.committed_at,
+                    ));
+                }
+            },
+            StoredDocumentV::Schedule(_) => {},
+        }
+    };
+    if spec_request_commits(
+        initial_body,
+        request,
+        now,
+        retry_timeout,
+        limit,
+    ) {
+        assert(notes == spec_committed_notes(initial_body, final_body, now));
+        lemma_committed_notes_match(initial_body, final_body, now);
+        match (document, final_body) {
+            (StoredDocumentV::Workflow(old), DocumentBodyV::Workflow(new)) => {
+                assert(on_request(
+                    StoredDocumentV::Workflow(old),
+                    request,
+                    now,
+                    retry_timeout,
+                    limit,
+                ) == echod_concrete_spec::node::spec_advance_stored(
+                    StoredDocumentV::Workflow(old),
+                    DocumentBodyV::Workflow(new),
+                    now,
+                ));
+                assert(document_effects(
+                    StoredDocumentV::Workflow(old),
+                    on_request(
+                        StoredDocumentV::Workflow(old),
+                        request,
+                        now,
+                        retry_timeout,
+                        limit,
+                    ),
+                ) == workflow_effects(old.objects, new, now));
+            },
+            (StoredDocumentV::Schedule(old), DocumentBodyV::Schedule(new)) => {
+                assert(document_effects(
+                    StoredDocumentV::Schedule(old),
+                    on_request(
+                        StoredDocumentV::Schedule(old),
+                        request,
+                        now,
+                        retry_timeout,
+                        limit,
+                    ),
+                ) == ISet::<ProtocolEffectV>::empty());
+            },
+            _ => {},
+        }
+    } else {
+        assert(final_body == initial_body);
+        if response == spec_unavailable(request) {
+            assert(notes =~= Seq::<NoteV>::empty());
+            assert(note_effects(notes) =~= ISet::<ProtocolEffectV>::empty());
+            assert(note_effect_keys(notes) =~= Seq::<ProtocolEffectKeyV>::empty());
+        } else {
+            match initial_body {
+                DocumentBodyV::Workflow(_) => {
+                    assert(notes == spec_committed_notes(initial_body, final_body, now));
+                },
+                DocumentBodyV::Schedule(_) => {
+                    assert(notes =~= Seq::<NoteV>::empty());
+                    assert(spec_committed_notes(initial_body, final_body, now)
+                        =~= Seq::<NoteV>::empty());
+                },
+            }
+            lemma_committed_notes_match(initial_body, final_body, now);
+        }
+        assert(on_request(document, request, now, retry_timeout, limit) == document);
+        assert(document_effects(document, document)
+            =~= ISet::<ProtocolEffectV>::empty()) by {
+            match document {
+                StoredDocumentV::Workflow(workflow) => {
+                    assert forall|effect: ProtocolEffectV|
+                        !workflow_effects(
+                            workflow.objects,
+                            workflow.objects,
+                            workflow.committed_at,
+                        ).contains(effect) by {
+                        match effect {
+                            ProtocolEffectV::Execute { .. } => {},
+                            ProtocolEffectV::Unblock { .. } => {},
+                        }
+                    };
+                },
+                StoredDocumentV::Schedule(_) => {},
+            }
+        };
+    }
+    assert(note_effects(notes)
+        == document_effects(
+            document,
+            on_request(document, request, now, retry_timeout, limit),
+        ));
+    assert(note_effect_keys(notes).no_duplicates());
+}
+
+} // verus!
+
+}

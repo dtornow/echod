@@ -11,12 +11,11 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::document::{notes_v, pend_v};
-use crate::concrete::{StoreCall, StoreError, StoreOutcome};
-use echod_concrete_spec::node::{
-    spec_decide, spec_handle, spec_occurrence, spec_run_due, spec_sweep, DocV, FlightV, JobV,
-    NodeV, NoteV, PendingV,
+use crate::concrete::document::{
+    notes_v, pend_v, spec_decide, spec_occurrence, spec_request_transition, spec_run_due,
+    spec_sweep, DocumentBodyV, FlightV, JobV, NodeV, NoteV, PendingV,
 };
+use crate::concrete::store::{StoreError, StoreReq, StoreRes};
 use echod_concrete_spec::model::{Message, Pid};
 use echod_types::Response;
 
@@ -43,11 +42,12 @@ pub enum AJob {
 
 /// The document a step leaves, its answer, the occurrences it queued, and
 /// the notes it will send once the document is committed.
-pub open spec fn spec_step(job: AJob, doc: DocV, now: u64, retry_timeout: u64, limit: nat) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_step(job: AJob, doc: DocumentBodyV, now: u64, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match job {
         AJob::Request(request) => {
-            let (next, response) = spec_handle(doc, request, now);
-            (next, Some(response), Seq::empty(), Seq::empty())
+            let (next, response, born, notes) =
+                spec_request_transition(doc, request, now, retry_timeout, limit);
+            (next, Some(response), born, notes)
         },
         AJob::Sweep => {
             let (next, born, notes) = spec_sweep(doc, now, retry_timeout, limit);
@@ -67,11 +67,13 @@ pub open spec fn job_of(job: JobV) -> AJob {
     }
 }
 
-/// The model's `spec_decide` writes the document `spec_step` leaves, under
-/// the condition of the version the flight loaded: `PutIfMatch` on that
-/// version, `PutIfNoneMatch` when the document was absent. The commit below
-/// writes under the same condition.
-pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit: nat)
+/// For model-native due and occurrence jobs, `spec_decide` writes the
+/// document `spec_step` leaves. Request jobs use the stronger process-level
+/// pre/handler/post transition and are verified directly by
+/// [`super::flight::decide`], rather than by Rover's raw-handler step.
+pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
+    requires
+        !(flight.job is External),
     ensures
         ({
             let (next, reply, born, notify) = spec_step(job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
@@ -79,12 +81,12 @@ pub proof fn lemma_step_is_decide(node: NodeV, flight: FlightV, doc: DocV, limit
             match after.flight {
                 Some(open) => {
                     &&& open.writing
-                    &&& open.decided == Some(echod_concrete_spec::node::spec_encode(next))
+                    &&& open.decided == Some(crate::concrete::document::spec_encode_body(next))
                     &&& sent.len() == 1
                     &&& match sent[0].1 {
-                        Message::StoreReq { call, .. } => match flight.etag {
-                            Some(chars) => call matches StoreCall::PutIfMatch { etag, .. } && etag.0@ == chars,
-                            None => call is PutIfNoneMatch,
+                        Message::StoreReq { request, .. } => match flight.etag {
+                            Some(chars) => request matches StoreReq::PutIfMatch { etag, .. } && etag.0@ == chars,
+                            None => request is PutIfNoneMatch,
                         },
                         _ => false,
                     }
@@ -170,13 +172,22 @@ pub enum AOutcome {
     Failed(Option<StoreError>),
 }
 
-pub open spec fn answer_v(o: Option<StoreOutcome>) -> AAnswer {
-    match o {
-        None => AAnswer::Fresh,
-        Some(StoreOutcome::Done) => AAnswer::Done,
-        Some(StoreOutcome::Written(tag)) => AAnswer::Written(tag.0@),
-        Some(StoreOutcome::Failed(e)) => AAnswer::Failed(e),
-        Some(_) => AAnswer::Other,
+pub open spec fn answer_v(step: AStep, o: Option<StoreRes>) -> AAnswer {
+    match (step, o) {
+        (_, None) => AAnswer::Fresh,
+        (AStep::PuttingKey(_), Some(StoreRes::Put { result: Ok(()) }))
+        | (AStep::DeletingPrevious(_), Some(StoreRes::Del { result: Ok(()) }))
+        | (AStep::DeletingFired(_), Some(StoreRes::Del { result: Ok(()) })) => AAnswer::Done,
+        (AStep::Writing { .. }, Some(StoreRes::PutIfMatch { result: Ok(tag) }))
+        | (AStep::Writing { .. }, Some(StoreRes::PutIfNoneMatch { result: Ok(tag) }))
+        | (AStep::Writing { .. }, Some(StoreRes::AppIfMatch { result: Ok(tag) })) => AAnswer::Written(tag.0@),
+        (AStep::PuttingKey(_), Some(StoreRes::Put { result: Err(e) }))
+        | (AStep::DeletingPrevious(_), Some(StoreRes::Del { result: Err(e) }))
+        | (AStep::DeletingFired(_), Some(StoreRes::Del { result: Err(e) }))
+        | (AStep::Writing { .. }, Some(StoreRes::PutIfMatch { result: Err(e) }))
+        | (AStep::Writing { .. }, Some(StoreRes::PutIfNoneMatch { result: Err(e) }))
+        | (AStep::Writing { .. }, Some(StoreRes::AppIfMatch { result: Err(e) })) => AAnswer::Failed(e),
+        (_, Some(_)) => AAnswer::Other,
     }
 }
 

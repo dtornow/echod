@@ -33,7 +33,7 @@ use crate::verified::node_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::StoreCallSpec;
+use crate::concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -44,8 +44,6 @@ pub enum Owner {
     Members,
     Timers,
     Debug,
-    /// The node's announcement being withdrawn: its answer ends the node.
-    Leaving,
     /// Nobody: a best-effort call whose answer changes nothing.
     Ignored,
 }
@@ -58,7 +56,7 @@ impl DeepView for Owner {
     }
 }
 
-/// The process. `on_event` is the only step.
+/// The process. Every core transition uses `on_event`.
 #[make_spec_type]
 pub struct State {
     pub cfg: Config,
@@ -79,8 +77,6 @@ pub struct State {
     pub debug: crate::debug::Debug,
     /// Whether the node keeps itself going: heartbeats and timers.
     pub loops: bool,
-    pub stopping: bool,
-    pub stopped: bool,
     pub out: Vec<Effect>,
     /// The wake last asked of the runtime, so the same one is not asked twice.
     pub last_wake: Option<(u64, Armed)>,
@@ -106,8 +102,6 @@ pub open spec fn spec_state_new(cfg: ConfigSpec) -> S {
         flights: crate::handler_docs::spec_flights_new(),
         debug: crate::debug::spec_debug_new(),
         loops: false,
-        stopping: false,
-        stopped: false,
         out: Seq::empty(),
         last_wake: None,
         keys: KeySpaceSpec {
@@ -141,12 +135,12 @@ pub open spec fn spec_note(s: S, n: NoteSpec) -> S {
 }
 
 /// Issue a store call; `owner` gets its answer.
-pub open spec fn spec_store(s: S, call: StoreCallSpec, owner: Owner) -> (S, OpId) {
+pub open spec fn spec_store(s: S, request: StoreReqSpec, owner: Owner) -> (S, OpId) {
     let op = s.next_op;
     (S {
         next_op: s.next_op.wrapping_add(1),
         ops: s.ops.insert(op, owner),
-        out: s.out.push(EffectSpec::Store { op, call }),
+        out: s.out.push(EffectSpec::Store { op, request }),
         ..s
     }, op)
 }
@@ -254,8 +248,6 @@ impl State {
             flights: Flights::new(),
             debug: crate::debug::Debug::new(),
             loops: false,
-            stopping: false,
-            stopped: false,
             out: Vec::new(),
             last_wake: None,
             keys,
@@ -313,14 +305,14 @@ impl State {
     }
 
     /// Issue a store call; `owner` gets its answer.
-    pub fn store(&mut self, call: StoreCall, owner: Owner) -> (op: OpId)
+    pub fn store(&mut self, request: StoreReq, owner: Owner) -> (op: OpId)
         ensures
-            (final(self).deep_view(), op) == spec_store(old(self).deep_view(), call.deep_view(), owner),
+            (final(self).deep_view(), op) == spec_store(old(self).deep_view(), request.deep_view(), owner),
     {
         let op = self.next_op;
         self.next_op = self.next_op.wrapping_add(1);
         self.ops.insert(op, owner);
-        self.emit(Effect::Store { op, call });
+        self.emit(Effect::Store { op, request });
         op
     }
 
@@ -418,18 +410,18 @@ impl State {
         self.clock = clock;
     }
 
+    pub fn set_loops(&mut self, loops: bool)
+        ensures
+            final(self).deep_view() == (S { loops, ..old(self).deep_view() }),
+    {
+        self.loops = loops;
+    }
+
     pub fn clear_wake(&mut self)
         ensures
             final(self).deep_view() == (S { last_wake: None, ..old(self).deep_view() }),
     {
         self.last_wake = None;
-    }
-
-    pub fn mark_stopped(&mut self)
-        ensures
-            final(self).deep_view() == (S { stopped: true, ..old(self).deep_view() }),
-    {
-        self.stopped = true;
     }
 
     pub fn wake_moved(&mut self, next: Option<(u64, Armed)>) -> (r: bool)
@@ -485,11 +477,6 @@ impl State {
     /// The member that owns `target` by the members this node holds.
     pub fn owner(&self, target: &str) -> Option<String> {
         self.node.core.owner(target)
-    }
-
-    /// The node has withdrawn its announcement: nothing more to do.
-    pub fn stopped(&self) -> bool {
-        self.stopped
     }
 
     pub fn snapshot(&self) -> Snapshot {

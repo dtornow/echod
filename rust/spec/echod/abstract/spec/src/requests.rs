@@ -2,6 +2,9 @@
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 use echod_types::*;
 use rover_spec::rover::comm::Time;
 use super::state::*;
@@ -40,7 +43,7 @@ pub open spec fn spec_held(s: StoreV, id: Seq<char>, version: u64, now: Time) ->
 }
 
 pub open spec fn spec_promise_create(req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.tags) && spec_has_target(req.tags) {
+    if req.timeout_at > MAX_TIME || (spec_is_timer(req.tags) && spec_has_target(req.tags)) {
         spec_out(spec_promise_res(400, None), s)
     } else if s.promises.contains_key(req.id@) {
         let seen = spec_project_promise(s.promises[req.id@], now);
@@ -79,7 +82,8 @@ pub open spec fn spec_promise_settle(req: PromiseSettleReq, s: StoreV, now: Time
 }
 
 pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if !spec_has_target(req.tags) || spec_is_timer(req.tags) {
+    if ttl == 0 || ttl > MAX_TIME || req.timeout_at > MAX_TIME
+        || !spec_has_target(req.tags) || spec_is_timer(req.tags) {
         spec_out(spec_claim_res(400, None, None), s)
     } else if s.promises.contains_key(req.id@) {
         let p = s.promises[req.id@];
@@ -96,6 +100,8 @@ pub open spec fn spec_task_create(pid: String, ttl: Time, req: PromiseCreateReq,
                     spec_claim_res(200, Some(spec_task_record(req.id, seen_t)), Some(spec_promise_record(req.id, seen_p))),
                     s,
                 ),
+                TaskState::Pending if stored.version >= MAX_VERSION =>
+                    spec_out(spec_claim_res(409, None, None), s),
                 TaskState::Pending => {
                     let u = spec_acquire(stored, sat_add(stored.version, 1), pid@, ttl, now);
                     let n = StoreV { tasks: s.tasks.insert(req.id@, u), ..s };
@@ -321,12 +327,14 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 }
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
-    if spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags) {
+    let next_run_at = spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
+    {
         spec_out(spec_schedule_res(400, None), s)
     } else if s.schedules.contains_key(req.id@) {
         spec_out(spec_schedule_res(200, Some(spec_schedule_value(s.schedules[req.id@]))), s)
     } else {
-        let next_run_at = spec_next_cron(req.cron@, now);
         let c = ScheduleV {
             id: req.id@,
             cron: req.cron@,
@@ -395,13 +403,16 @@ pub open spec fn spec_register_listener(awaited: String, address: String, s: Sto
 }
 
 pub open spec fn spec_task_acquire(id: String, version: u64, pid: String, ttl: Time, s: StoreV, now: Time) -> Seq<OutV> {
-    if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
+    if ttl == 0 || ttl > MAX_TIME {
+        spec_out(spec_claim_res(400, None, None), s)
+    } else if !s.tasks.contains_key(id@) || !s.promises.contains_key(id@) {
         spec_out(spec_claim_res(404, None, None), s)
     } else {
         let t = s.tasks[id@];
         let p = spec_project_promise(s.promises[id@], now);
         let seen = spec_project_task(t, p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || t.version >= MAX_VERSION {
             spec_out(spec_claim_res(409, None, None), s)
         } else {
             let u = spec_acquire(t, sat_add(t.version, 1), pid@, ttl, now);

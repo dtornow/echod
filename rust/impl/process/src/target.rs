@@ -1,4 +1,4 @@
-//! What a step is run on: an origin's document, or a schedule's.
+//! What a step is run on: a workflow document, or a schedule's.
 
 use vstd::prelude::*;
 

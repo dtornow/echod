@@ -48,7 +48,7 @@ use crate::verified::text::copy_string;
 use crate::Config;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::store::{spec_before, EtagSpec, StoreErrorSpec};
+use crate::concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::ANode;
 
@@ -407,8 +407,6 @@ pub struct Members {
     pub refresh: Option<Refresh>,
     /// The first refresh that succeeded started the timers.
     pub read_once: bool,
-    /// The node stopped while a refresh was in flight: leave when it ends.
-    pub leave_pending: bool,
 }
 
 pub open spec fn spec_members_new(cfg: crate::config::ConfigSpec) -> MembersSpec {
@@ -421,7 +419,6 @@ pub open spec fn spec_members_new(cfg: crate::config::ConfigSpec) -> MembersSpec
         next_heartbeat: None,
         refresh: None,
         read_once: false,
-        leave_pending: false,
     }
 }
 
@@ -450,7 +447,6 @@ impl Members {
             next_heartbeat: None,
             refresh: None,
             read_once: false,
-            leave_pending: false,
         }
     }
 

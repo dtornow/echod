@@ -6,7 +6,7 @@
 //! threads, locks, or I/O here.
 
 use echod_logic::concrete::store::Store;
-use echod_logic::types::{StoreCall, StoreError, StoreOutcome};
+use echod_logic::types::{StoreReq, StoreError, StoreRes};
 
 use crate::rng::Rng;
 
@@ -60,7 +60,7 @@ impl FaultyStore {
 
     /// Plan one reachable store operation. A node-local outage is handled by
     /// the event loop before this method and is not a shared-store operation.
-    pub fn plan(&mut self, call: &StoreCall) -> (u64, Disposition) {
+    pub fn plan(&mut self, call: &StoreReq) -> (u64, Disposition) {
         self.counters.operations += 1;
         let delay = self.rng.range(0, self.faults.latency_ms);
         if self.rng.percent(self.faults.unavailable_percent) {
@@ -76,21 +76,21 @@ impl FaultyStore {
 
     /// Complete a planned operation. Lost acknowledgements happen only after
     /// a successful write has changed the shared store.
-    pub fn complete(&mut self, call: &StoreCall, disposition: Disposition) -> StoreOutcome {
+    pub fn complete(&mut self, call: &StoreReq, disposition: Disposition) -> StoreRes {
         match disposition {
             Disposition::Unavailable => {
-                StoreOutcome::Failed(StoreError::Unavailable("injected".into()))
+                failure(call, StoreError::Unavailable("injected".into()))
             }
-            Disposition::Conflict => StoreOutcome::Failed(StoreError::PreconditionFailed),
+            Disposition::Conflict => failure(call, StoreError::PreconditionFailed),
             Disposition::Apply => {
                 let (next, outcome) = self.inner.apply(call);
                 self.inner = next;
                 if write(call)
-                    && !matches!(outcome, StoreOutcome::Failed(_))
+                    && response_error(&outcome).is_none()
                     && self.rng.percent(self.faults.lost_ack_percent)
                 {
                     self.counters.lost_acks += 1;
-                    StoreOutcome::Failed(StoreError::Unavailable("injected: ack lost".into()))
+                    failure(call, StoreError::Unavailable("injected: ack lost".into()))
                 } else {
                     outcome
                 }
@@ -116,22 +116,50 @@ impl FaultyStore {
     }
 }
 
-fn conditional(call: &StoreCall) -> bool {
+fn conditional(call: &StoreReq) -> bool {
     matches!(
         call,
-        StoreCall::PutIfMatch { .. }
-            | StoreCall::PutIfNoneMatch { .. }
-            | StoreCall::AppendIfMatch { .. }
+        StoreReq::PutIfMatch { .. }
+            | StoreReq::PutIfNoneMatch { .. }
+            | StoreReq::AppIfMatch { .. }
     )
 }
 
-fn write(call: &StoreCall) -> bool {
+fn write(call: &StoreReq) -> bool {
     matches!(
         call,
-        StoreCall::PutIfMatch { .. }
-            | StoreCall::PutIfNoneMatch { .. }
-            | StoreCall::AppendIfMatch { .. }
-            | StoreCall::Put { .. }
-            | StoreCall::Delete { .. }
+        StoreReq::PutIfMatch { .. }
+            | StoreReq::PutIfNoneMatch { .. }
+            | StoreReq::AppIfMatch { .. }
+            | StoreReq::Put { .. }
+            | StoreReq::Del { .. }
     )
+}
+
+fn failure(call: &StoreReq, error: StoreError) -> StoreRes {
+match call {
+StoreReq::Get { .. } => StoreRes::Get { result: Err(error) },
+StoreReq::GetIfNoneMatch { .. } => StoreRes::GetIfNoneMatch { result: Err(error) },
+StoreReq::PutIfMatch { .. } => StoreRes::PutIfMatch { result: Err(error) },
+StoreReq::PutIfNoneMatch { .. } => StoreRes::PutIfNoneMatch { result: Err(error) },
+StoreReq::AppIfMatch { .. } => StoreRes::AppIfMatch { result: Err(error) },
+StoreReq::Put { .. } => StoreRes::Put { result: Err(error) },
+StoreReq::Del { .. } => StoreRes::Del { result: Err(error) },
+StoreReq::List { .. } => StoreRes::List { result: Err(error) },
+StoreReq::ListPrefixes { .. } => StoreRes::ListPrefixes { result: Err(error) },
+}
+}
+
+pub(crate) fn response_error(response: &StoreRes) -> Option<&StoreError> {
+match response {
+StoreRes::Get { result } => result.as_ref().err(),
+StoreRes::GetIfNoneMatch { result } => result.as_ref().err(),
+StoreRes::PutIfMatch { result } => result.as_ref().err(),
+StoreRes::PutIfNoneMatch { result } => result.as_ref().err(),
+StoreRes::AppIfMatch { result } => result.as_ref().err(),
+StoreRes::Put { result } => result.as_ref().err(),
+StoreRes::Del { result } => result.as_ref().err(),
+StoreRes::List { result } => result.as_ref().err(),
+StoreRes::ListPrefixes { result } => result.as_ref().err(),
+}
 }

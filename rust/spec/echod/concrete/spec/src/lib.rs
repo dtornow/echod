@@ -28,6 +28,11 @@
 #![allow(non_shorthand_field_patterns)]
 
 pub mod node;
+pub mod document;
+pub mod request_claim;
+pub mod effects_claim;
+#[cfg(verus_keep_ghost)]
+mod document_proof;
 pub mod store;
 pub mod model;
 pub mod property_claim;
@@ -35,6 +40,6 @@ pub mod property_claim;
 mod property_proof;
 
 pub use model::{Config, Proc, Spec};
-pub use store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+pub use store::{Etag, Read, StoreReq, StoreError, StoreRes};
 #[cfg(verus_keep_ghost)]
 pub use property_proof::property_proof;

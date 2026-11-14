@@ -13,7 +13,7 @@ use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 use crate::model::{Config, Message, Pid, Proc};
 #[cfg(verus_keep_ghost)]
 use crate::model::spec_world;
-use crate::node::{DocV, NodeV};
+use crate::node::{DocumentBodyV, NodeV};
 #[cfg(verus_keep_ghost)]
 use crate::node::{spec_owns, spec_sorted_present};
 use crate::store::StoreV;
@@ -30,16 +30,16 @@ pub open spec fn keys_strictly_sorted(keys: Seq<Seq<char>>) -> bool {
 
 /// The canonical object traversal contains every map key exactly once and in
 /// strict key order.  Schedule documents contain no object-key traversal.
-pub open spec fn document_object_order(doc: DocV) -> bool {
+pub open spec fn document_object_order(doc: DocumentBodyV) -> bool {
     match doc {
-        DocV::Origin(map) => {
+        DocumentBodyV::Workflow(map) => {
             let keys = spec_sorted_present(map);
             &&& keys_strictly_sorted(keys)
             &&& keys.no_duplicates()
             &&& forall|key: Seq<char>| #[trigger] keys.contains(key)
                 <==> map.contains_key(key)
         },
-        DocV::Schedule(_) => true,
+        DocumentBodyV::Schedule(_) => true,
     }
 }
 
@@ -161,7 +161,7 @@ pub open spec fn step_properties(
 /// outcome preserves the model's integrity properties.
 pub open spec fn property_claim(config: Config) -> bool {
     &&& process_layout(config)
-    &&& forall|doc: DocV| document_object_order(doc)
+    &&& forall|doc: DocumentBodyV| document_object_order(doc)
     &&& forall|i: int| 0 <= i < spec_world(config).len()
         ==> state_properties(#[trigger] spec_world(config)[i].1)
     &&& forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|

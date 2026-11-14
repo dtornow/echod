@@ -6,13 +6,14 @@
 use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
-pub use echod_concrete_spec::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
-use echod_concrete_spec::store::*;
+pub use echod_concrete_spec::store::{Etag, Read, StoreReq, StoreError, StoreRes};
+pub use echod_concrete_spec::store::*;
 use echod_concrete_spec::model::Pid;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::model::{spec_bytes, spec_string};
 
 verus! {
+
 
 /// FNV-1a over the bytes. Ownership of a key is this hash modulo the fleet.
 #[verifier::external_body]
@@ -25,6 +26,7 @@ pub fn fnv1a(s: &str) -> (r: u64) {
     h
 }
 
+
 /// The version a body quotes, as an S3 ETag: the same bytes are the same
 /// version. Trusted to compute `spec_etag`: the hex, the hash and the lossy
 /// decoding are `format!`, `fnv1a` and `from_utf8_lossy`.
@@ -35,6 +37,7 @@ pub fn content_etag(body: &[u8]) -> (r: Etag)
 {
     Etag(format!("{:016x}", fnv1a(&String::from_utf8_lossy(body))))
 }
+
 
 // ---------------------------------------------------------------------------
 // The store
@@ -47,6 +50,7 @@ pub struct Entry {
     pub body: Vec<u8>,
     pub version: u64,
 }
+
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
@@ -61,12 +65,14 @@ pub struct Store {
     pub seen: Vec<(Pid, u64)>,
 }
 
+
 impl View for Entry {
     type V = EntryV;
     open spec fn view(&self) -> EntryV {
         EntryV { key: self.key@, body: self.body@, version: self.version as nat }
     }
 }
+
 
 impl View for Store {
     type V = StoreV;
@@ -79,6 +85,11 @@ impl View for Store {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The store, executed: each function computes its specification above
+// ---------------------------------------------------------------------------
+
 /// The content hash the in-memory store quotes: `content_etag`.
 pub fn etag(body: &Vec<u8>) -> (r: Etag)
     ensures
@@ -86,6 +97,7 @@ pub fn etag(body: &Vec<u8>) -> (r: Etag)
 {
     content_etag(body.as_slice())
 }
+
 
 /// A string's characters. Trusted: the view of a `String` is its characters.
 #[verifier::external_body]
@@ -96,6 +108,7 @@ pub fn chars_of(text: &String) -> (r: Vec<char>)
     text.chars().collect()
 }
 
+
 /// The string of some characters. Trusted, as `chars_of`.
 #[verifier::external_body]
 pub fn string_of(chars: &Vec<char>) -> (r: String)
@@ -104,6 +117,7 @@ pub fn string_of(chars: &Vec<char>) -> (r: String)
 {
     chars.iter().collect()
 }
+
 
 fn copy_bytes(v: &Vec<u8>) -> (r: Vec<u8>)
     ensures
@@ -129,6 +143,7 @@ fn copy_bytes(v: &Vec<u8>) -> (r: Vec<u8>)
     r
 }
 
+
 fn copy_seen(v: &Vec<(Pid, u64)>) -> (r: Vec<(Pid, u64)>)
     ensures
         r@ == v@,
@@ -153,6 +168,7 @@ fn copy_seen(v: &Vec<(Pid, u64)>) -> (r: Vec<(Pid, u64)>)
     r
 }
 
+
 fn copy_entry(e: &Entry) -> (r: Entry)
     ensures
         r == *e,
@@ -163,6 +179,7 @@ fn copy_entry(e: &Entry) -> (r: Entry)
     }
     r
 }
+
 
 fn copy_entries(v: &Vec<Entry>) -> (r: Vec<Entry>)
     ensures
@@ -187,6 +204,7 @@ fn copy_entries(v: &Vec<Entry>) -> (r: Vec<Entry>)
     }
     r
 }
+
 
 /// Character order: `spec_before`. Byte order of UTF-8 is code point
 /// order, so this is the order `str` compares in.
@@ -222,6 +240,7 @@ pub fn before(a: &String, b: &String) -> (r: bool)
     ac.len() < bc.len()
 }
 
+
 /// `spec_starts`.
 fn starts(text: &Vec<char>, prefix: &Vec<char>) -> (r: bool)
     ensures
@@ -251,6 +270,7 @@ fn starts(text: &Vec<char>, prefix: &Vec<char>) -> (r: bool)
     true
 }
 
+
 /// The first `/` at or after `start`: `spec_slash` on the tail.
 fn slash_from(chars: &Vec<char>, start: usize) -> (r: Option<usize>)
     requires
@@ -276,6 +296,7 @@ fn slash_from(chars: &Vec<char>, start: usize) -> (r: Option<usize>)
     None
 }
 
+
 fn take_chars(chars: &Vec<char>, n: usize) -> (r: Vec<char>)
     requires
         n <= chars.len(),
@@ -299,6 +320,7 @@ fn take_chars(chars: &Vec<char>, n: usize) -> (r: Vec<char>)
     r
 }
 
+
 /// `spec_bump`.
 fn bump(version: u64) -> (r: u64)
     ensures
@@ -307,13 +329,11 @@ fn bump(version: u64) -> (r: u64)
     if version < u64::MAX { version + 1 } else { version }
 }
 
+
 pub open spec fn entries_v(v: Seq<Entry>) -> Seq<EntryV> {
     v.map_values(|e: Entry| e@)
 }
 
-pub open spec fn key_views(v: Seq<String>) -> Seq<Seq<char>> {
-    v.map_values(|s: String| s@)
-}
 
 /// The vector some keys name is the vector whose keys they are.
 pub proof fn lemma_bytes_keys(v: Vec<String>)
@@ -331,6 +351,7 @@ pub proof fn lemma_bytes_keys(v: Vec<String>)
     assert(w@ =~= v@);
     echod_abstract_spec::axioms::axiom_vec_ext(w, v);
 }
+
 
 /// `spec_find`.
 fn find_entry(entries: &Vec<Entry>, key: &String) -> (r: Option<usize>)
@@ -354,6 +375,7 @@ fn find_entry(entries: &Vec<Entry>, key: &String) -> (r: Option<usize>)
     }
     None
 }
+
 
 /// Where `spec_insert_at` puts an entry: before the first key it is before.
 fn insert_index(entries: &Vec<Entry>, entry: &Entry) -> (i: usize)
@@ -379,6 +401,7 @@ fn insert_index(entries: &Vec<Entry>, entry: &Entry) -> (i: usize)
     }
     i
 }
+
 
 /// `spec_put`: in place at the key, else at its place in order.
 fn put_entry(entries: &mut Vec<Entry>, entry: Entry)
@@ -407,6 +430,7 @@ fn put_entry(entries: &mut Vec<Entry>, entry: Entry)
         },
     }
 }
+
 
 /// `spec_list`.
 fn list_keys(entries: &Vec<Entry>, prefix: &String, max_keys: usize) -> (r: Vec<String>)
@@ -442,6 +466,7 @@ fn list_keys(entries: &Vec<Entry>, prefix: &String, max_keys: usize) -> (r: Vec<
     }
     keys
 }
+
 
 /// `spec_prefixes`: the children one level under the prefix, each once.
 fn prefix_children(entries: &Vec<Entry>, prefix: &String) -> (r: Vec<String>)
@@ -491,6 +516,7 @@ fn prefix_children(entries: &Vec<Entry>, prefix: &String) -> (r: Vec<String>)
     out
 }
 
+
 /// A prefix is no longer than what it starts.
 pub proof fn lemma_starts_len(text: Seq<char>, prefix: Seq<char>)
     requires
@@ -503,6 +529,7 @@ pub proof fn lemma_starts_len(text: Seq<char>, prefix: Seq<char>)
         lemma_starts_len(text.drop_first(), prefix.drop_first());
     }
 }
+
 
 impl Store {
     pub fn empty(appendable: bool) -> (r: Store)
@@ -529,14 +556,14 @@ impl Store {
     }
 
     /// One call: `spec_apply`.
-    pub fn apply(&self, call: &StoreCall) -> (r: (Store, StoreOutcome))
+    pub fn apply(&self, req: &StoreReq) -> (r: (Store, StoreRes))
         ensures
-            (r.0@, r.1) == spec_apply(self@, *call),
+            (r.0@, r.1) == spec_apply(self@, *req),
     {
         let mut next = self.copy();
-        let outcome = match call {
-            StoreCall::Get { key } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Got(None),
+        let response = match req {
+            StoreReq::Get { key } => match find_entry(&self.entries, key) {
+                None => StoreRes::Get { result: Ok(None) },
                 Some(i) => {
                     let entry = &self.entries[i];
                     let body = copy_bytes(&entry.body);
@@ -544,11 +571,11 @@ impl Store {
                         echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
                         echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
-                    StoreOutcome::Got(Some((body, etag(&entry.body))))
+                    StoreRes::Get { result: Ok(Some((body, etag(&entry.body)))) }
                 },
             },
-            StoreCall::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
-                None => StoreOutcome::Read(Read::Absent),
+            StoreReq::GetIfNoneMatch { key, etag: want } => match find_entry(&self.entries, key) {
+                None => StoreRes::GetIfNoneMatch { result: Ok(Read::Absent) },
                 Some(i) => {
                     let entry = &self.entries[i];
                     let have = etag(&entry.body);
@@ -556,26 +583,26 @@ impl Store {
                         proof {
                             echod_abstract_spec::axioms::axiom_string_ext(have.0, want.0);
                         }
-                        StoreOutcome::Read(Read::NotModified)
+                        StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
                             echod_concrete_spec::model::lemma_bytes_realised(entry.body@);
                             echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
-                        StoreOutcome::Read(Read::Body(body, have))
+                        StoreRes::GetIfNoneMatch { result: Ok(Read::Body(body, have)) }
                     }
                 },
             },
-            StoreCall::PutIfNoneMatch { key, body } => {
+            StoreReq::PutIfNoneMatch { key, body } => {
                 if find_entry(&self.entries, key).is_some() {
-                    StoreOutcome::Failed(StoreError::PreconditionFailed)
+                    StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) }
                 } else {
                     put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version: 1 });
-                    StoreOutcome::Written(etag(body))
+                    StoreRes::PutIfNoneMatch { result: Ok(etag(body)) }
                 }
             },
-            StoreCall::PutIfMatch { key, body, etag: want } => match find_entry(&self.entries, key) {
+            StoreReq::PutIfMatch { key, body, etag: want } => match find_entry(&self.entries, key) {
                 Some(i) => {
                     let have = etag(&self.entries[i].body);
                     if have.0 == want.0 {
@@ -584,19 +611,19 @@ impl Store {
                         }
                         let version = bump(self.entries[i].version);
                         put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
-                        StoreOutcome::Written(etag(body))
+                        StoreRes::PutIfMatch { result: Ok(etag(body)) }
                     } else {
                         proof {
                             if have.0@ != want.0@ {
                                 assert(have != *want);
                             }
                         }
-                        StoreOutcome::Failed(StoreError::PreconditionFailed)
+                        StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) }
                     }
                 },
-                None => StoreOutcome::Failed(StoreError::PreconditionFailed),
+                None => StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) },
             },
-            StoreCall::AppendIfMatch { key, offset, body, etag: want } => {
+            StoreReq::AppIfMatch { key, offset, body, etag: want } => {
                 if !self.appendable {
                     let text = "this store does not append".to_owned();
                     proof {
@@ -607,7 +634,7 @@ impl Store {
                         ]);
                         echod_concrete_spec::model::lemma_string_of(text);
                     }
-                    StoreOutcome::Failed(StoreError::Unavailable(text))
+                    StoreRes::AppIfMatch { result: Err(StoreError::Unavailable(text)) }
                 } else {
                     match find_entry(&self.entries, key) {
                         Some(i) => {
@@ -622,29 +649,29 @@ impl Store {
                                 let version = bump(self.entries[i].version);
                                 let tag = etag(&joined);
                                 put_entry(&mut next.entries, Entry { key: key.clone(), body: joined, version });
-                                StoreOutcome::Written(tag)
+                                StoreRes::AppIfMatch { result: Ok(tag) }
                             } else {
                                 proof {
                                     if have.0@ != want.0@ {
                                         assert(have != *want);
                                     }
                                 }
-                                StoreOutcome::Failed(StoreError::PreconditionFailed)
+                                StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) }
                             }
                         },
-                        None => StoreOutcome::Failed(StoreError::PreconditionFailed),
+                        None => StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) },
                     }
                 }
             },
-            StoreCall::Put { key, body } => {
+            StoreReq::Put { key, body } => {
                 let version = match find_entry(&self.entries, key) {
                     Some(i) => bump(self.entries[i].version),
                     None => 1,
                 };
                 put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
-                StoreOutcome::Done
+                StoreRes::Put { result: Ok(()) }
             },
-            StoreCall::Delete { key } => {
+            StoreReq::Del { key } => {
                 match find_entry(&next.entries, key) {
                     Some(i) => {
                         let ghost before_v = entries_v(next.entries@);
@@ -655,12 +682,14 @@ impl Store {
                     },
                     None => {},
                 }
-                StoreOutcome::Done
+                StoreRes::Del { result: Ok(()) }
             },
-            StoreCall::List { prefix, max_keys } => StoreOutcome::Listed(list_keys(&self.entries, prefix, *max_keys)),
-            StoreCall::ListPrefixes { prefix } => StoreOutcome::Listed(prefix_children(&self.entries, prefix)),
+            StoreReq::List { prefix, max_keys } =>
+                StoreRes::List { result: Ok(list_keys(&self.entries, prefix, *max_keys)) },
+            StoreReq::ListPrefixes { prefix } =>
+                StoreRes::ListPrefixes { result: Ok(prefix_children(&self.entries, prefix)) },
         };
-        (next, outcome)
+        (next, response)
     }
 }
 

@@ -2,6 +2,9 @@
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 use rover_spec::rover::comm::Sched;
 use echod_types::{PromiseState, TaskState, Value};
 use super::state::*;
@@ -107,7 +110,7 @@ pub open spec fn spec_callback_apply(
             TaskState::Suspended => tasks0.insert(awaiter, TaskV {
                 state: TaskState::Pending,
                 resumes: seq![awaited],
-                retry_timeout_at: Some(since),
+                retry_timeout_at: Some(now),
                 ..t
             }),
             TaskState::Fulfilled => tasks0,

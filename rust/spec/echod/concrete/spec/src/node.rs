@@ -7,7 +7,7 @@
 use vstd::prelude::*;
 
 use echod_types::{
-    PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
+    MAX_TIME, MAX_VERSION, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
     PromiseRes, PromiseSettleReq, PromiseState, Request, Response, Schedule, ScheduleCreateReq,
     ScheduleRes, StatusRes, Tags, TaskClaimRes, TaskFenceAction, TaskFenceInnerRes, TaskFenceRes,
     TaskGetRes, TaskRecord, TaskRef, TaskState, Value,
@@ -15,7 +15,7 @@ use echod_types::{
 use crate::model::LogicV;
 
 #[cfg(verus_keep_ghost)]
-use echod_types::{origin, same_origin_spec, AValue};
+use echod_types::{origin, same_origin_spec, spec_deadline_bounded, AValue};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::Call;
 #[cfg(verus_keep_ghost)]
@@ -25,10 +25,132 @@ use crate::model::{
     spec_bytes, spec_get, spec_notes, spec_reply, spec_string, Config, Proc, Message, Pid,
 };
 #[cfg(verus_keep_ghost)]
-use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Etag, Read, StoreCall, StoreError, StoreOutcome};
+use crate::store::{spec_before, spec_fnv, spec_sat_add, spec_starts, Etag, Read, StoreReq, StoreError, StoreRes};
+
+
+pub use crate::document::*;
 
 verus! {
 
+
+/// Request transitions drain their finite workflow to a fixed point.  The
+/// executable representation is bounded by addressable memory; using the
+/// full `u64` range avoids turning document size into a semantic cutoff.
+pub const REQUEST_SWEEP_STEPS: u64 = u64::MAX;
+
+
+pub open spec fn spec_stored_body(d: StoredDocumentV) -> DocumentBodyV {
+    match d {
+        StoredDocumentV::Workflow(doc) => DocumentBodyV::Workflow(doc.objects),
+        StoredDocumentV::Schedule(doc) => DocumentBodyV::Schedule(doc.schedule),
+    }
+}
+
+
+pub open spec fn spec_stored_version(d: StoredDocumentV) -> u64 {
+    match d {
+        StoredDocumentV::Workflow(doc) => doc.version,
+        StoredDocumentV::Schedule(doc) => doc.version,
+    }
+}
+
+
+pub open spec fn spec_stored_committed_at(d: StoredDocumentV) -> u64 {
+    match d {
+        StoredDocumentV::Workflow(doc) => doc.committed_at,
+        StoredDocumentV::Schedule(doc) => doc.committed_at,
+    }
+}
+
+
+pub open spec fn spec_stored_next_wake_at(d: StoredDocumentV) -> Option<u64> {
+    match d {
+        StoredDocumentV::Workflow(doc) => doc.next_wake_at,
+        StoredDocumentV::Schedule(doc) => doc.next_wake_at,
+    }
+}
+
+
+pub open spec fn spec_stored_name(d: StoredDocumentV) -> Seq<char> {
+    match d {
+        StoredDocumentV::Workflow(doc) => doc.document,
+        StoredDocumentV::Schedule(doc) => doc.document,
+    }
+}
+
+
+pub open spec fn spec_empty_stored_workflow(document: Seq<char>) -> StoredDocumentV {
+    StoredDocumentV::Workflow(WorkflowDocumentV {
+        document,
+        version: 0,
+        committed_at: 0,
+        next_wake_at: None,
+        objects: Map::empty(),
+    })
+}
+
+
+pub open spec fn spec_empty_stored_schedule(document: Seq<char>) -> StoredDocumentV {
+    StoredDocumentV::Schedule(ScheduleDocumentV {
+        document,
+        version: 0,
+        committed_at: 0,
+        next_wake_at: None,
+        schedule: None,
+    })
+}
+
+
+pub open spec fn spec_advance_stored(
+    before: StoredDocumentV,
+    body: DocumentBodyV,
+    committed_at: u64,
+) -> StoredDocumentV {
+    let version = spec_stored_version(before).saturating_add(1);
+    let next_wake_at = match spec_body_deadline(body) {
+        Some(at) => Some(at as u64),
+        None => None,
+    };
+    match body {
+        DocumentBodyV::Workflow(objects) => StoredDocumentV::Workflow(WorkflowDocumentV {
+            document: spec_stored_name(before),
+            version,
+            committed_at,
+            next_wake_at,
+            objects,
+        }),
+        DocumentBodyV::Schedule(schedule) => StoredDocumentV::Schedule(ScheduleDocumentV {
+            document: spec_stored_name(before),
+            version,
+            committed_at,
+            next_wake_at,
+            schedule,
+        }),
+    }
+}
+
+
+/// How many rows a document holds: its objects, or its one schedule.
+pub open spec fn spec_body_len(d: DocumentBodyV) -> nat {
+    match d {
+        DocumentBodyV::Workflow(m) => m.dom().len(),
+        DocumentBodyV::Schedule(Some(_)) => 1,
+        DocumentBodyV::Schedule(None) => 0,
+    }
+}
+
+
+pub open spec fn nat_v(o: Option<u64>) -> Option<nat> {
+    match o { Some(x) => Some(x as nat), None => None }
+}
+
+
+pub open spec fn spec_sent(reply: Option<(Seq<char>, u64, Response)>, notes: Seq<NoteV>) -> Seq<(Pid, Message)> {
+    (match reply {
+        Some((client, id, response)) => seq![spec_reply(client, id, response)],
+        None => Seq::empty(),
+    }) + spec_notes(notes)
+}
 // ---------------------------------------------------------------------------
 // The view types
 // ---------------------------------------------------------------------------
@@ -46,6 +168,190 @@ pub struct PendingV {
 pub enum NoteV {
     Execute { id: Seq<char>, version: u64 },
     Unblock { address: Seq<char>, promise: PromiseRecord },
+}
+
+/// Idempotency key of an outbound protocol effect.
+pub enum NoteKeyV {
+    Execute(Seq<char>),
+    Unblock(Seq<char>, Seq<char>),
+}
+
+pub open spec fn spec_note_key(note: NoteV) -> NoteKeyV {
+    match note {
+        NoteV::Execute { id, .. } => NoteKeyV::Execute(id),
+        NoteV::Unblock { address, promise } => NoteKeyV::Unblock(promise.id@, address),
+    }
+}
+
+pub open spec fn spec_note_relevant(doc: DocumentBodyV, note: NoteV) -> bool {
+    match note {
+        NoteV::Execute { id, version } => {
+            let objects = spec_workflow_map(doc);
+            objects.contains_key(id)
+                && match objects[id].task {
+                    Some(task) => task.state == TaskState::Pending && task.version == version,
+                    None => false,
+                }
+        },
+        NoteV::Unblock { .. } => true,
+    }
+}
+
+pub open spec fn spec_keyed_insert(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    note: NoteV,
+) -> Seq<NoteV> {
+    if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < notes.len()
+        && spec_note_key(notes[i]) == spec_note_key(note)
+    {
+        notes
+    } else {
+        notes.push(note)
+    }
+}
+
+pub open spec fn spec_keyed_notes(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        spec_keyed_insert(
+            doc,
+            spec_keyed_notes(doc, notes, (count - 1) as nat),
+            notes[count as int - 1],
+        )
+    }
+}
+
+pub open spec fn spec_execute_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    committed_at: u64,
+    keys: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_execute_notes(before, after, committed_at, keys, (count - 1) as nat);
+        let id = keys[count as int - 1];
+        if crate::document::offer_committed(before, after, id, committed_at) {
+            prior.push(NoteV::Execute {
+                id,
+                version: after[id].task.unwrap().version,
+            })
+        } else {
+            prior
+        }
+    }
+}
+
+pub open spec fn spec_unblock_notes_for(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    promise: Seq<char>,
+    listeners: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            listeners,
+            (count - 1) as nat,
+        );
+        let address = listeners[count as int - 1];
+        if crate::document::listener_committed(before, after, promise, address) {
+            prior.push(NoteV::Unblock {
+                address,
+                promise: spec_record(spec_string(promise), after[promise].promise),
+            })
+        } else {
+            prior
+        }
+    }
+}
+
+pub open spec fn spec_unblock_notes(
+    before: Map<Seq<char>, ObjV>,
+    after: Map<Seq<char>, ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+) -> Seq<NoteV>
+    decreases count,
+{
+    if count == 0 {
+        Seq::empty()
+    } else {
+        let prior = spec_unblock_notes(before, after, keys, (count - 1) as nat);
+        let promise = keys[count as int - 1];
+        prior + spec_unblock_notes_for(
+            before,
+            after,
+            promise,
+            before[promise].promise.listeners,
+            before[promise].promise.listeners.len(),
+        )
+    }
+}
+
+/// Canonical imperative representation of the endpoint-derived effect set.
+pub open spec fn spec_committed_notes(
+    before: DocumentBodyV,
+    after: DocumentBodyV,
+    committed_at: u64,
+) -> Seq<NoteV> {
+    match (before, after) {
+        (DocumentBodyV::Workflow(old), DocumentBodyV::Workflow(new)) => {
+            let new_keys = spec_sorted_present(new);
+            let old_keys = spec_sorted_present(old);
+            spec_execute_notes(old, new, committed_at, new_keys, new_keys.len())
+                + spec_unblock_notes(old, new, old_keys, old_keys.len())
+        },
+        _ => Seq::empty(),
+    }
+}
+
+pub proof fn lemma_keyed_notes_from_input(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+    k: int,
+)
+    requires
+        count <= notes.len(),
+        0 <= k < spec_keyed_notes(doc, notes, count).len(),
+    ensures
+        exists|j: int| 0 <= j < count
+            && spec_keyed_notes(doc, notes, count)[k] == notes[j],
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_keyed_notes(doc, notes, (count - 1) as nat);
+        let note = notes[count as int - 1];
+        if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < prior.len()
+            && spec_note_key(prior[i]) == spec_note_key(note)
+        {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else if k < prior.len() {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else {
+            assert(k == prior.len());
+        }
+    }
 }
 
 /// What the open flight is doing.
@@ -97,60 +403,28 @@ pub struct NodeV {
 // ---------------------------------------------------------------------------
 // The node, as a specification. `spec_request`, `spec_timeout`, and
 // `spec_store_reply` are the arms of `Node::on_event`; the handlers are the
-// step on a document. `spec_decode_raw` and `spec_encode` are the JSON codec of
+// step on a document. `spec_decode_body_raw` and `spec_encode_body` are the JSON codec of
 // a document, the same kind of trusted boundary as the cron engine.
 // ---------------------------------------------------------------------------
 
 /// JSON of a document. `encode` / `decode` in the node are this. A body that
 /// does not parse is the empty document for that key, the same fallback as
 /// `decode`.
-pub uninterp spec fn spec_decode_raw(body: Seq<u8>) -> Option<DocV>;
+pub uninterp spec fn spec_decode_body_raw(body: Seq<u8>) -> Option<DocumentBodyV>;
 
-pub uninterp spec fn spec_encode(doc: DocV) -> Seq<u8>;
+pub uninterp spec fn spec_encode_body(doc: DocumentBodyV) -> Seq<u8>;
 
 /// The codec round-trips: what `encode` wrote, `decode` reads back.
-pub axiom fn axiom_decode_encode(doc: DocV)
+pub axiom fn axiom_decode_encode_body(doc: DocumentBodyV)
     ensures
-        spec_decode_raw(spec_encode(doc)) == Some(doc),
+        spec_decode_body_raw(spec_encode_body(doc)) == Some(doc),
 ;
 
-pub open spec fn spec_read(key: Seq<char>, body: Seq<u8>) -> DocV {
-    match spec_decode_raw(body) {
+pub open spec fn spec_read(key: Seq<char>, body: Seq<u8>) -> DocumentBodyV {
+    match spec_decode_body_raw(body) {
         Some(doc) => doc,
-        None => spec_empty_doc(key),
+        None => spec_empty_body(key),
     }
-}
-
-pub struct PromV {
-    pub state: PromiseState,
-    pub param: Value,
-    pub value: Value,
-    pub tags: Tags,
-    pub timeout_at: u64,
-    pub created_at: u64,
-    pub settled_at: Option<u64>,
-    pub callbacks: Seq<Seq<char>>,
-    pub listeners: Seq<Seq<char>>,
-}
-
-pub struct TkV {
-    pub state: TaskState,
-    pub version: u64,
-    pub pid: Option<Seq<char>>,
-    pub ttl: Option<u64>,
-    pub lease_timeout_at: Option<u64>,
-    pub retry_timeout_at: Option<u64>,
-    pub resumes: Seq<Seq<char>>,
-}
-
-pub struct ObjV {
-    pub promise: PromV,
-    pub task: Option<TkV>,
-}
-
-pub enum DocV {
-    Origin(Map<Seq<char>, ObjV>),
-    Schedule(Option<Schedule>),
 }
 
 pub open spec fn spec_empty_value() -> Value {
@@ -173,19 +447,19 @@ pub open spec fn spec_cached_from(docs: Seq<CachedV>, key: Seq<char>, i: int) ->
     else { spec_cached_from(docs, key, i + 1) }
 }
 
-pub open spec fn spec_is_empty(doc: DocV) -> bool {
+pub open spec fn spec_body_is_empty(doc: DocumentBodyV) -> bool {
     match doc {
-        DocV::Origin(map) => map.dom().len() == 0,
-        DocV::Schedule(slot) => slot is None,
+        DocumentBodyV::Workflow(map) => map.dom().len() == 0,
+        DocumentBodyV::Schedule(slot) => slot is None,
     }
 }
 
 /// `remember`: an empty document with no etag leaves the cache.
-pub open spec fn spec_keep(docs: Seq<CachedV>, key: Seq<char>, doc: DocV, etag: Option<Seq<char>>) -> Seq<CachedV> {
-    if spec_is_empty(doc) && etag is None {
+pub open spec fn spec_keep(docs: Seq<CachedV>, key: Seq<char>, doc: DocumentBodyV, etag: Option<Seq<char>>) -> Seq<CachedV> {
+    if spec_body_is_empty(doc) && etag is None {
         spec_forget(docs, key, 0)
     } else {
-        spec_remember(docs, key, spec_encode(doc), etag, 0)
+        spec_remember(docs, key, spec_encode_body(doc), etag, 0)
     }
 }
 
@@ -243,29 +517,33 @@ pub open spec fn spec_timeout(node: NodeV, now: Time) -> (NodeV, Seq<(Pid, Messa
     }
 }
 
-pub open spec fn spec_store_reply(node: NodeV, op: u64, outcome: StoreOutcome) -> (NodeV, Seq<(Pid, Message)>) {
+pub open spec fn spec_store_reply(node: NodeV, op: u64, response: StoreRes) -> (NodeV, Seq<(Pid, Message)>) {
     match node.flight {
         None => (node, Seq::empty()),
         Some(flight) => {
             if flight.op != op {
                 (node, Seq::empty())
             } else if !flight.writing {
-                match outcome {
-                    StoreOutcome::Got(got) => {
+                match response {
+                    StoreRes::Get { result: Ok(got) } => {
                         let (doc, etag) = match got {
                             Some((body, tag)) => (spec_read(flight.key, body@), Some(tag.0@)),
-                            None => (spec_empty_doc(flight.key), None),
+                            None => (spec_empty_body(flight.key), None),
                         };
                         let flight = FlightV { etag, ..flight };
                         spec_decide(NodeV { flight: None, ..node }, flight, doc)
                     },
-                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                    StoreRes::Get { result: Err(_) } => spec_fail(NodeV { flight: None, ..node }, flight),
                     _ => (node, Seq::empty()),
                 }
             } else {
-                match outcome {
-                    StoreOutcome::Written(tag) => spec_commit(node, flight, tag),
-                    StoreOutcome::Failed(_) => spec_fail(NodeV { flight: None, ..node }, flight),
+                match response {
+                    StoreRes::PutIfMatch { result: Ok(tag) }
+                    | StoreRes::PutIfNoneMatch { result: Ok(tag) } =>
+                        spec_commit(node, flight, tag),
+                    StoreRes::PutIfMatch { result: Err(_) }
+                    | StoreRes::PutIfNoneMatch { result: Err(_) } =>
+                        spec_fail(NodeV { flight: None, ..node }, flight),
                     _ => (node, Seq::empty()),
                 }
             }
@@ -300,7 +578,7 @@ pub open spec fn spec_begin(node: NodeV, key: Seq<char>, job: JobV, now: Time, c
     }
 }
 
-pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV, Seq<(Pid, Message)>) {
+pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV) -> (NodeV, Seq<(Pid, Message)>) {
     let (next, reply, born, notify) = match flight.job {
         JobV::External(request) => {
             let (next, response) = spec_handle(doc, request, flight.now);
@@ -315,7 +593,7 @@ pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV,
     };
     let previous = match spec_cached(node, flight.key) {
         Some(cached) => spec_read(flight.key, cached.body),
-        None => spec_empty_doc(flight.key),
+        None => spec_empty_body(flight.key),
     };
     if next == previous && born.len() == 0 {
         let node = NodeV {
@@ -330,14 +608,14 @@ pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV,
         (node, send + spec_notes(notify))
     } else {
         let op = node.next_op;
-        let body = spec_encode(next);
-        let call = match flight.etag {
-            Some(chars) => StoreCall::PutIfMatch {
+        let body = spec_encode_body(next);
+        let request = match flight.etag {
+            Some(chars) => StoreReq::PutIfMatch {
                 key: spec_string(flight.key),
                 body: spec_bytes(body),
                 etag: Etag(spec_string(chars)),
             },
-            None => StoreCall::PutIfNoneMatch { key: spec_string(flight.key), body: spec_bytes(body) },
+            None => StoreReq::PutIfNoneMatch { key: spec_string(flight.key), body: spec_bytes(body) },
         };
         let flight = FlightV {
             op,
@@ -348,7 +626,7 @@ pub open spec fn spec_decide(node: NodeV, flight: FlightV, doc: DocV) -> (NodeV,
             decided: Some(body),
             ..flight
         };
-        (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![(Pid::Store, Message::StoreReq { op, call })])
+        (NodeV { flight: Some(flight), next_op: (op + 1) as u64, ..node }, seq![(Pid::Store, Message::StoreReq { op, request })])
     }
 }
 
@@ -387,8 +665,8 @@ pub open spec fn spec_schedule_key(id: Seq<char>) -> Seq<char> {
     seq!['s', '/'] + id
 }
 
-pub open spec fn spec_empty_doc(key: Seq<char>) -> DocV {
-    if spec_starts(key, seq!['s', '/']) { DocV::Schedule(None) } else { DocV::Origin(Map::empty()) }
+pub open spec fn spec_empty_body(key: Seq<char>) -> DocumentBodyV {
+    if spec_starts(key, seq!['s', '/']) { DocumentBodyV::Schedule(None) } else { DocumentBodyV::Workflow(Map::empty()) }
 }
 
 pub open spec fn spec_key(request: Request) -> Option<Seq<char>> {
@@ -414,6 +692,31 @@ pub open spec fn spec_key(request: Request) -> Option<Seq<char>> {
         Request::ScheduleGet(q) => Some(spec_schedule_key(q.id@)),
         Request::ScheduleDelete(q) => Some(spec_schedule_key(q.id@)),
         Request::ScheduleCreate(q) => Some(spec_schedule_key(q.id@)),
+    }
+}
+
+pub open spec fn spec_request_document(request: Request) -> Option<Seq<char>> {
+    match request {
+        Request::PromiseGet(q) => Some(origin(q.id@)),
+        Request::PromiseCreate(q) => Some(origin(q.id@)),
+        Request::PromiseSettle(q) => Some(origin(q.id@)),
+        Request::PromiseRegisterCallback(q) => Some(origin(q.awaited@)),
+        Request::PromiseRegisterListener(q) => Some(origin(q.awaited@)),
+        Request::TaskGet(q) => Some(origin(q.id@)),
+        Request::TaskCreate(q) => Some(origin(q.action.id@)),
+        Request::TaskAcquire(q) => Some(origin(q.id@)),
+        Request::TaskFulfill(q) => Some(origin(q.id@)),
+        Request::TaskRelease(q) => Some(origin(q.id@)),
+        Request::TaskHalt(q) => Some(origin(q.id@)),
+        Request::TaskContinue(q) => Some(origin(q.id@)),
+        Request::TaskFence(q) => Some(origin(q.id@)),
+        Request::TaskFenceCheck(q) => Some(origin(q.id@)),
+        Request::TaskSuspend(q) => Some(origin(q.id@)),
+        Request::TaskHeartbeat(q) =>
+            if q.tasks@.len() == 0 { None } else { Some(origin(q.tasks@[0].id@)) },
+        Request::ScheduleGet(q) => Some(q.id@),
+        Request::ScheduleCreate(q) => Some(q.id@),
+        Request::ScheduleDelete(q) => Some(q.id@),
     }
 }
 
@@ -444,7 +747,7 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
 }
 
 /// One request against one document. The same match as `handle`.
-pub open spec fn spec_handle(doc: DocV, request: Request, now: Time) -> (DocV, Response) {
+pub open spec fn spec_handle(doc: DocumentBodyV, request: Request, now: Time) -> (DocumentBodyV, Response) {
     match request {
         Request::PromiseGet(q) => spec_promise_get(doc, q.id, now),
         Request::PromiseCreate(q) => spec_promise_create(doc, q, now),
@@ -468,22 +771,22 @@ pub open spec fn spec_handle(doc: DocV, request: Request, now: Time) -> (DocV, R
     }
 }
 
-pub open spec fn spec_origin_map(doc: DocV) -> Map<Seq<char>, ObjV> {
+pub open spec fn spec_workflow_map(doc: DocumentBodyV) -> Map<Seq<char>, ObjV> {
     match doc {
-        DocV::Origin(map) => map,
-        DocV::Schedule(_) => Map::empty(),
+        DocumentBodyV::Workflow(map) => map,
+        DocumentBodyV::Schedule(_) => Map::empty(),
     }
 }
 
-/// `origin_mut` replaces a schedule document with an empty origin map before it looks anything up.
-pub open spec fn spec_opened(doc: DocV) -> DocV {
-    DocV::Origin(spec_origin_map(doc))
+/// `workflow_mut` replaces a schedule document with an empty origin map before it looks anything up.
+pub open spec fn spec_opened(doc: DocumentBodyV) -> DocumentBodyV {
+    DocumentBodyV::Workflow(spec_workflow_map(doc))
 }
 
-pub open spec fn spec_with_origin(doc: DocV, map: Map<Seq<char>, ObjV>) -> DocV {
+pub open spec fn spec_with_workflow(doc: DocumentBodyV, map: Map<Seq<char>, ObjV>) -> DocumentBodyV {
     match doc {
-        DocV::Schedule(_) => DocV::Origin(map),
-        DocV::Origin(_) => DocV::Origin(map),
+        DocumentBodyV::Schedule(_) => DocumentBodyV::Workflow(map),
+        DocumentBodyV::Workflow(_) => DocumentBodyV::Workflow(map),
     }
 }
 
@@ -610,9 +913,9 @@ pub open spec fn spec_parse_acc(s: Seq<char>, i: int, acc: nat) -> Option<u64>
     }
 }
 
-pub open spec fn spec_promise_get(doc: DocV, id: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_promise_get(doc: DocumentBodyV, id: String, now: Time) -> (DocumentBodyV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, spec_promise_res(404, None))
     } else {
@@ -641,7 +944,7 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
             pid: None,
             ttl: None,
             lease_timeout_at: None,
-            retry_timeout_at: if live { Some(spec_offer_at(tags, now)) } else { None },
+            retry_timeout_at: if live { Some(now) } else { None },
             resumes: Seq::empty(),
         })
     } else {
@@ -650,27 +953,27 @@ pub open spec fn spec_new_obj(timeout_at: u64, now: Time, param: Value, tags: Ta
     ObjV { promise, task }
 }
 
-pub open spec fn spec_promise_create(doc: DocV, req: PromiseCreateReq, now: Time) -> (DocV, Response) {
-    if spec_timer(req.tags) && spec_targeted(req.tags) {
+pub open spec fn spec_promise_create(doc: DocumentBodyV, req: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
+    if req.timeout_at > MAX_TIME || (spec_timer(req.tags) && spec_targeted(req.tags)) {
         (doc, spec_promise_res(400, None))
     } else {
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if map.contains_key(req.id@) {
             let obj = spec_project_obj(map[req.id@], now);
             (doc, spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
         } else {
             let obj = spec_new_obj(req.timeout_at, now, req.param, req.tags, spec_targeted(req.tags));
-            (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+            (spec_with_workflow(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
         }
     }
 }
 
-pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time) -> (DocV, Response) {
+pub open spec fn spec_promise_settle(doc: DocumentBodyV, req: PromiseSettleReq, now: Time) -> (DocumentBodyV, Response) {
     if !req.state.spec_settable() {
         (doc, spec_promise_res(400, None))
     } else {
         let doc = spec_opened(doc);
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if !map.contains_key(req.id@) {
             (doc, spec_promise_res(404, None))
         } else {
@@ -684,18 +987,18 @@ pub open spec fn spec_promise_settle(doc: DocV, req: PromiseSettleReq, now: Time
                     other => other,
                 };
                 let obj = ObjV { promise, task };
-                (spec_with_origin(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
+                (spec_with_workflow(doc, map.insert(req.id@, obj)), spec_promise_res(200, Some(spec_record(req.id, obj.promise))))
             }
         }
     }
 }
 
-pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_register_callback(doc: DocumentBodyV, awaited: String, awaiter: String, now: Time) -> (DocumentBodyV, Response) {
     if awaited@ == awaiter@ || !same_origin_spec(awaited@, awaiter@) {
         (doc, spec_promise_res(400, None))
     } else {
         let doc = spec_opened(doc);
-        let map = spec_origin_map(doc);
+        let map = spec_workflow_map(doc);
         if !map.contains_key(awaited@) {
             (doc, spec_promise_res(404, None))
         } else if !map.contains_key(awaiter@) {
@@ -714,7 +1017,7 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
                         awaited_obj.promise.callbacks.push(awaiter@)
                     };
                     let awaited_obj = ObjV { promise: PromV { callbacks, ..awaited_obj.promise }, ..awaited_obj };
-                    (spec_with_origin(doc, map.insert(awaited@, awaited_obj)), res)
+                    (spec_with_workflow(doc, map.insert(awaited@, awaited_obj)), res)
                 } else {
                     (doc, res)
                 }
@@ -723,9 +1026,9 @@ pub open spec fn spec_register_callback(doc: DocV, awaited: String, awaiter: Str
     }
 }
 
-pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_register_listener(doc: DocumentBodyV, awaited: String, address: String, now: Time) -> (DocumentBodyV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(awaited@) {
         (doc, spec_promise_res(404, None))
     } else {
@@ -741,7 +1044,7 @@ pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: Str
                     obj.promise.listeners.push(address@)
                 };
                 let obj = ObjV { promise: PromV { listeners, ..obj.promise }, ..obj };
-                (spec_with_origin(doc, map.insert(awaited@, obj)), res)
+                (spec_with_workflow(doc, map.insert(awaited@, obj)), res)
             } else {
                 (doc, res)
             }
@@ -749,9 +1052,9 @@ pub open spec fn spec_register_listener(doc: DocV, awaited: String, address: Str
     }
 }
 
-pub open spec fn spec_task_get(doc: DocV, id: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_task_get(doc: DocumentBodyV, id: String, now: Time) -> (DocumentBodyV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::TaskGet(TaskGetRes { status: 404, task: None }))
     } else {
@@ -776,8 +1079,9 @@ pub open spec fn spec_acquire(t: TkV, pid: Seq<char>, ttl: u64, now: Time) -> Tk
     }
 }
 
-pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: PromiseCreateReq, now: Time) -> (DocV, Response) {
-    if !spec_targeted(action.tags) || spec_timer(action.tags) {
+pub open spec fn spec_task_create(doc: DocumentBodyV, pid: String, ttl: u64, action: PromiseCreateReq, now: Time) -> (DocumentBodyV, Response) {
+    if ttl == 0 || ttl > MAX_TIME || action.timeout_at > MAX_TIME
+        || !spec_targeted(action.tags) || spec_timer(action.tags) {
         (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
         let (doc, created) = spec_promise_create(doc, action, now);
@@ -786,7 +1090,7 @@ pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: Prom
                 (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
             },
             _ => {
-                let map = spec_origin_map(doc);
+                let map = spec_workflow_map(doc);
                 if !map.contains_key(action.id@) {
                     (doc, Response::TaskClaim(TaskClaimRes { status: 422, task: None, promise: None }))
                 } else {
@@ -804,11 +1108,14 @@ pub open spec fn spec_task_create(doc: DocV, pid: String, ttl: u64, action: Prom
                                     promise: Some(spec_record(action.id, seen.promise)),
                                 }),
                             ),
+                            Some(t) if t.state == TaskState::Pending && t.version >= MAX_VERSION => {
+                                (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
+                            },
                             Some(t) if t.state == TaskState::Pending => {
                                 let u = spec_acquire(t, pid@, ttl, now);
                                 let obj = ObjV { task: Some(u), ..seen };
                                 (
-                                    spec_with_origin(doc, map.insert(action.id@, obj)),
+                                    spec_with_workflow(doc, map.insert(action.id@, obj)),
                                     Response::TaskClaim(TaskClaimRes {
                                         status: 200,
                                         task: Some(spec_task_record(action.id, u)),
@@ -840,30 +1147,35 @@ pub open spec fn spec_held(map: Map<Seq<char>, ObjV>, id: Seq<char>, version: u6
     }
 }
 
-pub open spec fn spec_task_acquire(doc: DocV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocV, Response) {
-    let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
-    if !map.contains_key(id@) {
-        (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None }))
+pub open spec fn spec_task_acquire(doc: DocumentBodyV, id: String, version: u64, pid: String, ttl: u64, now: Time) -> (DocumentBodyV, Response) {
+    if ttl == 0 || ttl > MAX_TIME {
+        (doc, Response::TaskClaim(TaskClaimRes { status: 400, task: None, promise: None }))
     } else {
-        let obj = spec_project_obj(map[id@], now);
-        match obj.task {
-            None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
-            Some(t) if t.state != TaskState::Pending || t.version != version || obj.promise.state != PromiseState::Pending => {
-                (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
-            },
-            Some(t) => {
-                let u = spec_acquire(t, pid@, ttl, now);
-                let obj = ObjV { task: Some(u), ..obj };
-                (
-                    spec_with_origin(doc, map.insert(id@, obj)),
-                    Response::TaskClaim(TaskClaimRes {
-                        status: 200,
-                        task: Some(spec_task_record(id, u)),
-                        promise: Some(spec_record(id, obj.promise)),
-                    }),
-                )
-            },
+        let doc = spec_opened(doc);
+        let map = spec_workflow_map(doc);
+        if !map.contains_key(id@) {
+            (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None }))
+        } else {
+            let obj = spec_project_obj(map[id@], now);
+            match obj.task {
+                None => (doc, Response::TaskClaim(TaskClaimRes { status: 404, task: None, promise: None })),
+                Some(t) if t.state != TaskState::Pending || t.version != version
+                    || obj.promise.state != PromiseState::Pending || t.version >= MAX_VERSION => {
+                    (doc, Response::TaskClaim(TaskClaimRes { status: 409, task: None, promise: None }))
+                },
+                Some(t) => {
+                    let u = spec_acquire(t, pid@, ttl, now);
+                    let obj = ObjV { task: Some(u), ..obj };
+                    (
+                        spec_with_workflow(doc, map.insert(id@, obj)),
+                        Response::TaskClaim(TaskClaimRes {
+                            status: 200,
+                            task: Some(spec_task_record(id, u)),
+                            promise: Some(spec_record(id, obj.promise)),
+                        }),
+                    )
+                },
+            }
         }
     }
 }
@@ -872,39 +1184,39 @@ pub open spec fn spec_unlease(t: TkV, state: TaskState, retry: Option<u64>) -> T
     TkV { state, pid: None, ttl: None, lease_timeout_at: None, retry_timeout_at: retry, ..t }
 }
 
-pub open spec fn spec_task_release(doc: DocV, id: String, version: u64, now: Time) -> (DocV, Response) {
-    let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+pub open spec fn spec_task_release(doc: DocumentBodyV, id: String, version: u64, now: Time) -> (DocumentBodyV, Response) {
+    let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
     match held {
-        Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-        Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
+        Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+        Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
         Held::Ok(obj) => {
             let task = match obj.task { Some(t) => Some(spec_unlease(t, TaskState::Pending, Some(now))), None => None };
-            (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
+            (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
         },
     }
 }
 
-pub open spec fn spec_task_fulfill(doc: DocV, id: String, version: u64, action: PromiseSettleReq, now: Time) -> (DocV, Response) {
+pub open spec fn spec_task_fulfill(doc: DocumentBodyV, id: String, version: u64, action: PromiseSettleReq, now: Time) -> (DocumentBodyV, Response) {
     if !action.state.spec_settable() {
         (doc, spec_promise_res(400, None))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), spec_promise_res(404, None)),
-            Held::Stale => (spec_with_origin(doc, map), spec_promise_res(409, None)),
+            Held::Missing => (spec_with_workflow(doc, map), spec_promise_res(404, None)),
+            Held::Stale => (spec_with_workflow(doc, map), spec_promise_res(409, None)),
             Held::Ok(obj) => {
                 let promise = PromV { state: action.state, value: action.value, settled_at: Some(now), ..obj.promise };
                 let task = match obj.task { Some(t) if t.state != TaskState::Fulfilled => Some(spec_fulfill_task(t)), other => other };
                 let obj = ObjV { promise, task };
-                (spec_with_origin(doc, map.insert(id@, obj)), spec_promise_res(200, Some(spec_record(id, obj.promise))))
+                (spec_with_workflow(doc, map.insert(id@, obj)), spec_promise_res(200, Some(spec_record(id, obj.promise))))
             },
         }
     }
 }
 
-pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_task_halt(doc: DocumentBodyV, id: String, now: Time) -> (DocumentBodyV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::Status(StatusRes { status: 404 }))
     } else {
@@ -915,15 +1227,15 @@ pub open spec fn spec_task_halt(doc: DocV, id: String, now: Time) -> (DocV, Resp
             Some(t) if t.state == TaskState::Halted => (doc, Response::Status(StatusRes { status: 200 })),
             Some(t) => {
                 let obj = ObjV { task: Some(spec_unlease(t, TaskState::Halted, None)), ..obj };
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
+                (spec_with_workflow(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
             },
         }
     }
 }
 
-pub open spec fn spec_task_continue(doc: DocV, id: String, now: Time) -> (DocV, Response) {
+pub open spec fn spec_task_continue(doc: DocumentBodyV, id: String, now: Time) -> (DocumentBodyV, Response) {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if !map.contains_key(id@) {
         (doc, Response::Status(StatusRes { status: 404 }))
     } else {
@@ -935,19 +1247,19 @@ pub open spec fn spec_task_continue(doc: DocV, id: String, now: Time) -> (DocV, 
             },
             Some(t) => {
                 let obj = ObjV { task: Some(TkV { state: TaskState::Pending, retry_timeout_at: Some(now), ..t }), ..obj };
-                (spec_with_origin(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
+                (spec_with_workflow(doc, map.insert(id@, obj)), Response::Status(StatusRes { status: 200 }))
             },
         }
     }
 }
 
-pub open spec fn spec_heartbeat(doc: DocV, pid: String, tasks: Seq<TaskRef>, now: Time) -> (DocV, Response) {
+pub open spec fn spec_heartbeat(doc: DocumentBodyV, pid: String, tasks: Seq<TaskRef>, now: Time) -> (DocumentBodyV, Response) {
     if tasks.len() == 0 {
         (doc, Response::Status(StatusRes { status: 200 }))
     } else if !spec_one_origin(tasks, origin(tasks[0].id@), 0) {
         (doc, Response::Status(StatusRes { status: 400 }))
     } else {
-        (spec_with_origin(doc, spec_extend(spec_origin_map(doc), pid@, tasks, now, 0)), Response::Status(StatusRes { status: 200 }))
+        (spec_with_workflow(doc, spec_extend(spec_workflow_map(doc), pid@, tasks, now, 0)), Response::Status(StatusRes { status: 200 }))
     }
 }
 
@@ -979,20 +1291,20 @@ pub open spec fn spec_extend(map: Map<Seq<char>, ObjV>, pid: Seq<char>, tasks: S
     }
 }
 
-pub open spec fn spec_suspend(doc: DocV, id: String, version: u64, actions: Seq<PromiseRegisterCallbackReq>, now: Time) -> (DocV, Response) {
+pub open spec fn spec_suspend(doc: DocumentBodyV, id: String, version: u64, actions: Seq<PromiseRegisterCallbackReq>, now: Time) -> (DocumentBodyV, Response) {
     if actions.len() == 0 || spec_bad_suspend(actions, id@, 0) || !spec_distinct_awaited(actions, 0) {
         (doc, Response::Status(StatusRes { status: 400 }))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-            Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
+            Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+            Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
             Held::Ok(obj) => {
                 if spec_missing_awaited(map, actions, 0) || spec_unawaitable(map, actions, 0) {
-                    (spec_with_origin(doc, map), Response::Status(StatusRes { status: 422 }))
+                    (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 422 }))
                 } else if spec_any_settled(map, actions, now, 0) {
                     let task = match obj.task { Some(t) => Some(TkV { resumes: Seq::empty(), ..t }), None => None };
-                    (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 300 }))
+                    (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 300 }))
                 } else {
                     let map = spec_add_callbacks(map, id@, actions, 0);
                     let obj = map[id@];
@@ -1000,7 +1312,7 @@ pub open spec fn spec_suspend(doc: DocV, id: String, version: u64, actions: Seq<
                         Some(t) => Some(TkV { resumes: Seq::empty(), ..spec_unlease(t, TaskState::Suspended, None) }),
                         None => None,
                     };
-                    (spec_with_origin(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
+                    (spec_with_workflow(doc, map.insert(id@, ObjV { task, ..obj })), Response::Status(StatusRes { status: 200 }))
                 }
             },
         }
@@ -1069,7 +1381,7 @@ pub open spec fn spec_add_callbacks(map: Map<Seq<char>, ObjV>, id: Seq<char>, ac
     }
 }
 
-pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFenceAction, now: Time) -> (DocV, Response) {
+pub open spec fn spec_fence(doc: DocumentBodyV, id: String, version: u64, action: TaskFenceAction, now: Time) -> (DocumentBodyV, Response) {
     let target = match action {
         TaskFenceAction::Create(c) => c.id,
         TaskFenceAction::Settle(st) => st.id,
@@ -1077,12 +1389,12 @@ pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFen
     if target@ == id@ || !same_origin_spec(target@, id@) {
         (doc, Response::TaskFence(TaskFenceRes { status: 400, action: None }))
     } else {
-        let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+        let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
         match held {
-            Held::Missing => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None })),
-            Held::Stale => (spec_with_origin(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None })),
+            Held::Missing => (spec_with_workflow(doc, map), Response::TaskFence(TaskFenceRes { status: 404, action: None })),
+            Held::Stale => (spec_with_workflow(doc, map), Response::TaskFence(TaskFenceRes { status: 409, action: None })),
             Held::Ok(_) => {
-                let doc = spec_with_origin(doc, map);
+                let doc = spec_with_workflow(doc, map);
                 match action {
                     TaskFenceAction::Create(req) => {
                         let (doc, response) = spec_promise_create(doc, req, now);
@@ -1100,28 +1412,31 @@ pub open spec fn spec_fence(doc: DocV, id: String, version: u64, action: TaskFen
     }
 }
 
-pub open spec fn spec_fence_check(doc: DocV, id: String, version: u64, now: Time) -> (DocV, Response) {
-    let (map, held) = spec_held(spec_origin_map(doc), id@, version, now);
+pub open spec fn spec_fence_check(doc: DocumentBodyV, id: String, version: u64, now: Time) -> (DocumentBodyV, Response) {
+    let (map, held) = spec_held(spec_workflow_map(doc), id@, version, now);
     match held {
-        Held::Missing => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 404 })),
-        Held::Stale => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 409 })),
-        Held::Ok(_) => (spec_with_origin(doc, map), Response::Status(StatusRes { status: 200 })),
+        Held::Missing => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 404 })),
+        Held::Stale => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 409 })),
+        Held::Ok(_) => (spec_with_workflow(doc, map), Response::Status(StatusRes { status: 200 })),
     }
 }
 
-pub open spec fn spec_schedule_get(doc: DocV, id: String) -> (DocV, Response) {
+pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentBodyV, Response) {
     match doc {
-        DocV::Schedule(Some(schedule)) if schedule.id == id => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.id == id => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
         _ => (doc, Response::Schedule(ScheduleRes { status: 404, schedule: None })),
     }
 }
 
-pub open spec fn spec_schedule_create(doc: DocV, req: ScheduleCreateReq, now: Time) -> (DocV, Response) {
-    if spec_targeted(req.promise_tags) && spec_timer(req.promise_tags) {
+pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
+    let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
+    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+        || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
+    {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
     } else {
         match doc {
-            DocV::Schedule(Some(schedule)) => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
+            DocumentBodyV::Schedule(Some(schedule)) => (doc, Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) })),
             _ => {
                 let schedule = Schedule {
                     id: req.id,
@@ -1130,26 +1445,26 @@ pub open spec fn spec_schedule_create(doc: DocV, req: ScheduleCreateReq, now: Ti
                     promise_timeout: req.promise_timeout,
                     promise_param: req.promise_param,
                     promise_tags: req.promise_tags,
-                    next_run_at: echod_abstract_spec::axioms::spec_next_cron(req.cron@, now),
+                next_run_at,
                     last_run_at: None,
                     created_at: now,
                 };
-                (DocV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) }))
+                (DocumentBodyV::Schedule(Some(schedule)), Response::Schedule(ScheduleRes { status: 200, schedule: Some(schedule) }))
             },
         }
     }
 }
 
-pub open spec fn spec_schedule_delete(doc: DocV, id: String) -> (DocV, Response) {
+pub open spec fn spec_schedule_delete(doc: DocumentBodyV, id: String) -> (DocumentBodyV, Response) {
     match doc {
-        DocV::Schedule(Some(schedule)) if schedule.id == id => (DocV::Schedule(None), Response::Status(StatusRes { status: 200 })),
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.id == id => (DocumentBodyV::Schedule(None), Response::Status(StatusRes { status: 200 })),
         _ => (doc, Response::Status(StatusRes { status: 404 })),
     }
 }
 
-pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
+pub open spec fn spec_run_due(doc: DocumentBodyV, now: Time, retry_timeout: u64) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match doc {
-        DocV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
             let pending = PendingV {
                 promise: echod_abstract_spec::axioms::spec_expand(schedule.promise_id@, schedule.id@, at),
@@ -1163,13 +1478,13 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
                 next_run_at: echod_abstract_spec::axioms::spec_next_cron(schedule.cron@, at),
                 ..schedule
             };
-            (DocV::Schedule(Some(schedule)), None, seq![pending], Seq::empty())
+            (DocumentBodyV::Schedule(Some(schedule)), None, seq![pending], Seq::empty())
         },
-        DocV::Origin(map) => {
+        DocumentBodyV::Workflow(map) => {
             match spec_due_id(map, spec_sorted_present(map), now) {
                 Some(id) => {
                     let (map, notes) = spec_step_object(map, id, now, retry_timeout);
-                    (DocV::Origin(map), None, Seq::empty(), notes)
+                    (DocumentBodyV::Workflow(map), None, Seq::empty(), notes)
                 },
                 None => (doc, None, Seq::empty(), Seq::empty()),
             }
@@ -1180,7 +1495,7 @@ pub open spec fn spec_run_due(doc: DocV, now: Time, retry_timeout: u64) -> (DocV
 
 /// `spec_run_due` iterated: it stops at a step that leaves the document as it
 /// was, or after `limit` steps. The occurrences queued and the notes, in order.
-pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64, limit: nat) -> (DocV, Seq<PendingV>, Seq<NoteV>)
+pub open spec fn spec_sweep(doc: DocumentBodyV, now: Time, retry_timeout: u64, limit: nat) -> (DocumentBodyV, Seq<PendingV>, Seq<NoteV>)
     decreases limit,
 {
     if limit == 0 {
@@ -1196,9 +1511,60 @@ pub open spec fn spec_sweep(doc: DocV, now: Time, retry_timeout: u64, limit: nat
     }
 }
 
-pub open spec fn spec_occurrence(doc: DocV, pending: PendingV, now: Time) -> DocV {
+/// The complete document-level request transition.  Both closures have the
+/// same finite budget.  Exhaustion is an atomic rejection: neither the
+/// partially closed document nor any effect escapes.
+pub open spec fn spec_request_commits(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> bool {
+    let (after, response, _, _) =
+        spec_request_transition(doc, request, now, retry_timeout, limit);
+    response != spec_unavailable(request) && after != doc
+}
+
+pub open spec fn spec_request_transition(
+    doc: DocumentBodyV,
+    request: Request,
+    now: Time,
+    retry_timeout: u64,
+    limit: nat,
+) -> (DocumentBodyV, Response, Seq<PendingV>, Seq<NoteV>) {
+    match doc {
+        DocumentBodyV::Schedule(_) => {
+            let (doc, response) = spec_handle(doc, request, now);
+            (doc, response, Seq::empty(), Seq::empty())
+        },
+        DocumentBodyV::Workflow(_) => {
+            let (swept, before_born, before_notes) =
+                spec_sweep(doc, now, retry_timeout, limit);
+            if spec_earliest_in(swept, now) is Some {
+                (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+            } else {
+                let (handled, response) = spec_handle(swept, request, now);
+                let (closed, after_born, after_notes) =
+                    spec_sweep(handled, now, retry_timeout, limit);
+                if spec_earliest_in(closed, now) is Some {
+                    (doc, spec_unavailable(request), Seq::empty(), Seq::empty())
+                } else {
+                    (
+                        closed,
+                        response,
+                        before_born + after_born,
+                        spec_committed_notes(doc, closed, now),
+                    )
+                }
+            }
+        },
+    }
+}
+
+pub open spec fn spec_occurrence(doc: DocumentBodyV, pending: PendingV, now: Time) -> DocumentBodyV {
     let doc = spec_opened(doc);
-    let map = spec_origin_map(doc);
+    let map = spec_workflow_map(doc);
     if map.contains_key(pending.promise) || now < pending.at {
         doc
     } else {
@@ -1210,10 +1576,10 @@ pub open spec fn spec_occurrence(doc: DocV, pending: PendingV, now: Time) -> Doc
             born.promise
         };
         let task = match born.task {
-            Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(spec_offer_at(pending.tags, pending.at)), ..t }),
+            Some(t) if t.state == TaskState::Pending => Some(TkV { retry_timeout_at: Some(now), ..t }),
             other => other,
         };
-        spec_with_origin(doc, map.insert(pending.promise, ObjV { promise, task }))
+        spec_with_workflow(doc, map.insert(pending.promise, ObjV { promise, task }))
     }
 }
 
@@ -1229,7 +1595,7 @@ pub open spec fn spec_sorted_present(map: Map<Seq<char>, ObjV>) -> Seq<Seq<char>
     spec_sorted(map.dom())
 }
 
-/// Opaque: the choice is read through [`lemma_min_key_present`] alone.
+/// Opaque: the choice is read through `timers::lemma_min_key` alone.
 #[verifier::opaque]
 pub open spec fn spec_min_key(keys: Set<Seq<char>>) -> Seq<char> {
     choose|k: Seq<char>| keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k)
@@ -1446,7 +1812,7 @@ pub open spec fn spec_resume(map: Map<Seq<char>, ObjV>, awaiter: Seq<char>, awai
                         pid: None,
                         ttl: None,
                         lease_timeout_at: None,
-                        retry_timeout_at: Some(since),
+                        retry_timeout_at: Some(now),
                         resumes: seq![awaited],
                         ..t
                     }),
@@ -1488,15 +1854,15 @@ pub open spec fn spec_deadlines(node: NodeV, docs: Seq<CachedV>, i: int) -> Opti
     } else if !spec_owns(node, docs[i].key) {
         spec_deadlines(node, docs, i + 1)
     } else {
-        spec_min_nat(spec_doc_deadline(spec_read(docs[i].key, docs[i].body)), spec_deadlines(node, docs, i + 1))
+        spec_min_nat(spec_body_deadline(spec_read(docs[i].key, docs[i].body)), spec_deadlines(node, docs, i + 1))
     }
 }
 
-pub open spec fn spec_doc_deadline(doc: DocV) -> Option<nat> {
+pub open spec fn spec_body_deadline(doc: DocumentBodyV) -> Option<nat> {
     match doc {
-        DocV::Schedule(Some(schedule)) => Some(schedule.next_run_at as nat),
-        DocV::Origin(map) => spec_map_deadline(map, spec_sorted(map.dom())),
-        DocV::Schedule(None) => None,
+        DocumentBodyV::Schedule(Some(schedule)) => Some(schedule.next_run_at as nat),
+        DocumentBodyV::Workflow(map) => spec_map_deadline(map, spec_sorted(map.dom())),
+        DocumentBodyV::Schedule(None) => None,
     }
 }
 
@@ -1537,10 +1903,10 @@ pub open spec fn spec_earliest_from(node: NodeV, docs: Seq<CachedV>, i: int, now
     }
 }
 
-pub open spec fn spec_earliest_in(doc: DocV, now: Time) -> Option<u64> {
+pub open spec fn spec_earliest_in(doc: DocumentBodyV, now: Time) -> Option<u64> {
     match doc {
-        DocV::Schedule(Some(schedule)) if schedule.next_run_at <= now => Some(schedule.next_run_at),
-        DocV::Origin(map) => spec_map_due(map, spec_sorted(map.dom()), now),
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => Some(schedule.next_run_at),
+        DocumentBodyV::Workflow(map) => spec_map_due(map, spec_sorted(map.dom()), now),
         _ => None,
     }
 }
@@ -1552,4 +1918,6 @@ pub open spec fn spec_map_due(map: Map<Seq<char>, ObjV>, keys: Seq<Seq<char>>, n
     else { spec_earlier(spec_obj_due(map[keys[0]], now), spec_map_due(map, keys.drop_first(), now)) }
 }
 
-}
+
+
+} // verus!

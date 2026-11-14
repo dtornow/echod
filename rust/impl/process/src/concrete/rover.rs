@@ -114,16 +114,16 @@ impl Store {
     {
         let mut r: Vec<(Store, Vec<(Pid, Message)>)> = Vec::new();
         match event {
-            ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+            ProcessEvent::Receive { sender, message: Message::StoreReq { op, request } } => {
                 if seen_has(&self.seen, *sender, *op) {
                     r.push((self.copy(), Vec::new()));
                     proof { assert(store_results_v(r@) =~~= spec_store(self@, *event)); }
                     return r;
                 }
-                let (mut next, outcome) = self.apply(call);
+                let (mut next, response) = self.apply(request);
                 next.seen.push((*sender, *op));
                 let mut send = Vec::new();
-                send.push((*sender, Message::StoreReply { op: *op, outcome }));
+                send.push((*sender, Message::StoreRes { op: *op, response }));
                 r.push((next, send));
                 proof { assert(store_results_v(r@) =~~= spec_store(self@, *event)); }
                 r

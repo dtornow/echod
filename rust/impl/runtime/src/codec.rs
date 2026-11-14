@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use echod_logic::doc::codec::{self, Promise};
+use echod_logic::document::codec::{self, Promise};
 use echod_logic::verified as rows;
 use resonate_core::types as w;
 use serde_json::{json, Value};
@@ -121,9 +121,13 @@ pub fn create_in(d: &w::PromiseCreateData) -> Result<rows::PromiseCreateReq, Str
             return Err("Invalid resonate:target address".to_string());
         }
     }
+    let timeout_at = nat(d.timeout_at, "timeoutAt")?;
+    if !rows::time_bounded(timeout_at) {
+        return Err(format!("timeoutAt must be at most {}", rows::MAX_TIME));
+    }
     Ok(rows::PromiseCreateReq {
         id: d.id.clone(),
-        timeout_at: nat(d.timeout_at, "timeoutAt")?,
+        timeout_at,
         param: value_in(&d.param),
         tags: create_tags(&d.tags),
     })

@@ -4,6 +4,9 @@
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::requests::*;
@@ -77,14 +80,14 @@ impl<'cfg> Handlers<'cfg> {
     /// `fenced`: the create is a fence's action (for the marks). `now` is the
     /// instant the promise is created at: the clock, or an occurrence's instant
     /// for a schedule's fire.
-    fn promise_create(&self, req: &PromiseCreateReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub fn promise_create(&self, req: &PromiseCreateReq, fenced: bool, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
             forall|i: int|
                 0 <= i < outs.len() ==> {
-                    &&& (exec_server_ok(*s) ==> exec_server_ok(#[trigger] outs[i].next))
-                    &&& (exec_server_ok(*s) ==> response_ok(outs[i].resp))
+                    &&& (server_ok(*s) ==> server_ok(#[trigger] outs[i].next))
+                    &&& (server_ok(*s) ==> response_ok(outs[i].resp))
                     &&& (!s.promises@.contains_key(req.id@) && outs[i].next.promises@.contains_key(req.id@)
-                        ==> exec_promise_ok(outs[i].next.promises@[req.id@]))
+                        ==> promise_ok(outs[i].next.promises@[req.id@]))
                     // the frame
                     &&& outs[i].next.promises@.remove(req.id@) == s.promises@.remove(req.id@)
                     &&& outs[i].next.tasks@.remove(req.id@) == s.tasks@.remove(req.id@)
@@ -95,14 +98,14 @@ impl<'cfg> Handlers<'cfg> {
             outs_v(outs@) == spec_promise_create(*req, s@, now),
     {
         broadcast use group_exec_views;
-        if is_timer(&req.tags) && has_target(&req.tags) {
+        if req.timeout_at > MAX_TIME || (is_timer(&req.tags) && has_target(&req.tags)) {
             return status(promise_res(400, None), mk("create: timer with target (400)"), s);
         }
         match s.promises.get(&req.id) {
             Some(p) => {
                 proof {
-                    if exec_server_ok(*s) {
-                        assert(exec_promise_ok(s.promises@[req.id@]));
+                    if server_ok(*s) {
+                        assert(promise_ok(s.promises@[req.id@]));
                     }
                 }
                 let seen = p.project(now);
@@ -119,8 +122,8 @@ impl<'cfg> Handlers<'cfg> {
             n.tasks.insert(req.id.clone(), task);
         }
         proof {
-            if exec_server_ok(*s) {
-                assert forall|k: Seq<char>| #[trigger] n.promises@.contains_key(k) implies exec_promise_ok(
+            if server_ok(*s) {
+                assert forall|k: Seq<char>| #[trigger] n.promises@.contains_key(k) implies promise_ok(
                     n.promises@[k],
                 ) by {
                     if k != req.id@ {
@@ -221,12 +224,13 @@ impl<'cfg> Handlers<'cfg> {
         Ok(t)
     }
 
-    fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_create(&self, pid: &String, ttl: Time, req: &PromiseCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
             outs_v(outs@) == spec_task_create(*pid, ttl, *req, s@, now),
     {
         broadcast use group_exec_views;
-        if !has_target(&req.tags) || is_timer(&req.tags) {
+        if ttl == 0 || ttl > MAX_TIME || req.timeout_at > MAX_TIME
+            || !has_target(&req.tags) || is_timer(&req.tags) {
             return status(claim_res(400, None, None), mk("task.create: not runnable, or a timer (400)"), s);
         }
         match s.promises.get(&req.id) {
@@ -242,6 +246,9 @@ impl<'cfg> Handlers<'cfg> {
                 let seen_t = stored_task.project(&seen_p);
                 return match seen_t.state {
                     TaskState::Fulfilled => echo(claim_res(200, Some(seen_t.to_record(&req.id)), Some(seen_p.to_record(&req.id))), mk("task.create: task done (echo)"), s),
+                    TaskState::Pending if stored_task.version >= MAX_VERSION => {
+                        status(claim_res(409, None, None), mk("task.create: version exhausted (409)"), s)
+                    },
                     TaskState::Pending => {
                         let mut n = copy_store(s);
                         let mut u = copy(stored_task);
@@ -583,12 +590,15 @@ impl<'cfg> Handlers<'cfg> {
         outs
     }
 
-    fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn schedule_create(&self, req: &ScheduleCreateReq, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_exec_views;
-        if is_timer(&req.promise_tags) && has_target(&req.promise_tags) {
+        let next_run_at = next_cron(&req.cron, now);
+        if !deadline_bounded(next_run_at, req.promise_timeout)
+            || (is_timer(&req.promise_tags) && has_target(&req.promise_tags))
+        {
             return status(schedule_res(400, None), mk("schedule: timer with target (400)"), s);
         }
         match s.schedules.get(&req.id) {
@@ -604,7 +614,6 @@ impl<'cfg> Handlers<'cfg> {
         }
         // `next_run_at` is the server's: the first instant the cron names
         // strictly after now. The request does not carry it.
-        let next_run_at = next_cron(&req.cron, now);
         let promise_param = req.promise_param.dup();
         let promise_tags = echod_types::clone_tags(&req.promise_tags);
         proof {
@@ -707,11 +716,14 @@ impl<'cfg> Handlers<'cfg> {
         outs
     }
 
-    fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
+    pub(crate) fn task_acquire(&self, id: &Id, version: u64, pid: &String, ttl: Time, s: &Store, now: Time) -> (outs: Vec<Out>)
         ensures
             outs_v(outs@) == spec_task_acquire(*id, version, *pid, ttl, s@, now),
     {
         broadcast use group_exec_views;
+        if ttl == 0 || ttl > MAX_TIME {
+            return status(claim_res(400, None, None), mk("acquire: invalid ttl (400)"), s);
+        }
         let t = match s.tasks.get(id) {
             Some(t) => t,
             None => return status(claim_res(404, None, None), mk("acquire: no such task (404)"), s),
@@ -722,7 +734,8 @@ impl<'cfg> Handlers<'cfg> {
         };
         let p = stored_p.project(now);
         let seen = t.project(&p);
-        if seen.state != TaskState::Pending || p.state != PromiseState::Pending || t.version != version {
+        if seen.state != TaskState::Pending || p.state != PromiseState::Pending
+            || t.version != version || t.version >= MAX_VERSION {
             return status(claim_res(409, None, None), mk("acquire: not pending, or stale version (409)"), s);
         }
         let mut n = copy_store(s);

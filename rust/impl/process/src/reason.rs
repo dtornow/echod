@@ -6,17 +6,17 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::{peek, Doc, Obj};
+use crate::concrete::{peek, DocumentBody, Obj};
 use echod_types::Tags;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::lemma_obj_view;
+use crate::concrete::lemma_obj_view;
 use echod_types::{Request, Response, TaskState};
 
 use crate::verified::node::str_eq;
 use crate::verified::text::text;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::node::{spec_origin_map, DocV};
+use crate::concrete::document::{spec_workflow_map, DocumentBodyV};
 #[cfg(verus_keep_ghost)]
 use echod_types::AResponse;
 
@@ -131,14 +131,11 @@ pub fn target_of(tags: &Tags) -> (r: Option<String>)
 }
 
 /// `map[id]`, if the document holds it.
-pub open spec fn spec_object(
-    doc: DocV,
-    id: Seq<char>,
-) -> Option<echod_concrete_spec::node::ObjV> {
-    if spec_origin_map(doc).contains_key(id) { Some(spec_origin_map(doc)[id]) } else { None }
+pub open spec fn spec_object(doc: DocumentBodyV, id: Seq<char>) -> Option<crate::concrete::document::ObjV> {
+    if spec_workflow_map(doc).contains_key(id) { Some(spec_workflow_map(doc)[id]) } else { None }
 }
 
-fn object(doc: &Doc, id: &String) -> (r: Option<Obj>)
+fn object(doc: &DocumentBody, id: &String) -> (r: Option<Obj>)
     ensures
         match r {
             Some(o) => spec_object(doc@, id@) == Some(o@),
@@ -149,7 +146,7 @@ fn object(doc: &Doc, id: &String) -> (r: Option<Obj>)
 }
 
 /// Does any action await a promise the document does not hold?
-pub open spec fn spec_any_missing(doc: DocV, actions: Seq<echod_types::PromiseRegisterCallbackReq>) -> bool
+pub open spec fn spec_any_missing(doc: DocumentBodyV, actions: Seq<echod_types::PromiseRegisterCallbackReq>) -> bool
     decreases actions.len(),
 {
     if actions.len() == 0 {
@@ -161,7 +158,7 @@ pub open spec fn spec_any_missing(doc: DocV, actions: Seq<echod_types::PromiseRe
     }
 }
 
-proof fn lemma_any_missing_step(doc: DocV, actions: Seq<echod_types::PromiseRegisterCallbackReq>, i: int)
+proof fn lemma_any_missing_step(doc: DocumentBodyV, actions: Seq<echod_types::PromiseRegisterCallbackReq>, i: int)
     requires
         0 <= i <= actions.len(),
         forall|j: int| 0 <= j < i ==> spec_object(doc, (#[trigger] actions[j]).awaited@) is Some,
@@ -178,7 +175,7 @@ proof fn lemma_any_missing_step(doc: DocV, actions: Seq<echod_types::PromiseRegi
     }
 }
 
-fn any_missing(doc: &Doc, actions: &Vec<echod_types::PromiseRegisterCallbackReq>) -> (r: bool)
+fn any_missing(doc: &DocumentBody, actions: &Vec<echod_types::PromiseRegisterCallbackReq>) -> (r: bool)
     ensures
         r == spec_any_missing(doc@, actions@),
 {
@@ -207,7 +204,7 @@ fn any_missing(doc: &Doc, actions: &Vec<echod_types::PromiseRegisterCallbackReq>
 
 /// The words for `status` on `kind`, read off the document where the
 /// status has several causes.
-pub open spec fn spec_reason_for(kind: Seq<char>, req: Request, status: u16, doc: DocV) -> Seq<char> {
+pub open spec fn spec_reason_for(kind: Seq<char>, req: Request, status: u16, doc: DocumentBodyV) -> Seq<char> {
     if (kind == "promise.get"@ || kind == "promise.settle"@) && status == 404 {
         "Promise not found"@
     } else if (kind == "promise.register_callback"@ || kind == "promise.register_listener"@) && status == 404 {
@@ -261,7 +258,7 @@ pub open spec fn spec_reason_for(kind: Seq<char>, req: Request, status: u16, doc
     }
 }
 
-pub fn reason_for(kind: &str, req: &Request, status: u16, doc: &Doc) -> (r: String)
+pub fn reason_for(kind: &str, req: &Request, status: u16, doc: &DocumentBody) -> (r: String)
     ensures
         r@ == spec_reason_for(kind@, *req, status, doc@),
 {

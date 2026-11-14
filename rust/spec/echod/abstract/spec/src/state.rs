@@ -2,6 +2,9 @@
 
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 use rover_spec::rover::comm::Sched;
 use echod_types::{
     PromiseRecord, PromiseRes, PromiseState, Request, Response, Schedule, ScheduleRes, StatusRes,
@@ -818,10 +821,6 @@ pub open spec fn spec_new_object(
         callbacks: Set::empty(),
         listeners: Set::empty(),
     };
-    let due = match spec_delay(tags) {
-        Some(d) => if d > at { d } else { at },
-        None => at,
-    };
     let task = if runnable {
         Some(TaskV {
             state: if live_now { TaskState::Pending } else { TaskState::Fulfilled },
@@ -829,7 +828,7 @@ pub open spec fn spec_new_object(
             pid: None,
             ttl: None,
             acquired_at: 0,
-            retry_timeout_at: if live_now { Some(due) } else { None },
+            retry_timeout_at: if live_now { Some(now) } else { None },
             resumes: Seq::empty(),
         })
     } else {

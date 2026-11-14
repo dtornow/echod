@@ -53,6 +53,25 @@ it events by hand. The runtime performs what it asks. The simulator is the
 evidence. [DESIGN.md](DESIGN.md) is the design; [BACKLOG.md](BACKLOG.md) is
 what is next. Each crate root opens with a map of its files.
 
+## Document and request boundaries
+
+Workflow and schedule objects store versioned partials rather than bare rows.
+Each partial names its document, base and resulting versions, commit time,
+next wake, and ordered upsert/remove changes. The executable values and codec
+live in `rust/impl/process/src/concrete/values.rs`; their mathematical algebra
+lives in `rust/spec/echod/concrete/spec/src/document.rs`, with composition
+proofs in `document_proof.rs`.
+
+Production workflow requests close due work before and after the raw handler.
+If either closure exhausts its bound, the request returns 503 without committing
+the intermediate document or notifications. Successful requests derive their
+notifications from the initial and final documents, so an offer consumed within
+the request is not sent. The executable transition is `request_transition` in
+the process's concrete document module; its mathematical counterpart is
+`spec_request_transition`.
+
+These local transitions do not establish global document invariants.
+
 ## Build, verify, soak
 
 ```

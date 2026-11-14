@@ -22,7 +22,7 @@ pub use crate::node::NodeV;
 #[cfg(verus_keep_ghost)]
 use crate::store::spec_apply;
 pub use crate::store::{EntryV, StoreV};
-use crate::store::{Etag, Read, StoreCall, StoreError, StoreOutcome};
+use crate::store::{Etag, Read, StoreReq, StoreError, StoreRes};
 
 verus! {
 
@@ -64,8 +64,8 @@ pub struct Spec;
 pub enum Message {
     Request(Call),
     Output(Output),
-    StoreReq { op: u64, call: StoreCall },
-    StoreReply { op: u64, outcome: StoreOutcome },
+    StoreReq { op: u64, request: StoreReq },
+    StoreRes { op: u64, response: StoreRes },
     Stop,
 }
 
@@ -151,7 +151,7 @@ pub open spec fn spec_world(config: Config) -> Seq<(Pid, Proc)> {
 
 // The process steps as specifications. `Proc::on_event` dispatches on the
 // model-specific process enum: a node runs one flight, the store applies one
-// call. `RoverExec::Proc::on_event` proves the executable process returns these
+// request. `RoverExec::Proc::on_event` proves the executable process returns these
 // results: `Node::step` computes `spec_node` and `Store::step` computes
 // `spec_store`.
 // ---------------------------------------------------------------------------
@@ -221,11 +221,11 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
             Some(at) if at <= now as nat => spec_one(Proc::Node(node), Seq::empty()),
             _ => Seq::empty(),
         },
-        ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
+        ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(request) } => {
             if node.flight is Some || node.next_op == u64::MAX {
                 spec_one(Proc::Node(node), Seq::empty())
             } else {
-                let (next, send) = spec_request(node, now, call);
+                let (next, send) = spec_request(node, now, request);
                 spec_one(Proc::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     next_request: (node.next_request + 1) as u64,
@@ -234,11 +234,11 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
                 }), send)
             }
         },
-        ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreReply { op, outcome } } => {
+        ProcessEvent::Receive { sender: Pid::Store, message: Message::StoreRes { op, response } } => {
             if node.flight is None || node.next_op == u64::MAX {
                 spec_one(Proc::Node(node), Seq::empty())
             } else {
-                let (next, send) = spec_store_reply(node, op, outcome);
+                let (next, send) = spec_store_reply(node, op, response);
                 spec_one(Proc::Node(NodeV {
                     logic: spec_clock(node.logic, now),
                     wake: spec_wake(next),
@@ -260,14 +260,14 @@ pub open spec fn spec_node(node: NodeV, now: Time, event: ProcessEvent<Pid, Mess
 /// is a stutter, the same arm as `Store::on_event`.
 pub open spec fn spec_store(store: StoreV, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<Proc, Pid, Message>> {
     match event {
-        ProcessEvent::Receive { sender, message: Message::StoreReq { op, call } } => {
+        ProcessEvent::Receive { sender, message: Message::StoreReq { op, request } } => {
             if store.seen.contains((sender, op)) {
                 spec_one(Proc::Store(store), Seq::empty())
             } else {
-                let (next, outcome) = spec_apply(store, call);
+                let (next, response) = spec_apply(store, request);
                 spec_one(
                     Proc::Store(StoreV { seen: store.seen.push((sender, op)), ..next }),
-                    seq![(sender, Message::StoreReply { op, outcome })],
+                    seq![(sender, Message::StoreRes { op, response })],
                 )
             }
         },
@@ -280,7 +280,7 @@ pub open spec fn spec_reply(client: Seq<char>, id: u64, response: Response) -> (
 }
 
 pub open spec fn spec_get(op: u64, key: Seq<char>) -> (Pid, Message) {
-    (Pid::Store, Message::StoreReq { op, call: StoreCall::Get { key: spec_string(key) } })
+    (Pid::Store, Message::StoreReq { op, request: StoreReq::Get { key: spec_string(key) } })
 }
 
 pub open spec fn spec_notify(note: NoteV) -> (Pid, Message) {
@@ -334,16 +334,16 @@ impl RoverSpec::Spec for Spec {
     open spec fn injectable(&self, _config: Config, message: Message) -> bool {
         match message {
             Message::Request(_) | Message::Stop => true,
-            Message::Output(_) | Message::StoreReq { .. } | Message::StoreReply { .. } => false,
+            Message::Output(_) | Message::StoreReq { .. } | Message::StoreRes { .. } => false,
         }
     }
 
-    /// A call in and an output out. Store traffic and `Stop` stay off the boundary,
+    /// A request in and an output out. Store traffic and `Stop` stay off the boundary,
     /// the same projection the abstract model uses for its own messages.
     open spec fn observe(&self, label: Label<Pid, Message>) -> Seq<BoundaryEvent> {
         match label {
-            Label::Input { at, message: Message::Request(call), .. } => {
-                seq![BoundaryEvent::Input { at, call }]
+            Label::Input { at, message: Message::Request(request), .. } => {
+                seq![BoundaryEvent::Input { at, call: request }]
             }
             Label::Outside { at, message: Message::Output(output), .. } => {
                 seq![BoundaryEvent::Output { at, output }]

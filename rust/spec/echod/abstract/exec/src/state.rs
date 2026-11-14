@@ -1,6 +1,9 @@
 //! Executable state, outcomes, and shared state helpers.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
+use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
+#[cfg(verus_keep_ghost)]
+use echod_types::spec_deadline_bounded;
 use echod_types::*;
 use crate::collections::*;
 use crate::runtime::*;
@@ -368,7 +371,7 @@ pub open spec fn exec_server_ok(s: Store) -> bool {
 /// its delay.
 pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags, runnable: bool) -> (born: (Promise, Option<Task>))
     ensures
-        exec_promise_ok(born.0),
+        promise_ok(born.0),
         born.0.timeout_at == timeout_at,
         born.0@ == spec_new_object(timeout_at, at, now, *param, *tags, runnable).0,
         match born.1 {
@@ -407,12 +410,8 @@ pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, t
         listeners: PSet::empty(),
     };
     let task = if runnable {
-        let due = match delay_of(tags) {
-            Some(d) => if d > at { d } else { at },
-            None => at,
-        };
         let task_state = if live_now { TaskState::Pending } else { TaskState::Fulfilled };
-        let retry_timeout_at = if live_now { Some(due) } else { None };
+        let retry_timeout_at = if live_now { Some(now) } else { None };
         Some(Task { state: task_state, version: 0, pid: None, ttl: None, acquired_at: 0, retry_timeout_at, resumes: Vec::new() })
     } else {
         None
@@ -420,7 +419,7 @@ pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, t
     proof {
         assert(promise.created_at <= timeout_at);
         assert(promise.settled_at == if live_now { None } else { Some(timeout_at) });
-        assert(exec_promise_ok(promise));
+        assert(promise_ok(promise));
     }
     (promise, task)
 }

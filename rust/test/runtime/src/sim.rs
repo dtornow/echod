@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use echod_abstract_spec::Dispatch;
-use echod_logic::types::{Answer, Armed, Effect, Event, StoreCall};
+use echod_logic::types::{Answer, Armed, Effect, Event, StoreReq};
 use echod_logic::{Call, Config, Message, Note, State, Target};
 use echod_types::{PromiseGetReq, PromiseState, Request, Response, ScheduleGetReq, TaskGetReq};
 use serde::Serialize;
@@ -169,7 +169,7 @@ enum SystemEvent {
     Store {
         node: String,
         op: u64,
-        call: StoreCall,
+        call: StoreReq,
         disposition: Disposition,
     },
     Wake {
@@ -294,7 +294,7 @@ impl World {
         };
         let clock = node.clock(self.now);
         self.nodes.insert(id.clone(), node);
-        self.apply_node(&id, Event::Start { clock, loops: true });
+        self.apply_node(&id, Event::Wake { clock, armed: Armed::Heartbeat });
     }
 
     fn apply_node(&mut self, id: &str, event: Event) {
@@ -303,15 +303,13 @@ impl World {
             None => return,
         };
         self.perform(id, effects);
-        if self.nodes.get(id).is_some_and(|node| node.state.stopped()) {
-            self.remove_node(id);
-        }
+
     }
 
     fn perform(&mut self, id: &str, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Store { op, call } => {
+                Effect::Store { op, request: call } => {
                     let cut = self.nodes.get(id).is_none_or(|node| node.cut);
                     let (delay, disposition) = if cut {
                         (0, Disposition::Unavailable)
@@ -430,12 +428,12 @@ impl World {
         });
     }
 
-    fn rows(&self, origin: &str) -> Vec<echod_logic::doc::codec::Promise> {
+    fn rows(&self, origin: &str) -> Vec<echod_logic::concrete::values::Promise> {
         let key = echod_logic::keys::KeySpace::new("", self.opts.timer_bucket_ms).doc_key(origin);
         self.store
             .get(&key)
-            .and_then(|bytes| echod_logic::doc::decode_origin(bytes).ok())
-            .map(|loaded| echod_logic::doc::codec::promises(&loaded.doc))
+            .and_then(|bytes| echod_logic::document::decode_workflow(bytes).ok())
+            .map(|loaded| echod_logic::concrete::values::promises(&echod_logic::concrete::stored_body(&loaded.document)))
             .unwrap_or_default()
     }
 
@@ -566,7 +564,7 @@ impl World {
             then: None,
         };
         let clock = self.node_clock(&node).unwrap_or(self.now);
-        self.apply_node(&node, Event::Request { clock, call });
+        self.apply_node(&node, Event::Request { clock, request: echod_logic::types::RequestEvent::Protocol(call) });
     }
 
     fn remove_node(&mut self, id: &str) {
@@ -649,7 +647,7 @@ impl World {
         }
         self.stops += 1;
         let clock = self.node_clock(&id).unwrap_or(self.now);
-        self.apply_node(&id, Event::Stop { clock });
+        self.nodes.remove(&id);
     }
 
     fn join_one(&mut self, rng: &mut Rng) {
@@ -699,7 +697,7 @@ impl World {
                 }
                 let outcome = self.store.complete(&call, disposition);
                 let clock = self.node_clock(&node).unwrap_or(self.now);
-                self.apply_node(&node, Event::Completed { op, outcome, clock });
+                self.apply_node(&node, Event::Store { op, response: outcome, clock });
             }
             SystemEvent::Wake { node, token, armed } => {
                 let valid = self
@@ -713,7 +711,7 @@ impl World {
                     state.wake_token = state.wake_token.wrapping_add(1);
                 }
                 let clock = self.node_clock(&node).unwrap_or(self.now);
-                self.apply_node(&node, Event::Due { clock, armed });
+                self.apply_node(&node, Event::Wake { clock, armed });
             }
             SystemEvent::ClientReady(client) => self.client_ready(client),
             SystemEvent::Retry(client) => self.attempt(client),
@@ -811,7 +809,7 @@ impl World {
                 node.routable = false;
             }
             let clock = self.node_clock(&id).unwrap_or(self.now);
-            self.apply_node(&id, Event::Stop { clock });
+            self.nodes.remove(&id);
         }
         self.run_until(|world| world.nodes.is_empty());
     }
@@ -984,12 +982,12 @@ fn validate_deadlines(world: &World, report: &mut Report) {
         let Some(bytes) = world.store.get(&key) else {
             continue;
         };
-        let Ok(loaded) = echod_logic::doc::decode_origin(bytes) else {
+        let Ok(loaded) = echod_logic::document::decode_workflow(bytes) else {
             continue;
         };
         let encoded = key.trim_start_matches("wf/");
         let origin = echod_logic::keys::decode_key(encoded).unwrap_or_else(|| encoded.to_string());
-        if let Some(deadline) = echod_logic::doc::deadline(&loaded.doc) {
+        if let Some(deadline) = echod_logic::document::deadline(&echod_logic::concrete::stored_body(&loaded.document)) {
             if !armed.contains(&(origin.clone(), deadline)) {
                 report.failures.push(format!(
                     "origin {origin}: owes a deadline at {deadline} and the bucket holds no key for it"
@@ -1001,12 +999,12 @@ fn validate_deadlines(world: &World, report: &mut Report) {
         let Some(bytes) = world.store.get(&key) else {
             continue;
         };
-        let Ok(loaded) = echod_logic::doc::decode_schedule(bytes) else {
+        let Ok(loaded) = echod_logic::document::decode_schedule(bytes) else {
             continue;
         };
         let encoded = key.trim_start_matches("sched/");
         let id = echod_logic::keys::decode_key(encoded).unwrap_or_else(|| encoded.to_string());
-        if let Some(deadline) = echod_logic::doc::deadline(&loaded.doc) {
+        if let Some(deadline) = echod_logic::document::deadline(&echod_logic::concrete::stored_body(&loaded.document)) {
             if !armed.contains(&(format!("sched:{id}"), deadline)) {
                 report.failures.push(format!(
                     "schedule {id}: owes its next run at {deadline} and the bucket holds no key for it"

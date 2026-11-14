@@ -15,14 +15,14 @@ use crate::model::{
 };
 use crate::node::{
     spec_begin, spec_cached, spec_commit, spec_decide, spec_earliest_from,
-    spec_earliest_key, spec_fail, spec_forget, spec_is_empty, spec_keep,
+    spec_earliest_key, spec_fail, spec_forget, spec_body_is_empty, spec_keep,
     spec_min_key, spec_owns, spec_remember, spec_request, spec_sorted,
-    spec_store_reply, spec_timeout, CachedV, DocV, FlightV, NodeV,
+    spec_store_reply, spec_timeout, CachedV, DocumentBodyV, FlightV, NodeV,
 };
 use crate::property_claim::*;
 use crate::store::{
     spec_apply, spec_before, spec_bump, spec_find, spec_insert_at, spec_put,
-    spec_remove_at, EntryV, StoreCall, StoreOutcome, StoreV,
+    spec_remove_at, EntryV, StoreReq, StoreRes, StoreV,
 };
 
 verus! {
@@ -239,15 +239,15 @@ proof fn lemma_sorted_properties(keys: Set<Seq<char>>)
     }
 }
 
-proof fn lemma_document_object_order(doc: DocV)
+proof fn lemma_document_object_order(doc: DocumentBodyV)
     ensures
         document_object_order(doc),
 {
     match doc {
-        DocV::Origin(map) => {
+        DocumentBodyV::Workflow(map) => {
             lemma_sorted_properties(map.dom());
         },
-        DocV::Schedule(_) => {},
+        DocumentBodyV::Schedule(_) => {},
     }
 }
 
@@ -403,7 +403,7 @@ proof fn lemma_forget_integrity(node: NodeV, key: Seq<char>, i: int)
 proof fn lemma_keep_integrity(
     node: NodeV,
     key: Seq<char>,
-    doc: DocV,
+    doc: DocumentBodyV,
     etag: Option<Seq<char>>,
 )
     requires
@@ -419,10 +419,10 @@ proof fn lemma_keep_integrity(
             document_keys_unique(next) && document_key_ownership(next)
         }),
 {
-    if spec_is_empty(doc) && etag is None {
+    if spec_body_is_empty(doc) && etag is None {
         lemma_forget_integrity(node, key, 0);
     } else {
-        lemma_remember_integrity(node, key, crate::node::spec_encode(doc), etag, 0);
+        lemma_remember_integrity(node, key, crate::node::spec_encode_body(doc), etag, 0);
     }
 }
 
@@ -513,7 +513,7 @@ proof fn lemma_commit_integrity(node: NodeV, flight: FlightV, tag: crate::store:
     }
 }
 
-proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocV)
+proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocumentBodyV)
     requires
         state_properties(Proc::Node(node)),
         node.flight is None,
@@ -541,7 +541,7 @@ proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocV)
     };
     let previous = match spec_cached(node, flight.key) {
         Some(cached) => crate::node::spec_read(flight.key, cached.body),
-        None => crate::node::spec_empty_doc(flight.key),
+        None => crate::node::spec_empty_body(flight.key),
     };
     if next_doc == previous && born.len() == 0 {
         lemma_keep_integrity(node, flight.key, next_doc, flight.etag);
@@ -583,26 +583,26 @@ proof fn lemma_begin_integrity(
     }
 }
 
-proof fn lemma_request_integrity(node: NodeV, now: Time, call: Call)
+proof fn lemma_request_integrity(node: NodeV, now: Time, request: Call)
     requires
         state_properties(Proc::Node(node)),
         node.flight is None,
         node.next_op < u64::MAX,
     ensures
         ({
-            let next = spec_request(node, now, call).0;
+            let next = spec_request(node, now, request).0;
             &&& state_properties(Proc::Node(next))
             &&& node.next_op <= next.next_op
         }),
 {
-    match crate::node::spec_key(call.request) {
+    match crate::node::spec_key(request.request) {
         Some(key) if spec_owns(node, key) => {
             lemma_begin_integrity(
                 node,
                 key,
-                crate::node::JobV::External(call.request),
+                crate::node::JobV::External(request.request),
                 now,
-                Some((call.client@, call.id)),
+                Some((request.client@, request.id)),
             );
         },
         _ => {},
@@ -648,14 +648,14 @@ proof fn lemma_timeout_integrity(node: NodeV, now: Time)
 proof fn lemma_store_reply_integrity(
     node: NodeV,
     op: u64,
-    outcome: StoreOutcome,
+    response: StoreRes,
 )
     requires
         state_properties(Proc::Node(node)),
         node.next_op < u64::MAX,
     ensures
         ({
-            let next = spec_store_reply(node, op, outcome).0;
+            let next = spec_store_reply(node, op, response).0;
             &&& state_properties(Proc::Node(next))
             &&& node.next_op <= next.next_op
         }),
@@ -663,14 +663,14 @@ proof fn lemma_store_reply_integrity(
     match node.flight {
         Some(flight) if flight.op == op => {
             if !flight.writing {
-                match outcome {
-                    StoreOutcome::Got(got) => {
+                match response {
+                    StoreRes::Get { result: Ok(got) } => {
                         let (doc, etag) = match got {
                             Some((body, tag)) => (
                                 crate::node::spec_read(flight.key, body@),
                                 Some(tag.0@),
                             ),
-                            None => (crate::node::spec_empty_doc(flight.key), None),
+                            None => (crate::node::spec_empty_body(flight.key), None),
                         };
                         lemma_decide_integrity(
                             NodeV { flight: None, ..node },
@@ -678,15 +678,13 @@ proof fn lemma_store_reply_integrity(
                             doc,
                         );
                     },
-                    StoreOutcome::Failed(_) => {},
                     _ => {},
                 }
             } else {
-                match outcome {
-                    StoreOutcome::Written(tag) => {
+                match response {
+                    StoreRes::PutIfNoneMatch { result: Ok(tag) } | StoreRes::PutIfMatch { result: Ok(tag) } => {
                         lemma_commit_integrity(node, flight, tag);
                     },
-                    StoreOutcome::Failed(_) => {},
                     _ => {},
                 }
             }
@@ -722,18 +720,18 @@ proof fn lemma_node_step_integrity(
         },
         ProcessEvent::Receive {
             sender: Pid::Outside,
-            message: Message::Request(call),
+            message: Message::Request(request),
         } => {
             if node.flight is None && node.next_op != u64::MAX {
-                lemma_request_integrity(node, now, call);
+                lemma_request_integrity(node, now, request);
             }
         },
         ProcessEvent::Receive {
             sender: Pid::Store,
-            message: Message::StoreReply { op, outcome },
+            message: Message::StoreRes { op, response },
         } => {
             if node.flight is Some && node.next_op != u64::MAX {
-                lemma_store_reply_integrity(node, op, outcome);
+                lemma_store_reply_integrity(node, op, response);
             }
         },
         _ => {},
@@ -1062,8 +1060,8 @@ proof fn lemma_apply_put_none(store: StoreV, key: String, body: Vec<u8>)
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let call = StoreCall::PutIfNoneMatch { key, body };
-            let next = spec_apply(store, call).0;
+            let request = StoreReq::PutIfNoneMatch { key, body };
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
@@ -1091,15 +1089,15 @@ proof fn lemma_apply_put_match(
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let call = StoreCall::PutIfMatch { key, body, etag };
-            let next = spec_apply(store, call).0;
+            let request = StoreReq::PutIfMatch { key, body, etag };
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
 {
     lemma_store_stutter(store);
-    let call = StoreCall::PutIfMatch { key, body, etag };
-    let next = spec_apply(store, call).0;
+    let request = StoreReq::PutIfMatch { key, body, etag };
+    let next = spec_apply(store, request).0;
     match spec_find(store.entries, key@, 0) {
         Some(i) if crate::store::spec_etag(store.entries[i].body) == etag => {
             assert(spec_bump(store.entries[i].version) >= store.entries[i].version);
@@ -1133,15 +1131,15 @@ proof fn lemma_apply_append(
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let call = StoreCall::AppendIfMatch { key, offset, body, etag };
-            let next = spec_apply(store, call).0;
+            let request = StoreReq::AppIfMatch { key, offset, body, etag };
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
 {
     lemma_store_stutter(store);
-    let call = StoreCall::AppendIfMatch { key, offset, body, etag };
-    let next = spec_apply(store, call).0;
+    let request = StoreReq::AppIfMatch { key, offset, body, etag };
+    let next = spec_apply(store, request).0;
     if store.appendable {
         match spec_find(store.entries, key@, 0) {
             Some(i) if crate::store::spec_etag(store.entries[i].body) == etag
@@ -1170,8 +1168,8 @@ proof fn lemma_apply_put(store: StoreV, key: String, body: Vec<u8>)
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let call = StoreCall::Put { key, body };
-            let next = spec_apply(store, call).0;
+            let request = StoreReq::Put { key, body };
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
@@ -1193,8 +1191,8 @@ proof fn lemma_apply_delete(store: StoreV, key: String)
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let call = StoreCall::Delete { key };
-            let next = spec_apply(store, call).0;
+            let request = StoreReq::Del { key };
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
@@ -1209,25 +1207,25 @@ proof fn lemma_apply_delete(store: StoreV, key: String)
     }
 }
 
-proof fn lemma_apply_integrity(store: StoreV, call: StoreCall)
+proof fn lemma_apply_integrity(store: StoreV, request: StoreReq)
     requires
         state_properties(Proc::Store(store)),
     ensures
         ({
-            let next = spec_apply(store, call).0;
+            let next = spec_apply(store, request).0;
             &&& state_properties(Proc::Store(next))
             &&& transition_properties(Proc::Store(store), Proc::Store(next))
         }),
 {
-    match call {
-        StoreCall::PutIfNoneMatch { key, body } =>
+    match request {
+        StoreReq::PutIfNoneMatch { key, body } =>
             lemma_apply_put_none(store, key, body),
-        StoreCall::PutIfMatch { key, body, etag } =>
+        StoreReq::PutIfMatch { key, body, etag } =>
             lemma_apply_put_match(store, key, body, etag),
-        StoreCall::AppendIfMatch { key, offset, body, etag } =>
+        StoreReq::AppIfMatch { key, offset, body, etag } =>
             lemma_apply_append(store, key, offset, body, etag),
-        StoreCall::Put { key, body } => lemma_apply_put(store, key, body),
-        StoreCall::Delete { key } => lemma_apply_delete(store, key),
+        StoreReq::Put { key, body } => lemma_apply_put(store, key, body),
+        StoreReq::Del { key } => lemma_apply_delete(store, key),
         _ => lemma_store_stutter(store),
     }
 }
@@ -1248,13 +1246,13 @@ proof fn lemma_store_step_integrity(
     match event {
         ProcessEvent::Receive {
             sender,
-            message: Message::StoreReq { op, call },
+            message: Message::StoreReq { op, request },
         } => {
             if store.seen.contains((sender, op)) {
                 lemma_store_stutter(store);
             } else {
-                lemma_apply_integrity(store, call);
-                let applied = spec_apply(store, call).0;
+                lemma_apply_integrity(store, request);
+                let applied = spec_apply(store, request).0;
                 let next = StoreV {
                     seen: store.seen.push((sender, op)),
                     ..applied
@@ -1344,14 +1342,14 @@ proof fn lemma_initial_world(config: Config)
     lemma_initial_nodes(config, 0);
 }
 
-/// Every configured concrete fleet and every selected process outcome satisfy
+/// Every configured concrete fleet and every selected process response satisfy
 /// the integrity claim.
 pub proof fn property_proof(config: Config)
     ensures
         property_claim(config),
 {
     lemma_process_layout(config);
-    assert forall|doc: DocV| document_object_order(doc) by {
+    assert forall|doc: DocumentBodyV| document_object_order(doc) by {
         lemma_document_object_order(doc);
     };
     lemma_initial_world(config);

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, StoreCall, StoreOutcome, SweepOutcome};
+use echod_logic::types::{Armed, Effect, Etag, Event, Note, Read, RequestEvent, StoreReq, StoreRes, SweepOutcome};
 use echod_logic::Message;
 use echod_logic::{Call, Config, DebugCall, State};
 use echod::admit::{self, Admission, DebugOp};
@@ -23,43 +23,43 @@ impl Bucket {
         Etag(format!("{}-{v}", b.len()))
     }
 
-    fn call(&mut self, c: StoreCall) -> StoreOutcome {
-        match c {
-            StoreCall::Get { key } => StoreOutcome::Got(self.objects.get(&key).map(|(b, v)| (b.clone(), Self::etag(b, *v)))),
-            StoreCall::GetIfNoneMatch { key, etag } => StoreOutcome::Read(match self.objects.get(&key) {
+    fn call(&mut self, request: StoreReq) -> StoreRes {
+        match request {
+            StoreReq::Get { key } => StoreRes::Get { result: Ok(self.objects.get(&key).map(|(b, v)| (b.clone(), Self::etag(b, *v)))) },
+            StoreReq::GetIfNoneMatch { key, etag } => StoreRes::GetIfNoneMatch { result: Ok(match self.objects.get(&key) {
                 None => Read::Absent,
                 Some((b, v)) if Self::etag(b, *v) == etag => Read::NotModified,
                 Some((b, v)) => Read::Body(b.clone(), Self::etag(b, *v)),
-            }),
-            StoreCall::PutIfMatch { key, body, etag } => match self.objects.get(&key) {
+            }) },
+            StoreReq::PutIfMatch { key, body, etag } => match self.objects.get(&key) {
                 Some((b, v)) if Self::etag(b, *v) == etag => {
                     let nv = v + 1;
                     let e = Self::etag(&body, nv);
                     self.objects.insert(key, (body, nv));
-                    StoreOutcome::Written(e)
+                    StoreRes::PutIfMatch { result: Ok(e) }
                 }
-                _ => StoreOutcome::Failed(echod_logic::types::StoreError::PreconditionFailed),
+                _ => StoreRes::PutIfMatch { result: Err(echod_logic::types::StoreError::PreconditionFailed) },
             },
-            StoreCall::PutIfNoneMatch { key, body } => {
+            StoreReq::PutIfNoneMatch { key, body } => {
                 if self.objects.contains_key(&key) {
-                    return StoreOutcome::Failed(echod_logic::types::StoreError::PreconditionFailed);
+                    return StoreRes::PutIfNoneMatch { result: Err(echod_logic::types::StoreError::PreconditionFailed) };
                 }
                 let e = Self::etag(&body, 1);
                 self.objects.insert(key, (body, 1));
-                StoreOutcome::Written(e)
+                StoreRes::PutIfNoneMatch { result: Ok(e) }
             }
-            StoreCall::AppendIfMatch { .. } => StoreOutcome::Failed(echod_logic::types::StoreError::Unavailable("no appends".into())),
-            StoreCall::Put { key, body } => {
+            StoreReq::AppIfMatch { .. } => StoreRes::AppIfMatch { result: Err(echod_logic::types::StoreError::Unavailable("no appends".into())) },
+            StoreReq::Put { key, body } => {
                 let v = self.objects.get(&key).map(|(_, v)| v + 1).unwrap_or(1);
                 self.objects.insert(key, (body, v));
-                StoreOutcome::Done
+                StoreRes::Put { result: Ok(()) }
             }
-            StoreCall::Delete { key } => {
+            StoreReq::Del { key } => {
                 self.objects.remove(&key);
-                StoreOutcome::Done
+                StoreRes::Del { result: Ok(()) }
             }
-            StoreCall::List { prefix, max_keys } => StoreOutcome::Listed(self.objects.keys().filter(|k| k.starts_with(&prefix)).take(max_keys).cloned().collect()),
-            StoreCall::ListPrefixes { prefix } => {
+            StoreReq::List { prefix, max_keys } => StoreRes::List { result: Ok(self.objects.keys().filter(|k| k.starts_with(&prefix)).take(max_keys).cloned().collect()) },
+            StoreReq::ListPrefixes { prefix } => {
                 let mut out: Vec<String> = Vec::new();
                 for k in self.objects.keys().filter(|k| k.starts_with(&prefix)) {
                     if let Some(i) = k[prefix.len()..].find('/') {
@@ -69,7 +69,7 @@ impl Bucket {
                         }
                     }
                 }
-                StoreOutcome::Listed(out)
+                StoreRes::ListPrefixes { result: Ok(out) }
             }
         }
     }
@@ -101,14 +101,18 @@ impl Harness {
     /// One event in, and every store call it leads to answered, until the
     /// core asks for nothing more of the store.
     fn apply(&mut self, event: Event) {
-        let mut pending = self.state.on_event(event);
+        let pending = self.state.on_event(event);
+        self.perform_all(pending);
+    }
+
+    fn perform_all(&mut self, mut pending: Vec<Effect>) {
         while !pending.is_empty() {
             let mut next = Vec::new();
             for e in pending {
                 match e {
-                    Effect::Store { op, call } => {
-                        let outcome = self.bucket.call(call);
-                        next.extend(self.state.on_event(Event::Completed { op, outcome, clock: self.clock }));
+                    Effect::Store { op, request } => {
+                        let response = self.bucket.call(request);
+                        next.extend(self.state.on_event(Event::Store { op, response, clock: self.clock }));
                     }
                     Effect::Reply { id, response } => self.replies.push((id, response)),
                     Effect::Send { address, message } => {
@@ -129,6 +133,11 @@ impl Harness {
         }
     }
 
+    fn start(&mut self, loops: bool) {
+        self.state.set_loops(loops);
+        self.apply(Event::Wake { clock: self.clock, armed: Armed::Heartbeat });
+    }
+
     fn request(&mut self, kind: &str, data: Value) -> (u16, Value) {
         let id = self.next_request;
         self.next_request += 1;
@@ -138,7 +147,7 @@ impl Harness {
             Admission::Request(d) => {
                 self.apply(Event::Request {
                     clock: self.clock,
-                    call: Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then },
+                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
                 });
                 self.take(id)
             }
@@ -148,7 +157,10 @@ impl Harness {
                     DebugOp::Snap => DebugCall::Snap { id, kind, corr },
                     DebugOp::Tick { time } => DebugCall::Tick { id, kind, corr, time },
                 };
-                self.apply(Event::Debug { clock: self.clock, call });
+                self.apply(Event::Request {
+                    clock: self.clock,
+                    request: RequestEvent::Debug(call),
+                });
                 self.take(id)
             }
         }
@@ -170,7 +182,7 @@ impl Harness {
             let step = self.wake_after.unwrap_or(until - self.clock).min(until - self.clock).max(1);
             self.clock += step;
             self.wake_after = None;
-            self.apply(Event::Due { clock: self.clock, armed: self.wake_armed.clone() });
+            self.apply(Event::Wake { clock: self.clock, armed: self.wake_armed.clone() });
         }
     }
 
@@ -182,7 +194,7 @@ impl Harness {
 #[test]
 fn a_promise_is_created_timed_out_and_the_key_collected() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     // announced; the configuration naming this node is written by the
     // first refresh and read by the next heartbeat
     assert_eq!(h.keys("nodes/"), vec!["nodes/n1".to_string()]);
@@ -215,17 +227,12 @@ fn a_promise_is_created_timed_out_and_the_key_collected() {
     assert_eq!(h.sent.len(), 1, "one unblock: {:?}", h.sent);
     assert!(h.sent[0].starts_with("http://worker/ "));
     assert!(h.keys("t/").is_empty(), "the fired key was collected");
-
-    // stop: the announcement goes
-    h.apply(Event::Stop { clock: h.clock });
-    assert!(h.state.stopped());
-    assert!(h.keys("nodes/").is_empty());
 }
 
 #[test]
 fn a_schedule_fires_into_its_origin() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let (status, data) = h.request("schedule.create", json!({ "id": "tick", "cron": "* * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200, "{data}");
@@ -251,7 +258,7 @@ fn a_schedule_fires_into_its_origin() {
 #[test]
 fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let bucket_ms = 1_000; // the harness's `timer_bucket_ms`
     let current = h.clock - h.clock % bucket_ms;
@@ -273,7 +280,7 @@ fn a_bucket_is_listed_again_once_the_clock_leaves_it() {
 #[test]
 fn a_schedule_recreated_after_its_delete_fires_again() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let (status, _) = h.request("schedule.create", json!({ "id": "tick", "cron": "*/2 * * * * *", "promiseId": "tick-{{.timestamp}}", "promiseTimeout": 60_000, "promiseTags": { "resonate:target": "http://worker/" } }));
     assert_eq!(status, 200);
@@ -297,7 +304,7 @@ fn a_schedule_recreated_after_its_delete_fires_again() {
 fn the_same_events_give_the_same_effects() {
     let run = || {
         let mut h = Harness::new("n1");
-        h.apply(Event::Start { clock: h.clock, loops: true });
+        h.start(true);
         h.advance(100);
         h.request("promise.create", json!({ "id": "a:1", "timeoutAt": h.clock + 500, "tags": { "resonate:scope": "global" } }));
         h.advance(600);
@@ -314,7 +321,7 @@ fn the_debug_operations_own_the_clock() {
         cfg.debug = true;
         cfg
     });
-    h.apply(Event::Start { clock: h.clock, loops: false });
+    h.start(false);
     let far = h.clock + 10_000;
     let (status, _) = h.request("promise.create", json!({ "id": "a:1", "timeoutAt": far, "tags": { "resonate:scope": "global" } }));
     assert_eq!(status, 200);
@@ -354,7 +361,7 @@ fn the_debug_operations_own_the_clock() {
 #[test]
 fn a_detached_create_lands_before_the_fence_is_checked() {
     let mut h = Harness::new("n1");
-    h.apply(Event::Start { clock: h.clock, loops: true });
+    h.start(true);
     h.advance(100);
     let far = h.clock + 100_000;
     let (status, _) = h.request("promise.create", json!({ "id": "a:t", "timeoutAt": far, "tags": { "resonate:target": "poll://w" } }));
@@ -391,4 +398,52 @@ fn a_detached_create_lands_before_the_fence_is_checked() {
     let (status, data) = h.request("task.fence", json!({ "id": "a:t", "version": 1, "action": settle }));
     assert_eq!(status, 400, "{data}");
     assert_eq!(data, json!("Action must belong to the task's origin"));
+}
+
+#[test]
+fn admission_rejects_protocol_bounds_before_any_core_effect() {
+    let mut h = Harness::new("n1");
+    let max = echod_logic::verified::MAX_TIME;
+
+    let (status, _) = h.request(
+        "promise.create",
+        json!({ "id": "a:too-late", "timeoutAt": max + 1, "tags": {} }),
+    );
+    assert_eq!(status, 400);
+
+    for ttl in [0, max + 1] {
+        let (status, _) = h.request(
+            "task.acquire",
+            json!({ "id": "a:task", "version": 0, "pid": "worker", "ttl": ttl }),
+        );
+        assert_eq!(status, 400);
+    }
+
+    let (status, _) = h.request(
+        "schedule.create",
+        json!({
+            "id": "tick",
+            "cron": "* * * * * *",
+            "promiseId": "tick-{{.timestamp}}",
+            "promiseTimeout": max,
+            "promiseTags": {}
+        }),
+    );
+    assert_eq!(status, 400);
+
+    let action = json!({
+        "kind": "promise.create",
+        "head": {},
+        "data": { "id": "detached:x", "timeoutAt": max + 1, "tags": {} }
+    });
+    let (status, _) = h.request(
+        "task.fence",
+        json!({ "id": "a:task", "version": 0, "action": action }),
+    );
+    assert_eq!(status, 400);
+
+    assert!(h.bucket.objects.is_empty());
+    assert!(h.sent.is_empty());
+    assert!(h.notes.is_empty());
+    assert!(h.wake_after.is_none());
 }
