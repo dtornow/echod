@@ -120,6 +120,7 @@ enum Cmd {
 }
 
 fn main() {
+    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "error".into())).init();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Run { seed, knobs } => {

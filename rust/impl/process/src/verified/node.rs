@@ -8,8 +8,9 @@
 //! of this crate, which calls these functions in order against the bucket,
 //! and the bucket itself.
 
-use vstd::hash_map::StringHashMap;
 use vstd::prelude::*;
+
+use super::table::Table;
 
 #[cfg(verus_keep_ghost)]
 pub use super::node_spec::*;
@@ -52,7 +53,9 @@ pub fn fnv1a(s: &str) -> (r: u64)
 
 /// A deadline key in the bucket: what is due for which origin, and a token
 /// drawn per arm, so no two arms name one key.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug, PartialEq, Eq))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug, PartialEq, Eq))]
 pub struct Key {
     pub origin: String,
     pub at: u64,
@@ -105,7 +108,9 @@ pub fn clone_key(k: &Key) -> (r: Key)
 /// The key a node remembers for an origin, and the version of the document
 /// it wrote with it. The key is relied on only while the document is still
 /// that version: any later write, by anyone, may have replaced the key.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct Armed {
     pub key: Key,
     pub etag: String,
@@ -119,10 +124,20 @@ impl View for Armed {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+impl DeepView for Armed {
+    type V = AArmed;
+    open spec fn deep_view(&self) -> AArmed {
+        self.view()
+    }
+}
+
 /// A cache entry's identity: the version, and when it was filled. The body
 /// held for it is used only once a conditional read has confirmed the
 /// version is the bucket's.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct Entry {
     pub etag: String,
     pub filled_at: u64,
@@ -136,6 +151,16 @@ impl View for Entry {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+impl DeepView for Entry {
+    type V = AEntry;
+    open spec fn deep_view(&self) -> AEntry {
+        self.view()
+    }
+}
+
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct NodeCore {
     pub id: String,
     pub ttl: u64,
@@ -144,10 +169,10 @@ pub struct NodeCore {
     pub members: Vec<String>,
     /// The node's clock at its last read of the configuration.
     pub last_read: u64,
-    pub cache: StringHashMap<Entry>,
+    pub cache: Table<String, Entry>,
     /// The deadline key this node last armed for each origin, with the
     /// version it wrote, so a commit on that version removes exactly that one.
-    pub armed: StringHashMap<Armed>,
+    pub armed: Table<String, Armed>,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -161,8 +186,8 @@ impl View for NodeCore {
             epoch: self.epoch as nat,
             members: self.members.deep_view(),
             last_read: self.last_read as nat,
-            cache: self.cache@.map_values(|e: Entry| e@),
-            armed: self.armed@.map_values(|a: Armed| a@),
+            cache: self.cache.deep_view(),
+            armed: self.armed.deep_view(),
         }
     }
 }
@@ -186,7 +211,7 @@ impl NodeCore {
                 members: Seq::empty(), last_read: 0, cache: Map::empty(), armed: Map::empty(),
             }),
     {
-        let n = NodeCore { id, ttl, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, cache: StringHashMap::new(), armed: StringHashMap::new() };
+        let n = NodeCore { id, ttl, read_any: false, epoch: 0, members: Vec::new(), last_read: 0, cache: Table::new(), armed: Table::new() };
         assert(n@.members =~= Seq::<Id>::empty());
         assert(n@.cache =~= Map::<Origin, AEntry>::empty());
         assert(n@.armed =~= Map::<Origin, AArmed>::empty());
@@ -248,7 +273,7 @@ impl NodeCore {
         ensures final(self)@ == spec_forget(old(self)@, o@),
     {
         let ghost before = self@;
-        self.cache.remove(o);
+        self.cache.remove(&o.to_string());
         assert(self@.cache =~= before.cache.remove(o@));
     }
 
@@ -265,7 +290,7 @@ impl NodeCore {
                 assert(self@.armed =~= before.armed.insert(o@, aa));
             }
             None => {
-                self.armed.remove(o);
+                self.armed.remove(&o.to_string());
                 assert(self@.armed =~= before.armed.remove(o@));
             }
         }
@@ -276,12 +301,13 @@ impl NodeCore {
         ensures final(self)@ == spec_collected(old(self)@, o@, k@),
     {
         let ghost before = self@;
-        let same = match self.armed.get(o) {
+        let key = o.to_string();
+        let same = match self.armed.get(&key) {
             Some(p) => key_eq(&p.key, k),
             None => false,
         };
         if same {
-            self.armed.remove(o);
+            self.armed.remove(&key);
             assert(self@.armed =~= before.armed.remove(o@));
         }
     }
@@ -294,7 +320,7 @@ impl NodeCore {
                 None => !self@.armed.contains_key(o@),
             },
     {
-        self.armed.get(o)
+        self.armed.get(&o.to_string())
     }
 
     /// What is remembered of `o`, if anything.
@@ -305,7 +331,7 @@ impl NodeCore {
                 None => !self@.cache.contains_key(o@),
             },
     {
-        self.cache.get(o)
+        self.cache.get(&o.to_string())
     }
 }
 

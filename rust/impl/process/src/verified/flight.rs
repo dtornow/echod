@@ -10,8 +10,8 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::store::{StoreError, StoreRes};
-use crate::concrete::{
+use echod_concrete::store::{StoreError, StoreRes};
+use echod_concrete::{
     create_occurrence, request_transition, run_due, sweep, DocumentBody, Outbound, Pending,
 };
 use echod_types::{Request, Response};
@@ -24,7 +24,7 @@ use super::commit_spec::*;
 #[cfg(verus_keep_ghost)]
 use super::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{notes_v, pend_v, NoteV, PendingV};
+use echod_concrete::node::{notes_v, pend_v, NoteV, PendingV};
 
 verus! {
 
@@ -97,7 +97,9 @@ pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: 
 // ---------------------------------------------------------------------------
 
 /// The key that fired the flight, and the node that armed it.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct FiredKey {
     pub key: Key,
     pub by: String,
@@ -161,6 +163,8 @@ pub open spec fn answer_v(step: AStep, o: Option<&StoreRes>) -> AAnswer {
 }
 
 /// Where the commit stands: which call it waits on.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Step {
     Start,
     PuttingKey(Key),
@@ -260,6 +264,8 @@ fn copy_step(s: &Step) -> (r: Step)
 }
 
 /// The commit of one step on one document.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Sequence {
     pub origin: String,
     /// The version loaded; after the write, the version written.

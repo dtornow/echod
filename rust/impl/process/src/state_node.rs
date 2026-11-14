@@ -39,7 +39,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::store::before;
+use echod_concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::{str_eq, NodeCore};
@@ -48,7 +48,7 @@ use crate::verified::text::copy_string;
 use crate::Config;
 
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
+use echod_concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::ANode;
 
@@ -96,6 +96,8 @@ pub type Announced = (String, Announcement);
 pub type AnnouncedSpec = (Seq<char>, AnnouncementSpec);
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Roster {
     pub entries: Vec<Announced>,
 }
@@ -342,6 +344,8 @@ pub fn copy_members(a: &Vec<String>) -> (r: Vec<String>)
 
 /// A refresh in progress: announce, list, read each, read the
 /// configuration, write the next epoch if the announced set moved.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Refresh {
     Announcing { op: OpId, now: u64 },
     Listing { op: OpId, now: u64 },
@@ -396,6 +400,8 @@ impl Refresh {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Members {
     pub me: Announcement,
     pub heartbeat_ms: u64,
@@ -468,6 +474,8 @@ impl Members {
 /// What this process holds of the fleet: the proved membership core, the
 /// refresh in progress, and the latest instant any announcement carried.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Node {
     pub core: NodeCore,
     pub members: Members,

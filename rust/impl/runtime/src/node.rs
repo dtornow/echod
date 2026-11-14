@@ -339,7 +339,7 @@ impl ResonateServer for Node {
                 let (id, rx) = self.begin();
                 self.apply(Event::Request {
                     clock,
-                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned, then: d.then }),
+                    request: RequestEvent::Protocol(Call { id, kind: d.kind, corr: d.corr, target: d.target, request: d.request, action_kind: d.action_kind, now: d.now, pinned: d.pinned }),
                 });
                 self.finish(&req.kind, started, rx).await
             }

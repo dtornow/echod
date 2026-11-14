@@ -74,6 +74,8 @@ instance : Monad Handler where
 
 def ask : Handler Env := fun env store => (env, store, [])
 
+def getStore : Handler Store := fun _ store => (store, store, [])
+
 def getObject (id : Ident) : Handler (Option Object) := fun _ store =>
   (store.getObject id, store, [])
 
@@ -102,9 +104,66 @@ def readTask (id : Ident) (now : Nat) : Handler (Option (Object × TaskObject)) 
   | some object => return object.task.map (object, ·)
   | none => return none
 
-/-- Settle a promise; a settled promise also finishes its task. -/
-def setSettled (object : Object) (promise : PromiseObject) (now : Nat) : Handler Unit :=
-  setObject ({ object with promise }.project now)
+/-- Emit the current task offer and arm its next retry in the same write. -/
+def dispatchTask (object : Object) (task : TaskObject) (now : Nat) : Handler Unit := do
+  let env ← ask
+  let next := { task with
+    retryTimeoutAt := some (now + env.config.retryTimeout) }
+  setObject { object with task := some next }
+  setMessage
+    ((object.promise.tags.get? "resonate:target").getD "")
+    (.execute object.id task.version)
+
+/-- Dispatch a runnable task exactly when its retry clock is due. -/
+def dispatchIfDue (object : Object) (now : Nat) : Handler Unit := do
+  match object.task with
+  | some task =>
+      if task.state == .pending ∧ task.retryTimeoutAt.any (· ≤ now) then
+        dispatchTask object task now
+  | none => pure ()
+
+/-- Resume one awaiter. Suspended work is offered immediately; work that is
+already queued or running only records the resume. -/
+def resumeOne (awaited awaiter : Ident) (now : Nat) : Handler Unit := do
+  if !awaited.sameOrigin awaiter then return ()
+  match ← readTask awaiter now with
+  | none => pure ()
+  | some (object, task) =>
+      match task.state with
+      | .suspended =>
+          dispatchTask object
+            { task with
+              state := .pending
+              pid := none
+              ttl := none
+              leaseTimeoutAt := none
+              resumes := [awaited] }
+            now
+      | .pending | .acquired | .halted =>
+          if !(task.resumes.contains awaited) then
+            setObject { object with
+              task := some { task with resumes := task.resumes ++ [awaited] } }
+      | .fulfilled => pure ()
+
+def resumeAll (awaited : Ident) (now : Nat) : List Ident → Handler Unit
+  | [] => pure ()
+  | awaiter :: rest => do
+      resumeOne awaited awaiter now
+      resumeAll awaited now rest
+
+def notifyAll (promise : PromiseObject) (id : Ident) : List String → Handler Unit
+  | [] => pure ()
+  | address :: rest => do
+      setMessage address (.unblock (promise.toRecord id))
+      notifyAll promise id rest
+
+/-- Settlement is one document transition: store the settled row, synchronously
+drain every callback and listener, and include their effects in this handler. -/
+def setSettled (object : Object) (promise : PromiseObject) (now : Nat) : Handler Unit := do
+  let settled := { promise with callbacks := [], listeners := [] }
+  setObject ({ object with promise := settled }.project now)
+  resumeAll object.id now promise.callbacks
+  notifyAll settled object.id promise.listeners
 
 /-- A new promise, with a task if it is runnable. A promise created at or
 past its deadline is created settled. -/
@@ -114,12 +173,8 @@ def newObject (id : Ident) (timeoutAt now : Nat) (param : Value) (tags : Tags) :
     let promise : PromiseObject :=
       { state := .pending, param, tags, timeoutAt, createdAt := now }
     if promise.otype == .runnable then
-      let due :=
-        match promise.tags.get? "resonate:delay" with
-        | some delay => max (parseNat delay) now
-        | none => now
       { id, promise,
-        task := some { state := .pending, version := 0, retryTimeoutAt := some due } }
+        task := some { state := .pending, version := 0, retryTimeoutAt := some now } }
     else { id, promise }
   else
     let state :=

@@ -15,6 +15,15 @@ pub fn copy_string(s: &String) -> (r: String)
     s.clone()
 }
 
+/// Every executable Rust string has an addressable number of characters.
+/// This is a representation fact at the Rust/Verus boundary.
+#[verifier::external_body]
+pub proof fn string_bounded(s: &String)
+    ensures
+        s@.len() <= usize::MAX as int,
+{
+}
+
 /// `str::strip_prefix`, stated: `Some(rest)` exactly when `s` is `p` then
 /// `rest`.
 #[verifier::external_body]
