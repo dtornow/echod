@@ -40,7 +40,7 @@ def OriginObject.project (object : OriginObject origin) (now : Nat) :
   let promise := object.promise.project now
   { object with promise, task := object.task.map (·.project promise) }
 
-abbrev OriginDocument (origin : String) := List (OriginObject origin)
+abbrev WorkflowDocument (origin : String) := List (OriginObject origin)
 
 /-- Schedule contents omit the id because it is fixed by the index. -/
 structure ScheduleData (id : ServerModel.Ident) where
@@ -81,7 +81,7 @@ abbrev ScheduleDocument (id : ServerModel.Ident) := Option (ScheduleData id)
 
 /-- Public dependent document value family. -/
 def Document : DocumentKey → Type
-  | .origin origin => OriginDocument origin
+  | .origin origin => WorkflowDocument origin
   | .schedule id => ScheduleDocument id
 
 def emptyDocument : (key : DocumentKey) → Document key
@@ -131,7 +131,7 @@ def Object.toOriginRow? (origin : String) (object : Object) :
   else
     none
 
-def Store.originRows (store : Store) (origin : String) : OriginDocument origin :=
+def Store.originRows (store : Store) (origin : String) : WorkflowDocument origin :=
   store.objects.filterMap (Object.toOriginRow? origin)
 
 def Store.scheduleAt (store : Store) (id : Ident) : ScheduleDocument id :=

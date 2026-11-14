@@ -19,8 +19,8 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::{
+use echod_abstract::trusted::copy;
+use echod_concrete::{
     advance_stored, body_len, clone_stored, peek, stored_body, stored_is_workflow, DocumentBody,
     Outbound, StoredDocument,
 };
@@ -29,7 +29,7 @@ use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequen
 use crate::verified::node::Key;
 use crate::verified::table::Table;
 use crate::verified::text::{concat, copy_string, text};
-use crate::verified::{Request, Response, TaskFenceInnerRes, TaskFenceRes};
+use crate::verified::{Request, Response};
 
 use crate::cache::Cached;
 use crate::document::{self, Loaded};
@@ -56,14 +56,12 @@ use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use crate::verified::PromiseResSpec;
-#[cfg(verus_keep_ghost)]
-use crate::concrete::document::{
+use echod_concrete::node::{
     notes_v, spec_body_deadline, spec_workflow_map, DocumentBodyV, NoteV, ScheduleDocumentV,
     StoredDocumentV, WorkflowDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
 #[cfg(verus_keep_ghost)]
 use echod_types::spec::AResponse;
 
@@ -74,8 +72,10 @@ verus! {
 // ---------------------------------------------------------------------------
 
 /// What a flight does.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Work {
-    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64, stage: Stage },
+    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64 },
     /// `fired` is the key whose firing this is; none for a sweep or a fire
     /// a test asked for.
     Sweep { fired: Option<FiredKey>, now: u64 },
@@ -84,7 +84,7 @@ pub enum Work {
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum WorkSpec {
-    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64, stage: StageSpec },
+    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64 },
     Sweep { fired: Option<AFired>, now: u64 },
     Fire { schedule: Seq<char>, fired: Option<AFired>, now: u64 },
 }
@@ -94,8 +94,8 @@ impl DeepView for Work {
     type V = WorkSpec;
     open spec fn deep_view(&self) -> WorkSpec {
         match self {
-            Work::Request { id, kind, corr, req, action_kind, now, stage } => WorkSpec::Request {
-                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now, stage: stage.deep_view(),
+            Work::Request { id, kind, corr, req, action_kind, now } => WorkSpec::Request {
+                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now,
             },
             Work::Sweep { fired, now } => WorkSpec::Sweep { fired: fired.deep_view(), now: *now },
             Work::Fire { schedule, fired, now } => WorkSpec::Fire { schedule: schedule@, fired: fired.deep_view(), now: *now },
@@ -127,40 +127,10 @@ impl Work {
     }
 }
 
-/// Where a request stands when it spans two documents: a fence whose create
-/// targets another origin (a detached workflow) commits the create on that
-/// origin first, then the fence's check on the task's, and answers as one
-/// fence. A request on one document is `Whole`.
-pub enum Stage {
-    Whole,
-    /// The create, with the check to run on the task's document once it has
-    /// committed.
-    Detached { then: Target, check: Option<Request> },
-    /// The check, with the create's answer to fold into the fence's.
-    Check { inner: Option<crate::verified::PromiseRes> },
-}
-
-#[cfg(verus_keep_ghost)]
-pub ghost enum StageSpec {
-    Whole,
-    Detached { then: TargetSpec, check: Option<Request> },
-    Check { inner: Option<PromiseResSpec> },
-}
-
-#[cfg(verus_keep_ghost)]
-impl DeepView for Stage {
-    type V = StageSpec;
-    open spec fn deep_view(&self) -> StageSpec {
-        match self {
-            Stage::Whole => StageSpec::Whole,
-            Stage::Detached { then, check } => StageSpec::Detached { then: then.deep_view(), check: *check },
-            Stage::Check { inner } => StageSpec::Check { inner: inner.deep_view() },
-        }
-    }
-}
-
 /// The key that fired a flight, for the timers when it ends.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Firing {
     pub key: String,
     pub at: u64,
@@ -179,6 +149,8 @@ impl Firing {
 
 /// The document a flight works on.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Working {
     /// The target's name.
     pub target: String,
@@ -191,6 +163,8 @@ pub struct Working {
 /// A commit in progress: the verified sequence, and the store call it
 /// asked for that is waited on.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Committing {
     pub w: Working,
     /// The document as the step left it.
@@ -201,6 +175,8 @@ pub struct Committing {
 }
 
 /// The call made for the sequence's last act, with what the answer needs.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Issued {
     /// A key put or deleted: the wheel follows the answer.
     Key { op: OpId, key: Key, name: String, arm: bool },
@@ -276,10 +252,11 @@ impl DeepView for Progress {
 /// How many due steps one sweep runs before it commits. A document with
 /// more due is committed with its nearest deadline past, which arms a key
 /// that fires at once.
-pub const SWEEP_STEPS: u64 = crate::concrete::document::REQUEST_SWEEP_STEPS;
+pub const SWEEP_STEPS: u64 = echod_concrete::node::REQUEST_SWEEP_STEPS;
 
 /// What a committed step answers with.
-#[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Done {
     pub response: Option<Response>,
     /// Why the request was refused, in the protocol's words, if it was.
@@ -289,19 +266,48 @@ pub struct Done {
     pub did: bool,
 }
 
+#[cfg(verus_keep_ghost)]
+pub ghost struct DoneSpec {
+    pub response: Option<Response>,
+    pub why: Option<Seq<char>>,
+    pub outbox: Seq<(Seq<char>, MessageSpec)>,
+    pub did: bool,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Done {
+    type V = DoneSpec;
+
+    open spec fn deep_view(&self) -> DoneSpec {
+        DoneSpec {
+            response: match &self.response {
+                Some(response) => Some(*response),
+                None => None,
+            },
+            why: self.why.deep_view(),
+            outbox: self.outbox.deep_view(),
+            did: self.did,
+        }
+    }
+}
+
 /// A fire past its decision: the schedule as loaded and as advanced, the
 /// occurrence due, and the origin it is born in.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct FireCtx {
     pub ws: Working,
     pub row: crate::verified::Schedule,
     pub advanced: DocumentBody,
-    pub pending: crate::concrete::Pending,
+    pub pending: echod_concrete::Pending,
     pub t1: u64,
     pub origin: String,
     pub next: u64,
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Phase {
     Idle,
     Loading { op: OpId, revalidating: Option<Cached> },
@@ -376,6 +382,8 @@ impl Phase {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Flight {
     pub id: FlightId,
     pub target: Target,
@@ -389,6 +397,8 @@ pub struct Flight {
     pub idle: bool,
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Queued {
     Work { target: Target, work: Work, firing: Option<Firing>, debug: bool },
     Waiter(FlightId),
@@ -413,12 +423,16 @@ impl DeepView for Queued {
 
 /// One document's lane: the flight on it, and the ones waiting.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Slot {
     pub busy: Option<FlightId>,
     pub queue: Vec<Queued>,
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Flights {
     pub slots: Table<String, Slot>,
     pub inflight: Table<FlightId, Flight>,
@@ -482,7 +496,7 @@ pub open spec fn spec_dispatch(doc: DocumentBodyV, n: NoteV) -> Option<(Seq<char
                 None
             }
         },
-        NoteV::Unblock { address, promise } => Some((address, MessageSpec::Unblock(promise.deep_view()))),
+        NoteV::Unblock { address, promise } => Some((address, MessageSpec::Unblock(promise))),
     }
 }
 
@@ -522,14 +536,14 @@ pub fn dispatches(doc: &DocumentBody, notes: &Vec<Outbound>) -> (r: Vec<(String,
         let ghost before = out.deep_view();
         proof {
             assert(nv[i as int] == notes@[i as int]@);
-            crate::concrete::lemma_outbound_view(&notes@[i as int]);
+            echod_concrete::lemma_outbound_view(&notes@[i as int]);
         }
         match &notes[i] {
             Outbound::Execute { id, version } => {
                 match peek(doc, id) {
                     Some(obj) => {
                         proof {
-                            crate::concrete::lemma_obj_view(&obj);
+                            echod_concrete::lemma_obj_view(&obj);
                         }
                         match crate::reason::target_of(&obj.promise.tags) {
                             Some(address) => {
@@ -569,7 +583,7 @@ pub fn is_workflow(d: &DocumentBody) -> (r: bool)
         r == (d@ is Workflow),
 {
     proof {
-        crate::concrete::lemma_doc_view(d);
+        echod_concrete::lemma_doc_view(d);
     }
     match d {
         DocumentBody::Workflow(_) => true,
@@ -938,7 +952,7 @@ pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, Commit
     };
     let (s, commit) = spec_commit_new(s, w, after, deadline, now, fired);
     let did = work.is_sweep() && commit.seq.changed;
-    (s, commit, DoneSpec { response: response.deep_view(), why, outbox, did })
+    (s, commit, DoneSpec { response, why, outbox, did })
 }
 
 pub open spec fn spec_send_all(s: S, outbox: Seq<(Seq<char>, MessageSpec)>) -> S
@@ -957,26 +971,7 @@ pub open spec fn spec_committed(s: S, f: FlightSpec, done: DoneSpec, fired: Fire
     let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
     let s = spec_send_all(s, done.outbox);
     let s = match f.work {
-        WorkSpec::Request { id, kind, corr, action_kind, now, stage: StageSpec::Detached { then, check }, .. } => {
-            match (done.response, check) {
-                (Some(AResponse::Promise(inner)), Some(check)) => {
-                    let work = WorkSpec::Request { id, kind, corr, req: check, action_kind, now, stage: StageSpec::Check { inner: Some(inner) } };
-                    spec_submit(s, then, work, None, f.debug)
-                },
-                _ => spec_emit(s, EffectSpec::Reply { id, response: Err("no answer"@) }),
-            }
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Check { inner }, .. } => {
-            let response = match (done.response, inner) {
-                (Some(AResponse::Status(st)), Some(inner)) => {
-                    let action = if st.status == 200 { Some(crate::verified::spec::ATaskFenceInnerRes::Create(inner)) } else { None };
-                    Ok(AnswerSpec::Step { kind, corr, action_kind, response: AResponse::TaskFence(crate::verified::TaskFenceResSpec { status: st.status, action }), why: done.why })
-                },
-                _ => Err("no answer"@),
-            };
-            spec_emit(s, EffectSpec::Reply { id, response })
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Whole, .. } => {
+        WorkSpec::Request { id, kind, corr, action_kind, .. } => {
             let response = match done.response {
                 Some(response) => Ok(AnswerSpec::Step { kind, corr, action_kind, response, why: done.why }),
                 None => Err("no answer"@),
@@ -1051,7 +1046,7 @@ pub open spec fn spec_commit_new(s: S, w: WorkingSpec, after: DocumentBodyV, dea
     };
     let (s, token) = spec_token(s);
     let seq = spec_new(s.node.core, w.target, etag, deadline, changed_any, fired, token as nat);
-    let after = crate::concrete::document::spec_advance_stored(w.loaded.document, after, now);
+    let after = echod_concrete::node::spec_advance_stored(w.loaded.document, after, now);
     (s, CommittingSpec { w, after, now, seq, issued: None })
 }
 
@@ -1141,16 +1136,16 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
 pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec) {
     let (call, mode, change_count, bytes) = match cond {
         None => {
-            let after = crate::concrete::document::spec_stored_body(c.after);
-            let body = document::spec_encode_body(c.after);
-            (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, crate::concrete::document::spec_body_len(after) as usize, body.len() as u64)
+            let after = echod_concrete::node::spec_stored_body(c.after);
+            let body = document::spec_encode(c.after);
+            (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, echod_concrete::node::spec_body_len(after) as usize, body.len() as u64)
         },
         Some(etag) => {
             let etag = EtagSpec(etag);
-            let after = crate::concrete::document::spec_stored_body(c.after);
+            let after = echod_concrete::node::spec_stored_body(c.after);
             let (delta, changed) = document::spec_encode_delta(c.w.loaded.document, c.after);
             let removed = document::spec_removed_any(document::spec_loaded_body(c.w.loaded), after);
-            let after_len = crate::concrete::document::spec_body_len(after) as usize;
+            let after_len = echod_concrete::node::spec_body_len(after) as usize;
             let stale_after = c.w.loaded.change_count.saturating_add(changed).saturating_sub(after_len);
             let append = document::spec_loaded_version(c.w.loaded) > 0 && !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
             if append {
@@ -1158,7 +1153,7 @@ pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: 
                 let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
                 (StoreReqSpec::AppIfMatch { key: c.w.key, offset: c.w.loaded.bytes, body: delta, etag }, WriteMode::Append, n, b)
             } else {
-                let body = document::spec_encode_body(c.after);
+                let body = document::spec_encode(c.after);
                 (StoreReqSpec::PutIfMatch { key: c.w.key, body, etag }, WriteMode::Rewrite, after_len, body.len() as u64)
             }
         },
@@ -1821,33 +1816,7 @@ impl State {
         self.send_all(outbox);
         let mut f = f;
         match &f.work {
-            Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
-                match (response, check) {
-                    (Some(Response::Promise(inner)), Some(check)) => {
-                        let work = Work::Request { id: *id, kind: copy_string(kind), corr: copy_string(corr), req: copy(check), action_kind: copy(action_kind), now: *now, stage: Stage::Check { inner: Some(inner) } };
-                        let then = then.copy();
-                        let debug = f.debug;
-                        self.submit(then, work, None, debug);
-                    },
-                    _ => {
-                        let id = *id;
-                        self.emit(Effect::Reply { id, response: Err(text("no answer")) });
-                    },
-                }
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
-                let response = match (response, inner) {
-                    (Some(Response::Status(st)), Some(inner)) => {
-                        let action = if st.status == 200 { Some(TaskFenceInnerRes::Create(copy(inner))) } else { None };
-                        let response = Response::TaskFence(TaskFenceRes { status: st.status, action });
-                        Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why })
-                    },
-                    _ => Err(text("no answer")),
-                };
-                let id = *id;
-                self.emit(Effect::Reply { id, response });
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Whole, .. } => {
+            Work::Request { id, kind, corr, action_kind, .. } => {
                 let response = match response {
                     Some(response) => Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why }),
                     None => Err(text("no answer")),
@@ -1953,7 +1922,7 @@ impl State {
     /// nearest deadline. `fired` is the key whose firing this is.
     pub fn commit_new(&mut self, w: Working, after: DocumentBody, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> (c: Committing)
         ensures
-            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, crate::concrete::document::nat_v(deadline), now, fired.deep_view()),
+            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, echod_concrete::node::nat_v(deadline), now, fired.deep_view()),
     {
         proof {
             reveal(spec_commit_new);

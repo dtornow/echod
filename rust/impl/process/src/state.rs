@@ -33,7 +33,7 @@ use crate::verified::node_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::StoreReqSpec;
+use echod_concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -58,6 +58,8 @@ impl DeepView for Owner {
 
 /// The process. Every core transition uses `on_event`.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct State {
     pub cfg: Config,
     pub keys: KeySpace,

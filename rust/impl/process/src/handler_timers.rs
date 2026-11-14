@@ -33,7 +33,7 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_owner;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 
 verus! {
 

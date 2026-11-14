@@ -6,17 +6,16 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::{peek, DocumentBody, Obj};
-use echod_types::Tags;
+use echod_concrete::{peek, DocumentBody, Obj, Tags};
 #[cfg(verus_keep_ghost)]
-use crate::concrete::lemma_obj_view;
+use echod_concrete::lemma_obj_view;
 use echod_types::{Request, Response, TaskState};
 
 use crate::verified::node::str_eq;
 use crate::verified::text::text;
 
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{spec_workflow_map, DocumentBodyV};
+use echod_concrete::node::{spec_workflow_map, DocumentBodyV};
 #[cfg(verus_keep_ghost)]
 use echod_types::AResponse;
 
@@ -131,7 +130,7 @@ pub fn target_of(tags: &Tags) -> (r: Option<String>)
 }
 
 /// `map[id]`, if the document holds it.
-pub open spec fn spec_object(doc: DocumentBodyV, id: Seq<char>) -> Option<crate::concrete::document::ObjV> {
+pub open spec fn spec_object(doc: DocumentBodyV, id: Seq<char>) -> Option<echod_concrete::node::ObjV> {
     if spec_workflow_map(doc).contains_key(id) { Some(spec_workflow_map(doc)[id]) } else { None }
 }
 
