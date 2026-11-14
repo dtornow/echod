@@ -3,6 +3,7 @@
 /// Every mark the spec can put on an outcome, so a coverage report can show
 /// the ones no run reached. `tests/coverage.rs` checks it against every executable transition source.
 pub const MARKS: &[&str] = &[
+    "acquire: invalid ttl (400)",
     "acquire: no such task (404)",
     "acquire: not pending, or stale version (409)",
     "callback registered",
@@ -90,6 +91,7 @@ pub const MARKS: &[&str] = &[
     "task.create: target without a task (409)",
     "task.create: task done (echo)",
     "task.create: task held, suspended or halted (409)",
+    "task.create: version exhausted (409)",
     "timer promise resolved",
 ];
 

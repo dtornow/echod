@@ -646,8 +646,7 @@ impl World {
             node.routable = false;
         }
         self.stops += 1;
-        let clock = self.node_clock(&id).unwrap_or(self.now);
-        self.nodes.remove(&id);
+        self.remove_node(&id);
     }
 
     fn join_one(&mut self, rng: &mut Rng) {
@@ -808,8 +807,7 @@ impl World {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.routable = false;
             }
-            let clock = self.node_clock(&id).unwrap_or(self.now);
-            self.nodes.remove(&id);
+            self.remove_node(&id);
         }
         self.run_until(|world| world.nodes.is_empty());
     }
