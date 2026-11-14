@@ -70,26 +70,25 @@ shows the panels with data.
 - **Preload.** `task.acquire`, `task.suspend` and `task.fence` answer an
   empty `preload`; the reference returns up to a limit of the promises
   the task may read next.
-- **Detached creates.** A fence creating a promise in another origin: the
-  reference allows a root id alone and checks the fence first; echod allows
-  any id and creates first, then checks (DESIGN, "The detached create").
-  `echod-diff` does not generate them; `echod-model` does.
+- **Detached creates.** A fence creating a promise in another origin: both
+  check the fence first and create after, but the reference allows a root
+  id alone and echod any id (DESIGN, "The detached create"). `echod-diff`
+  does not generate them; `echod-accordant` does.
 - **A targeted timer.** The reference runs it as a task; the Lean
-  specification and the Resonate model refuse it; echod drops the target
-  (an SDK's sleep). `echod-model` does not send one.
+  specification and the accordant model refuse it; echod drops the target
+  (an SDK's sleep). `echod-accordant` does not send one.
 - **A schedule fires when the node gets to it.** A schedule's occurrence
   is created and its run recorded (two commits, two documents) by the
   sweep that gets to the schedule's key, not at `nextRunAt`; a client
   reading in between sees the schedule not yet advanced and the
   occurrence absent. The Lean specification's step is enabled at the
-  instant and fired by a fair scheduler, which admits this; the Resonate
+  instant and fired by a fair scheduler, which admits this; the accordant
   model fires it anywhere within `fire_within` of the instant, and
   `echod-sim` gives it two timer buckets. A deadline and a lease's end,
   by contrast, are read as passed the moment they pass (DESIGN,
   "Writing"), and a retry rearms on a grid, so nothing else a client sees
-  depends on when a node sweeps. `echod-model` and `echod-diff` move
-  the clock with `debug.tick`, which lets every due step land before the
-  next request.
+  depends on when a node sweeps. External differential tools observe
+  production timer behavior through responses and worker messages.
 - **Stamps are decision instants.** A step's `created_at`, `settled_at`,
   `acquired_at` and the like are the instant the node decided it at, and
   the write lands later; a read on another node between the two sees the
@@ -100,15 +99,11 @@ shows the panels with data.
   sends a share elsewhere to see it. The reference server stamps before
   it commits too.
 
-- **Echod concrete refinement.** `rust/spec/echod/concrete/spec` holds the
-  concrete semantics, and `rust/spec/echod/refinement` holds the
-  verified interpretation, relation, and forward simulation. The kernel is
-  proved equal to the concrete semantics. The earlier `concrete_refines_abstract` against
-  the previous-generation `Model` left with `refine/`. What it established, and what
-  the Rover proof has to establish again: every bounded trace of the store
+- **`concrete_refines_abstract`, proved.** Every bounded trace of the store
   machine (the bucket as state, the verified document handlers after a
   sweep as the request step, sweeps as internal work) is a trace of the
-  Resonate model. The relation the old proof used (`theorem.rs`): the abstract state is the sweep of
+  Resonate model: `refine/`, `cargo verus verify -p echod-refine`, no
+  admits. The relation (`theorem.rs`): the abstract state is the sweep of
   the concrete one at the clock, translated; the calls the same; the
   abstract has sent what the concrete has plus what the sweep sends; a
   timer on `id` at `t` for every deadline `t` the swept state owes, none
@@ -132,11 +127,11 @@ shows the panels with data.
   beyond the kernel's and the model's own: the model's `origin` is the
   kernel's (both read before the first `:`), and the simulator's worker
   address is a URL. The model's side is now checked code: every handler
-  in the abstract model's `exec.rs` is verified to compute its twin in `spec.rs`,
-  and `echod_abstract_exec::Spec` is verified, so the checker's
-  verdicts and this theorem speak about the same functions, under the
-  model's own axioms (a value is its view; a set's elements come out in one
-  order, `pset_seq`). What the proof moved: the kernel refuses an acquire
+  in accordant's `exec.rs` is verified to compute its twin in `spec.rs`,
+  and the model's `Model` impl is verified, so the checker's verdicts and
+  this theorem speak about the same functions, under the model's own
+  axioms (a value is its view; a set's elements come out in one order,
+  `pset_seq`). What the proof moved: the kernel refuses an acquire
   at `u32::MAX` (`MAX_VERSION`), as the servers do, where it refused at
   `MAX_TIME`; a task record's resume count saturates as the wire's does;
   the store machine's plan mirrors the validators' doors on a delay, a
@@ -144,14 +139,58 @@ shows the panels with data.
   against the store machine, where the clocks and the stamps live, and
   schedules once the fire's shape is settled.
 
+## A fire's schedule under its commit
+
+`theorem_system_refines_abstract` (`refinement/src/system_sim.rs`) carries
+one hypothesis on behaviours, `schedule_held`: a fire's schedule document
+is as the fire read it until the occurrence's promise is committed. The
+proof found the gap. The node reads the origin and the schedule, and
+commits the promise on the origin conditionally on the origin's version
+alone; another node may delete and recreate the schedule in between, and
+the promise then written is one the Abstract never creates. A conditional
+put is on one key, so the origin's commit cannot also condition on the
+schedule's version, and re-reading the schedule before the put narrows the
+window without closing it. Closing it means the schedule's document
+records the fire before the promise is written — a fire in three commits,
+mark, promise, advance, where a delete of a marked schedule waits or
+cancels — or the Abstract admitting the orphan promise, which the
+specification does not. Advancing the schedule first is what the
+Occurrences theorem forbids. Done: the hypothesis gone from the theorem,
+and `echod-sim` deleting schedules under fires.
+
+## `logic/` against the system model
+
+The proof's last link: that `logic::on_event` — the Rust orchestration of
+flights, membership and timers over many documents — is an implementation
+of the system model's steps, so that the five system theorems and the
+refinement speak of the running node. The model's node actions are
+already the kernel's `node`, `commit` and `steps` specification functions,
+which `logic` calls; what is left is the shim: that each `Event` the
+executor feeds back moves the logic's `State` as one `Step` of the model
+moves a `Node`, with the store's answers as the step's `Outcome`. The
+shape is a forward simulation from `logic::State` to the model's `Node`
+and the flights in it, under the same doors. Done: `theorem_logic_refines_system`
+in `refinement/`, or a statement of why a piece of `logic` is outside the
+model and trusted.
+
 ## Smaller items
 
-- **Checker time on long histories.** Client histories now feed Rover's
-  executable search directly. Inputs are tried at their arrival instant,
-  expected responses guide outcome order, and an explicit beam bounds
-  concurrent alternatives. Exhausting the step/node bounds is reported as
-  `undecided`, never as a refutation. The next lever is a persistent,
-  model-independent state key for deduplicating equivalent beam entries.
+- **Checker time on long histories.** The black-box trace leaves the
+  checker a choice per open write per clock instant: a settle in flight
+  across three instants may have landed at any of them, each a different
+  `settled_at`, until its return says. Several open writes on one origin
+  multiply, and a seed with many concurrent clients on few origins can
+  exceed the profile's width or the budget (`--budget`), which turn the
+  blowup into a report rather than a hang. The clock moves only to the
+  instants the nodes stamp at, clients back off, the checker is told which
+  calls never return and stale schedule work is a no-op, which keeps it
+  narrower: eleven of fifteen seeds decide in seconds, the rest give up
+  undecided, none refuted. The next lever is a client's knowledge that a
+  failed call is over: the node answered unavailable or the connection
+  dropped at an instant, after which the call's effect can land only
+  within the store's latency; told so, the checker would stop placing it
+  at every later instant. Fewer clients per origin or coarser clocks would
+  keep it narrower still.
 - **Simulator coverage.** Every soak line reports `task.continue` as
   never exercised, and `task.suspend`, `task.fence` and `task.release`
   are often missing. The client mix in `echod-sim` does not generate

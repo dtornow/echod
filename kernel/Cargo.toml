@@ -1,0 +1,25 @@
+[package]
+name = "echod-kernel"
+description = "The Resonate state machine over one document store, verified with Verus."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "echod_kernel"
+path = "src/lib.rs"
+
+# Verus is not needed to build this crate: `verus_builtin_macros` erases every
+# spec, proof, requires and ensures under plain rustc. Verification is
+# `./verify.sh`.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+vstd = "=0.0.0-2026-10-11-0230"
+verus_builtin = "=0.0.0-2026-10-11-0230"
+verus_builtin_macros = "=0.0.0-2026-09-20-0158"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

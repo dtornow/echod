@@ -7,76 +7,105 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `rust/impl/process` | `echod-process` (library `echod_logic`): the executable concrete document machine and the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
-| `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
-| `rust/impl/cli` | `echod`: the binary |
-| `rust/spec/rover/spec` | `rover-spec` (library `rover_spec`): mathematical Rover processes, state, steps, and refinement |
-| `rust/spec/rover/exec` | `rover-exec` (library `rover_exec`): deterministic execution, bounded search, and verified certificate replay |
-| `rust/spec/echod/abstract/spec` | `echod-abstract-spec` (library `echod_abstract_spec`): the mathematical Resonate protocol model |
-| `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization of the mathematical model |
-| `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue and Echod concrete model |
-| `rust/spec/echod/refinement` | `echod-refinement` (library `echod_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
-| `rust/test/model` | `echod-model-test` (library `echod_model_test`): abstract-model trace translation and workload generation |
-| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
-| `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
-| `lean/` | the same three layers, for experiment |
+| `abstract/` | `echod-abstract`: an independent executable Verus port of the Resonate abstract machine. Its own protocol state and ordered writer effects; one named semantic action for each of 22 external handlers (the 21 protocol handlers and the fence's check) and 7 internal actions (a schedule fires in two: create the occurrence's promise, then advance). Invoke/return/receive/clock bookkeeping is separate. It depends only on Verus, not on the kernel, Concrete, Accordant or checker |
+| `kernel/` | `echod-kernel`: everything verified that runs. The specification's state machine, one document, one transition per request, proved against the catalogue; and this design's node, what it remembers and decides about membership, cache versions and deadline keys, the commit's decisions, and the single-pass normalization, each proved to compute its specification function |
+| `codec/` | `echod-codec`: the executable verified persistence format. Canonical UTF-8 and typed codecs for every object/key, appendable origin/schedule document segments, strict malformed-input rejection, last-row-wins folding and compaction laws |
+| `concrete/` | `echod-concrete`: the deterministic raw object-store automaton: one configured bucket of keyed bytes and opaque versions, conditional writes/appends/listings, and explicit fail-before-apply/apply-with-lost-ack/refusal choices. Decoded documents and auxiliary objects are verified derived views |
+| `refinement/` | `echod-refinement`: the proof boundary from row-native Concrete state to independent Abstract state. It owns type translation and the refinement relation; checker/search code is not a dependency. Proved: `theorem_trace_inclusion`, every admitted run of kernel steps on a document (sweeps, the 19 requests, schedule firings) is a run of Abstract actions ending in a related state with the same responses; and `theorem_system_refines_abstract`, in every admitted execution of the system model the requests served so far are always the responses of some Abstract run that ends related to the bucket; the Abstract run is constructed, not assumed |
+| `system/` | `echod-system`: the whole system as a TLA-style state machine in Verus over the kernel, Anvil's shape: nodes, bucket, crashes, the commit protocol, no clock assumed anything of; proof only; proved: every document satisfies the catalogue, every deadline has a timer, a revalidated cache is current, every fired occurrence has its promise |
+| `logic/` | `echod-logic`: the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same; the kernel over documents in an S3 bucket, committed with conditional writes, with the verified core taking every decision; no I/O, no clock, no runtime |
+| `echod/` | `echod`: the node, the core's effects performed against a real store, a real clock and HTTP; the `ResonateServer` and the binary |
+| `sim/` | `echod-sim`: deterministic multi-node chaos, one seed and no sockets; finite public traces are searched directly against `echod-abstract`, with witness/exhausted/bounded outcomes |
 
-The process is proved equal to its specification, `State::on_event` to `spec_on_event`, the commit sequence included: `flight_spec::lemma_sequence` is the order of store calls around each step. The text of keys and the bytes of documents are assumed, stated as specifications (`src/verified/mod.rs`). The runtime performs what the
-process asks. The simulator is the evidence. The core and the node depend
-on `resonate-core` for the traits and protocol types. Origin:
+The Abstract, kernel, Concrete-bucket and system layers verify
+independently. `refinement/` proves the document-level link from the kernel
+to the Abstract (`theorem_trace_inclusion`): every admitted run of kernel
+steps on a document is an Abstract run with the same responses; and from
+it the system-level link (`theorem_system_refines_abstract`): the system
+model refines the Abstract on what is observed, the log of requests
+served. The remaining work is the link from the complete `logic::on_event`
+orchestration to the system model. `echod` performs the logic's
+effects; simulation is executable evidence at the same boundary. The core
+and the node depend on `resonate-core` for the traits and protocol types. Origin:
 `resonate-server-blob` and `resonate-plugin-echod`.
 
-The Anvil cluster model and the earlier refinement of the store machine
-against the previous-generation `Model` are not in this tree. Catalogue,
-deadline keys, cache revalidation, and fired occurrences
-are to be restated as Echod concrete theorems. The document machine lives
-under `rust/impl/process/src/concrete`, where it is proved equal to
-`rust/spec/echod/concrete/spec`'s mathematical transitions.
-The sections below that name `echod-system` or `refine/` describe that
-earlier proof.
+## echod-kernel
 
-## The document machine
+The specification is `resonatehq/resonate`, `spec/02-abstract`: a state of
+objects, schedules and an outbox; 18 request handlers and 6 internal steps
+(`*.search` left out), plus one of this design's own, the fence's check with
+no action, for the detached create; a catalogue of 92 properties. The kernel
+is that machine as Rust, and every step's `ensures` is the catalogue: `inv`
+on the state it leaves, `legal` on the pair, and for an internal step the two
+sweeper entries.
 
-`echod_logic::concrete::document` (`rust/impl/process/src/concrete/document.rs`). A document is
-`Doc`: an origin's objects, sorted by id, or a schedule. `handle` runs one
-request on it; `run_due` one due step — a promise's timeout, a lease or a
-retry timeout, one callback resumed, one listener told, or a schedule's
-occurrence; `sweep` runs `run_due` until a step changes nothing or a step
-limit is reached; `create_occurrence` births an occurrence in its origin.
-Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
-`spec_sweep`, `spec_occurrence` — and those are the steps of the
-Echod concrete model. `echod_refinement::concrete_refines_abstract` states that this
-model refines the abstract one, and
-`echod_refinement::refinement_proof` proves it; the private machinery is
-consolidated in `rust/spec/echod/refinement/src/refinement_proof.rs`.
+```text
+types.rs        rows, records, requests, responses, ids; the twins, derived; the trusted string primitives
+tags.rs         tags: first match wins; otype, timer, target
+tags_proof.rs   what `get` returns
+store.rs        State: row vectors whose view is three maps, via the fold
+store_proof.rs  the fold lemmas and the row readers
+object.rs       projection, the per-object edits, birth
+object_proof.rs its two lemmas on `without`
+properties.rs   the catalogue, entry for entry, same names
+properties_proof.rs  its theorems: the frame every step ends with, and the folds
+external.rs     the 18 request handlers, and the fence's check
+external_proof.rs  their lemmas: one per handler, and the projection and frame lemmas they share
+internal.rs     the 6 internal steps
+internal_proof.rs  their lemmas
+```
 
-The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
-models under `lean/` state it: 18 request handlers, the fence's check with
-no action for the detached create, and the due steps. Trusted there: the
-JSON codec (`assume_specification`), the key hash, `copy`, `expand`, and
-`next_cron`. Their contracts refer to the abstract crate's mathematical
-specifications; their executable bodies do not live in the spec crate.
+Every exec type with a string or a list in it has an abstract twin, which
+`vstd::contrib::make_spec_type` derives: strings become `Seq<char>`, vectors
+`Seq`, numbers stay `u64`. The machine and the catalogue are stated over the
+twins, whose equality is structural. The twins exist only under the verifier;
+`cargo build` sees the exec types alone.
 
-The process (`rust/impl/process`) runs that machine. `doc.rs` folds an
-object's rows into the model's `Doc` (`Objects::from_entries`) and writes
-the `Doc` a step leaves as rows again (`into_entries`); `handler_docs`
-decides a request by `handle` and a fired key by `sweep`; `handler_sched`
-runs a schedule by `run_due` and `create_occurrence`. Once the write lands,
-an `Execute` note goes to the address of the task's `resonate:target` tag,
-an `Unblock` to its listener. Every module of the process is inside
-`verus!`: each exec function ensures it computes its `spec_*` twin over the
-state's view, up to `State::on_event == spec_on_event`. `src/verified` is
-the node's own bookkeeping: membership, cache versions, the deadline keys it
-armed, and which key a commit arms, removes and remembers (`node.rs`,
-`commit.rs`, each ensuring its `spec_*` in `node_spec.rs`, `commit_spec.rs`).
-What is assumed is listed in `src/verified/mod.rs`: the text of keys, the
-bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
-`clone_string`, `strip_prefix`, `u64_text`, and the store itself.
+The state is `Vec<Promise>`, `Vec<Schedule>`, `Vec<OutboxEntry>`: the rows.
+Its abstract view is three maps, the fold of the rows by key, so the
+catalogue is stated over maps and the compaction lemma is the view. Each
+handler takes the state, the request, `now`, and a `Config`, and is a
+function: `spec_promise_create(a, req, now)` and its seventeen siblings
+give the abstract state each handler leaves, and each handler `ensures` it
+computes its function. `handle` takes a `Request`, one enum over the
+nineteen, and returns the `Response`; `spec_handle` is its function, state
+and response at once. That is the one name the system model uses for a
+request, and the one call the node makes.
 
-`cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete-spec -p echod-refinement` and
-`-p echod-process` run Verus. Verus pins its own
-rustc, so the two are separate toolchains.
+Proved: every catalogue entry, at every step, over the whole store. A step
+proves the entries at the ids it wrote; the frame lemma proves the rest. One
+entry is proved in an amended form, and one internal step departs from the
+Lean text, both because the text is wrong:
+
+- `consistent_suspension_registers_callback` demands that a task suspending
+  gains a callback it did not have. A task that suspended on `P1` and `P2`,
+  was woken by `P1` settling, ran again and suspended on `P2` alone, gains
+  nothing: `P2` still held it. Seven steps; the sweep goes to three. Proved
+  without the freshness conjunct.
+- `processSchedule` creates a promise as of its occurrence `t`. For
+  `t + promiseTimeout <= now` that is a pending task beside a promise stored
+  pending but dead at `now`, which `preserved_no_dead_dispatch` as first
+  written forbade; the specification now admits a birth whose stored promise
+  is pending, and the kernel stores it as Lean does, `created_at` the
+  occurrence, for every read to project (the reference server stamps the
+  same). An earlier kernel birthed it dead at its deadline, which a client
+  could tell apart.
+
+`processSchedule` is also a function, `spec_fire`: each occurrence's object
+left as it is if it exists, else born of the occurrence, then the schedule
+advanced; the system model fires a schedule by it. The promise an occurrence
+is born with carries the schedule and its own lineage in its tags
+(`spec_stamp`), and a lemma shows the stamp changes neither the timer axis
+nor the type of the tags.
+
+Trusted, not proved: `same_origin`, `str_eq`, `parse_nat` in `types.rs`
+(bodies are plain Rust, their `ensures` assumed), and the cron arithmetic,
+which the caller supplies as a request's occurrences and next run. Doors the
+kernel adds: instants and durations at most `MAX_TIME` (2^62 ms), versions
+below it, so that no `u64` sum overflows.
+
+`cargo build` compiles the kernel with the ghost code erased; `verify.sh`
+runs Verus. Verus pins its own rustc, so the two are separate toolchains.
 
 ## echod-logic and echod
 
@@ -84,30 +113,21 @@ The node is two crates, in the shape `celld` gives a node: a decision core
 that does no I/O, and an executor that does nothing else.
 
 ```text
-rust/impl/process/src/
-  handler.rs         on_event. A network request above the line; below it a store answer, the heartbeat, or the wheel
-  handler_node.rs    the announcement, the membership, who owns a target
-  handler_docs.rs    one origin: its promises, the task inside each, a sweep of it
-  handler_sched.rs   one schedule: create, read, delete, a run coming due
-  handler_timers.rs  which keys are due; an origin goes to docs, a schedule to sched
-  state.rs           the node, the timers, the cache, and the steps in progress
-  state_node.rs      the members and the epoch, the version last seen of each origin
-  state_timers.rs    deadline keys ordered by when they fall due
-  types.rs           events, store calls and outcomes, effects, notes
-  config.rs          the dials
-  keys.rs            where everything lives under the bucket
-  doc.rs             a document: rows in, the model's Doc, rows out
-  target.rs          an origin's document, or a schedule's
-  reason.rs          the words a refusal carries
-  cache.rs           documents this node remembers, by LRU under a byte budget
-  debug.rs           debug.reset, debug.snap, debug.tick, once the runtime has accepted them
-  verified/          the node's bookkeeping: membership, cache, keys, the commit sequence, the trust list
-rust/impl/runtime/src/
+logic/
+  types.rs      the vocabulary: events, store calls and outcomes, effects, notes
+  config.rs     the dials
+  keys.rs       where everything lives under the bucket
+  doc.rs        a document, an origin's or a schedule's: rows in, rows out, the fold between
+  wire.rs       the kernel's vocabulary to the protocol's and back
+  cache.rs      what a node remembers: documents by LRU under a byte budget
+  dispatch.rs   the envelope to the kernel's request, and the document it runs on
+  flight.rs     one step on one document, from load to commit, one store call at a time; the fire across two
+  members.rs    the nodes: announce, list, read the configuration, write the next epoch
+  timers.rs     deadlines as keys in time buckets, held in a wheel, fired by the owner
+echod/
   config.rs     the dials, as flags and environment
   store.rs      the object store port: object_store behind it, S3 Express on the SDK for appends, an in-memory model
   env.rs        the clock and the listener, as ports
-  admit.rs      a protocol envelope to a call the core already accepts, or the refusal
-  codec.rs      an answer or a message back to the protocol's bytes
   node.rs       the executor: the core's effects, performed; the ResonateServer
   push.rs       messages out: HTTP push, and the router in front of it
   gateway.rs    POST /, GET /ready and GET /metrics
@@ -116,41 +136,76 @@ rust/impl/runtime/src/
 
 ### The core
 
-`State` is everything a node holds: the node (`state_node`: the members,
-the epoch, the version last seen of each origin), the timers (`state_timers`:
-the wheel), the cache, and the steps in progress, one per document. `on_event`
-(`handler.rs`) is the only step. It is told one thing at a time, `Event`:
-the node starts; a request came in; a store call it issued has its answer;
-a wake it armed has come, named for the heartbeat or the wheel; the
-node stops. It answers with `Effect`s: make this call on the store and tell
-me under this op id; answer this request; push this message; wake me after
-this long for the heartbeat or the wheel; note this. Every event carries the
-node's clock as the executor read it; the core never reads one. Nothing in
-it waits, sleeps, locks or spawns, so the same events in the same order give
-the same effects, which is what `rust/impl/runtime/tests/logic.rs` checks
-with a bucket that is a map and a clock that is a number: a promise created,
-timed out by its sweep, its listener told, its key collected, and a schedule
-fired into its origin, with no runtime under it.
+`Concrete` is the executable logic state machine itself, not a second
+implementation beside it:
+
+```text
+on_event : Concrete × Event → Concrete × Vec<Effect>
+```
+
+`Concrete` is an alias for `logic::State`; the free `logic::on_event` is its
+only behavioral entry point. The vector is semantic order: the shell submits
+effects from first to last. A submission does not serialize asynchronous
+work. Store effects carry an operation id, and their completions may return in
+any order as separate events under those ids. Queues retain their `VecDeque`
+order; timer keys use ordered maps and sets; document rows, callbacks,
+listeners and outbox entries retain vector order. Hash maps are used only for
+keyed lookup or for sets whose completion order is supplied explicitly by
+events, never to choose effect order.
+
+This is the same core/executor vocabulary used by `denoland/celld`: it calls
+the outputs `Effect`s, makes a free `on_event(&mut State, Event) ->
+Vec<Effect>` the only way behavioral state advances, and has production and
+simulation shells perform those effects and return versioned completion
+events. Echod's concrete model follows that boundary; its protocol state and
+commit algorithm are different.
+
+The kernel operation inside a document is deterministic at the representation
+level too. Its executable normalization makes one global ordered pass:
+promise deadlines over document rows in stored order, leases over those rows,
+all callback vectors in stored row and vector order, all listener vectors in
+the same order, then due retries over stored rows. The concrete specification
+records this single-pass algorithm exactly; it does not iterate or use fuel.
+
+`State` is everything a node holds: the verified `NodeCore` with its view
+of the membership, its cache's versions and its armed keys; the cache;
+the flights in progress on documents; the membership refresh; the timer
+wheel and the listings. `on_event` is the only step. It is told one thing
+at a time, `Event`: the node starts; a request came in; a store call it
+issued has its answer; a particular timer generation fired; the node
+stops. It answers with
+`Effect`s: make this call on the store and tell me under this op id;
+answer this request; push this message; schedule this timer generation
+after this long; note this. Every event carries the node's clock as the executor read it; the
+core never reads one. Nothing in it waits, sleeps, locks or spawns, so
+the same events in the same order give the same effects, which is what
+`logic/tests/core.rs` checks with a bucket that is a map and a clock that
+is a number: a promise created, timed out by its sweep, its listener told,
+its key collected, and a schedule fired into its origin, with no runtime
+under it.
 
 A store call leaves as a submission under an op id and comes back as a
 completion under the same id; the core keeps, per id, which machine waits
 for it, and an answer nobody waits for is dropped. Three machines wait:
-a step on one document (`handler_docs`, and `handler_sched` when the
-document is a schedule); the membership refresh (`handler_node`); a timer
-listing (`handler_timers`). Each is an explicit phase with the data it
-carries, advanced by the answer it waited on until it issues the next call
-or ends. Per document one step runs at a time and the rest queue behind it;
-a fire holds the schedule's slot and takes the origin's for its first
-commit, and since no step on an origin ever waits for a schedule's slot,
-none of this waits in a circle.
+a *flight*, one step on one document (`flight.rs`); the membership
+refresh (`members.rs`); a timer listing (`timers.rs`). Each is an explicit
+phase with the data it carries, advanced by the answer it waited on until
+it issues the next call or ends. Per document one flight runs at a time
+and the rest queue behind it; a fire holds the schedule's slot and takes
+the origin's for its first commit, and since no flight on an origin ever
+waits for a schedule's slot, none of this waits in a circle.
 
 The executor (`node.rs`) is one `State` behind one lock. `apply` takes
 the lock, runs the step, drops the lock, and performs what came out: a
 store call is spawned and its answer applied as a completion; a reply
-wakes the request waiting on it; a message is pushed; a wake resets the
-one timer; a note goes to the metrics, the log, and whoever listens. The
-simulation supplies the clock and the listener; everything else it
-supplies is the store.
+wakes the request waiting on it; a message is pushed; a versioned timer
+intent replaces the executor's prior intent; a note goes to the metrics,
+the log, and whoever listens. The completion returns the timer identity
+and generation unchanged. The core ignores replaced generations and
+invalidates the current one while stopping. A running core always emits
+maintenance intent, and the executor always schedules its completion. The
+simulation supplies an injected clock and runs the same scheduler on paused
+virtual time; everything else it supplies is the store.
 
 ### The bucket
 
@@ -164,11 +219,16 @@ nodes/<id>                               a node's announcement: id, url, at
 
 ### The document
 
-One origin is one object, JSON lines: one kernel `Promise` per row, in
-commit order, serialised by serde as the kernel declares it. A task is a
-field of its promise. There is no enclosing document; each write puts a
-header line first, carrying the instant the step was decided at (the
-stamp), a nonce, and the write's number in the object's history.
+One origin is one raw byte object containing concatenated, self-framed
+`ECHO` v1 segments. Each segment carries a header and an ordered sequence of
+kernel `Promise` rows; a task is a field of its promise. Appends add one
+complete segment. Rewrites and compaction emit one segment with the folded
+rows. The header carries the instant the step was decided at (the stamp) and
+a nonce.
+
+The format is versioned and canonical. This version does not silently accept
+the former serde JSON-lines encoding; an existing bucket must be migrated or
+reset before upgrading.
 
 The document is the fold of the rows by id, last row wins — the kernel's
 `fold_by`, whose lemmas prove any one-row-per-id rendering replays to the
@@ -184,7 +244,7 @@ the rows that changed. The Lean specification projects a promise past its
 deadline and a lease past its end on every read (`Object.project`): a
 client never sees either as still ahead. The kernel keeps the promise's
 projection in the document and leaves the lease to the sweep, and `decide`
-sweeps before it handles (`handler_docs`), so the handler sees what a
+sweeps before it handles (`flight.rs`), so the handler sees what a
 projecting read would. A task's offers run on a grid anchored where it came
 to be pending, `due + n·retryTimeout` (the kernel's `next_offer`, Lean's
 `nextOffer`): a retry the sweep gets to late is rearmed where an exact
@@ -207,7 +267,7 @@ handed to the router after the commit; delivery is at most once, and a lost
 A deadline is an empty object whose key says what is due, when, a token
 drawn per arm, and the node that armed it, filed under the time bucket (an
 hour by default) its deadline falls in. The commit is the protocol
-the kernel's `commit.rs` decides, run by `handler_docs`: the key for the
+the kernel's `commit.rs` decides and `echod-system` proves, run by `flight.rs`: the key for the
 document's nearest deadline is put before the document, unless the node
 remembers a key for that instant armed with the very version it loaded;
 the document is written; the key replaced is deleted; the key kept is
@@ -262,11 +322,11 @@ conditional writes carry; membership steers three things:
 - **Timers.** The acting owner fires an origin's deadlines from its wheel.
 
 The state behind these rules and the decisions taken from it are not in
-`handler_node`: they are `verified::node::NodeCore`, executable Rust
+`members.rs`: they are `echod_kernel::node::NodeCore`, executable Rust
 verified to compute the system model's specification functions step for
-step. `handler_node` is the trusted shim around it: it announces, lists,
+step. `members.rs` is the trusted shim around it: it announces, lists,
 reads the configuration object and hands it to `read_config`; it asks
-`acts`; and `handler_docs` reports every version read or written with
+`acts`; and `flight.rs` reports every version read or written with
 `filled` and every entry dropped, evicted or forgotten with `forget`, so
 what the core decides on is what the cache holds. Membership is decided on the fleet's
 time, the later of a node's clock and the latest announcement it listed,
@@ -311,26 +371,15 @@ stale version are refused, a conditional read of the current version says
 so, listings page past a thousand keys and come back in order, keys with
 the characters ours use round-trip, and, on S3, a version is a function
 of the content — the same bytes are the same version, which is why every
-write of ours carries a nonce; and, on a store that appends, an append
-lands only at the current size under the current version. The end-to-end
-tests run on the same store under a prefix of their own when `ECHOD_STORE`
-is set, and once more through `S3Store` when `ECHOD_EXPRESS_BUCKET` names
-a directory bucket.
-
-No emulator serves S3 Express appends (RustFS answers 501, MinIO's open
-build has none), so `rust/test/cli/fakes3` is one of our own: the S3
-surface echod uses and nothing else, in memory — conditional reads and
-writes, `ListObjectsV2`, `DeleteObjects`, and `PutObject` with
-`x-amz-write-offset-bytes`, refused with `InvalidWriteOffset` anywhere but
-the current size, as S3 Express refuses it. ETags are the MD5, conditions
-are decided atomically against the object as it is, keys round-trip byte
-for byte, and the SDK's `aws-chunked` bodies are unframed. `scripts/s3-tests.sh`
-runs both suites against it by default, with both clients; against RustFS
-or `s3s-fs`, a second implementation's reading of the conditional writes,
-without appends; or against a bucket you name. RustFS honours conditional
-reads and makes versions from content, as S3 does; `s3s-fs` 0.17 ignores
-`If-None-Match` on reads and sends the body where S3 sends 304, which the
-store treats as a revalidation that found the version current.
+write of ours carries a nonce. The end-to-end tests run on the same store
+under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
+runs both against `s3s-fs`, a Rust S3 emulator, against RustFS, the other
+Rust S3 server, or against a bucket you name; the SDK examples run
+unchanged against a server on either. Both servers refuse conditional
+writes as S3 does. RustFS also honours conditional reads and makes
+versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
+on reads and sends the body where S3 sends 304, which the store treats as
+a revalidation that found the version current.
 
 ### Observability
 
@@ -373,18 +422,17 @@ the objects: what the simulator checks against the model (below).
 
 ### Simulation
 
-`echod-sim` runs several production decision cores over one in-memory store
-in a synchronous deterministic event loop. Virtual time advances directly
-to the next queued event, so the same seed replays the same run. The
-simulation owns every port: one clock the
+`echod-sim` runs several nodes over one in-memory store on one thread
+under tokio's paused clock, so time moves only between tasks and the same
+seed replays the same run. The simulation owns every port: one clock the
 clients stamp requests with and the nodes read (a node can be given skew,
 drift and jumps, backwards included, but the run leaves them off: the
 model it is checked against keeps one clock, and a node on a clock of its
 own would be reported, not tested); a store that
 answers nothing, loses acks or refuses conditional writes by seeded
 percentages and waits a seeded latency, and per node a store that can be cut
-off entirely; sent effects are recorded as model dispatches and checked
-against the bucket. Scheduled chaos events crash nodes, stop them
+off entirely; a bus that records every message as the model's dispatch and
+checks it against the bucket. A chaos task crashes nodes, stops them
 cleanly, starts new ones and cuts nodes off the store. Clients issue every
 request kind over a few origins, as the model types them; every attempt is
 a history entry, since an attempt that got no answer may have taken effect.
@@ -393,72 +441,22 @@ into the origins the clients work on, so fires collide with requests. The
 run ends with a read of every id, so what the bucket holds is what the
 model holds.
 
-The check is the Resonate model, the whole protocol
-as the Lean specification has it, through Rover execution
-(`rust/spec/rover/exec`): some
-execution of the model must show exactly what the clients saw and the bus
-carried, the model's internal work (a deadline, a lease's end, a resume, a
-retry, an occurrence) placed where the checker likes. The trace is what a
-client could record: every request as an invoke at the instant it was sent
-(its `head.debug_time`, which is the instant the node decides it at) and a
-return where its answer came, every message the bus carried as a receive,
-and the clock moving to the instants the nodes stamp at, the requests'
-and, through the notes port, the nodes' own sweeps and fires; a return or
-a receive moves the clock nowhere, since every instant the clock visits
-while a call is open is one more place the model may land its effect.
-Nothing else of the nodes' account enters. What makes the check hold is
-the protocol: a lease past its end reads as lost and a task's offers are
-on a grid (above), so the model's exact timers and the node's sweeps agree
-on every state a client can see. The one step that is not a projection, a
-schedule's occurrence, the model fires anywhere from its instant to
-`fire_within` later, two timer buckets here (`Options::fire_within`), the
-bound within which a node gets to a key. Clients are routed to an origin's
-owner, as a load balancer over the members would route them, which
-serialises an origin's requests behind one flight; `--misroute` sends a
-share elsewhere, where a read may miss a write the owner decided and has
-not landed, whose stamp precedes the read, which one clock cannot show.
-Besides that: every deadline a document owes has a key, every `execute`
-names a task that exists and every `unblock` a settled promise, every kind
-answered 200 at least once, and the history overlapped.
+The check executes the independent model in `abstract/`. A bounded
+existential search places overlapping calls and internal work—deadlines,
+leases, callbacks, listeners, retries and schedule occurrences—between the
+public invoke/return/receive/clock observations. `Ok` carries a replayable
+Abstract witness; an exhausted complete frontier is `Ko`; a width or node
+budget limit is `Unknown`. Independent origin components are searched
+separately and merged when an action spans them; schedules use global search.
+The default budget is two million semantic successors and width 512.
 
-`test/runtime/src/rover_sim.rs` is an isolated experiment using generic
-`RoverExec::exec` to generate a production-backed concrete trace before the
-same abstract check. It does not replace the primary DST.
-
-### Container chaos
-
-`scripts/chaos.sh` runs three disposable `echod` nodes over `fakes3`.
-Each node's PID 1 is `chaos-agent`, which starts and signals only its own
-child. The HTTP workload uses the current simulator generator and
-`echod-types` requests, translated at the harness boundary to the production
-wire protocol. It does not restore the old combined spec/execution crates
-or change the simulator's operation mix. Schedules are disabled in this
-bounded workload.
-
-The harness crashes, stops, pauses, partitions and slows nodes, then waits
-for every fault task before healing and settling the fleet. It checks
-observed state/version regressions, final reads, notifications, deadlines,
-current-format bucket documents and fleet health. These are black-box
-checks, not the simulator's typed model-history refinement proof: wall-clock
-HTTP observations lack the decision timestamps and autonomous steps that
-the model checker requires.
-
-Run `scripts/chaos.sh --no-chaos` for a healthy baseline, or
-`scripts/chaos.sh --seed 7 --duration-secs 120` for faults. Reports and logs
-land in `target/chaos/`. `--keep` retains that run's stopped containers in
-its uniquely named Compose project; remove that project explicitly when finished.
-Docker Compose (or `COMPOSE="podman compose"`) and a Linux container runtime
-supporting `NET_ADMIN`, iptables and optionally `sch_netem` are required.
-A missing netem capability is reported as skipped, not validated.
-
-Never point this tool at production. The agent requires explicit
-`--owned-test-node` acknowledgement and PID 1; the driver checks its ownership
-marker before faults. Control ports have no authentication and must stay on
-the private test network. Compose publishes no ports, mounts no host data
-into nodes and uses no host network or PID namespace. Cleanup flushes only
-the agent's exclusive firewall chains and removes only its tracked qdisc,
-never host firewall chains or store data. The script tears down only its
-own uniquely named Compose project.
+The trace contains only what a client and worker could record. Node notes
+provide clock marks and validated schedule-occurrence witnesses, but do not
+decide which Abstract internal action ran. The checker derives enabled work
+from candidate Abstract state. Clients are routed to an origin's owner by
+default; `--misroute` exercises other nodes. Besides model acceptance, the run
+checks timer-key coverage, message referents, request-kind coverage and
+overlap.
 
 ### Differential
 
@@ -466,96 +464,61 @@ own uniquely named Compose project.
 processes answering HTTP, on one seeded request stream: the reference's
 own differential's (its `diff/port.rs`), the same operation mix over the
 same small pools of ids, steered towards the operations not yet covered.
-Time is `head.debug_time` and moves only through `debug.tick`, which both
-servers honour in debug mode; echod answers `debug.tick`, `debug.snap` and
-`debug.reset` from `rust/impl/process/src/debug.rs`, as machines over store calls like
-everything else: a tick sweeps every origin at the instant and fires every
-schedule due, again and again until none is, as the timers would have had
-the clock passed through every instant on the way.
+Each process owns isolated volatile storage. echod uses its production clock
+and maintenance timers; the planner learns only from protocol responses.
 
 Every step sends one request to each server in turn and compares the
 response, the messages pushed to the harness's worker while it was
 answered (the sink is given a quiet moment, since echod pushes after it
-answers), and the `debug.snap` of the whole state afterwards. A run stops
-at its coverage plateau or at a step cap, over several seeds, and reports
-every divergence by class with the first example; a snapshot divergence
-ends the episode, since the states have parted.
+answers). A run stops at its coverage plateau or at a step cap, over several
+seeds, and reports every divergence by class with the first example.
 
 What is compared modulo known differences: `preload` (echod answers an
-empty one), `head.serverUrl` in execute messages, and an internal promise
-past its deadline (projected as expired in both, as the reference's
-harness does). Error reasons are compared word for word: the kernel
+empty one) and `head.serverUrl` in execute messages. Error reasons are
+compared word for word: the kernel
 proves the status, and `wire::reason_for` says why in the reference's
 words, by kind and status, and where one status has several causes (a
 callback's awaiter missing, or not a task, or the awaited not awaitable)
 by the state the step left, which the refusing checks did not change.
 The simulator's model renders its answers through the same function, so
-the checker compares like with like. One more is a
-deviation of the reference from the specification: on fulfilling a task
-it deletes that task from every promise's callbacks, pending ones
-included, which the catalogue's `monotone_promise_callbacks_grow_while_pending`
-forbids. echod removes a callback only when it is consumed, as the
-specification's `processCallback` does, so such callbacks are dropped
-from both snapshots before the comparison (`--strict-callbacks` keeps
-them). A second one: on a callback registered on a promise already
-settled, the reference resumes the awaiter at once, where the
-specification's `promiseRegisterCallback` answers the record and changes
-nothing; it shows in a task's `resumes` count, dropped likewise
-(`--strict-resumes` keeps it). The search operations are not in the
+the checker compares like with like. Internal callback and resume
+collections are outside this differential's public observations. The search operations are not in the
 stream: echod does not serve them. Nor is a fence creating a promise in
 another origin, where the two part by design ("The detached create"
 below); the simulator's workload has none either, its model being one
 origin at a time.
 
-Run over four seeds to their coverage plateaus, 164,800 steps in all,
-every response, message and snapshot agreed modulo the above; the two
-reference deviations were the only divergence classes found. Rerun after
-the detached create (two seeds, 63,200 steps), the same.
-
-### The model driver
-
-`rust/test/cli/model` drives echod with the Resonate model, an
-executable specification in Verus of the whole protocol as the Lean
-specification has it (promises, callbacks, listeners,
-tasks with leases, resumes and redispatch, halt and continue, schedules),
-and checks every recorded trace against it: an execution of the model must
-produce exactly the observations, with the model's internal work (a
-deadline, a lease, a resume, a retry, an occurrence) placed where the
-checker likes. A run resets echod and takes the model's own actions, the
-ones it suggests from the state it reads back through `debug.snap` (fences
-at the held and a stale version, the clock to just before and at each
-deadline, a settle while a task awaits, a schedule's run) or random ones; a
-request is sent with the run's clock as `head.debug_time`, a clock move is
-handed to echod as `debug.tick`, and every `execute` and `unblock` the sink
-receives is a dispatch, with the address it came to. Then the model's
-finishing reads. The marks of the execution that explains an accepted trace
-are the coverage. echod runs with the model's retry timeout.
-
-Nothing is translated: a detached create is sent as any other fence, and
-`task.create` in every state. One request is not sent: a timer created with
-a target, which echod accepts with the target dropped (a concession to the
-SDKs' sleep, `wire::create_tags`) and the model refuses, as the Lean
-specification does.
-
 ### The detached create
 
 A fence whose create names a promise in another origin starts a detached
 workflow. The two live on different documents, so they cannot commit as
-one write: the create goes first, as a request of its own on its origin's
-document, and the fence's check (`task_fence_check`, the kernel's fence
-with no action) follows on the task's. A stale fence still leaves the
-promise created, and answers its 409; the fence's answer is the check's
-status with the create's record inside when it held. `dispatch::decode`
-splits the request in two (`Decoded::then`), `flight::Stage` carries the
-request through its two commits. A settle in another origin is refused,
-as the reference server refuses it. The reference allows a cross-origin
-create of a root id alone (an id with no `:`), and checks the fence first;
-echod allows any id, and creates first.
+one write. The order is the fence's check first (`task_fence_check`, the
+kernel's fence with no action) on the task's document, a read that
+commits nothing; a fence that does not hold is answered there, with its
+409 or 404, and creates nothing. When it holds, the create follows as a
+request of its own on its origin's document, and the fence's answer is
+200 with the record created inside. Between the two, anything may happen:
+a fence whose lease lapses after its check still creates, and the client
+is told it held. `dispatch::decode` splits the request in two
+(`Decoded::then`), `flight::Stage` carries it from the check to the
+create. A settle in another origin is refused, as the reference server
+refuses it. The reference checks the fence first too, and allows a
+cross-origin create of a root id alone (an id with no `:`); echod allows
+any id.
+
+The Abstract model in `abstract/` does exactly the same, step for step,
+rather than claiming an atomicity the system does not have:
+`system::decompose` turns a detached fence into `TaskFenceCheck` then
+`PromiseCreate`, the create enabled only by a check that held,
+`compose_detached` builds the fence's answer from the check's status and
+the record created, and the checker admits any work between the two
+steps. A schedule's fire is split the same way, `ScheduleFire` (the
+occurrence's promise, if absent) then `ScheduleAdvance` (enabled only once
+that promise exists), which is the Occurrences theorem stated as two
+Abstract steps: a crash between them re-fires the same occurrence, never
+skips it.
 
 ## echod-system
-
-This model is not in the tree. What follows is the proof it held, kept
-here so the concrete theorems have a statement to be restated from.
 
 The whole system as a state machine, in the shape Anvil gives a
 Kubernetes cluster: a state, a `Step` for every action, each action an
@@ -583,10 +546,12 @@ its deadline keys (the key kept for each origin, with the version written
 with it). `Commit` (`commit.rs`) is one commit's decisions: the previous
 key, whether to arm, what to delete, what to keep. Each function `ensures`
 it equals the specification function of the same name on the state's
-view. `steps.rs` verifies the loops the node runs around the kernel:
-`sweep` leaves nothing due at its instant and leaves the document as it
-was if nothing fired; `drain` is kernel steps; `next_deadline` is the
-least deadline; `clamp_now` the later of clock and stamp. One primitive
+view. `steps.rs` verifies the node's single normalization pass: `sweep`
+projects every deadline, reclaims every lease, spends every callback,
+spends every listener, then dispatches every retry; it leaves nothing due
+at its instant and leaves the document as it was if nothing fired.
+`next_deadline` is the least deadline; `clamp_now` the later of clock and
+stamp. One primitive
 is trusted with its meaning stated: FNV-1a is a function of the string,
 as `str == str` and `String::clone` are.
 
@@ -606,16 +571,19 @@ The actions: a clock advances; a node joins or crashes; a node drops a
 cache entry; and the commit, five actions, one store round trip each.
 `Prepare` loads the bucket's document and decides a step on it, and
 touches nothing: for a request, the document after is the kernel's
-`spec_handle` of the one loaded followed by any sequence of internal
-steps at the same instant, what `drain` ensures; for a sweep, what `sweep`
-then `drain` ensure. `AddTimer`
+`spec_handle` of the normalized document followed by the same single
+normalization pass. The system proof consumes the pass through its weaker
+`drained` relation (a sequence of legal internal steps with stable keys).
+For timer work, `Prepare` consumes one `sweep`. `AddTimer`
 puts the key for the document's nearest deadline. `Process` puts the
 document conditionally on the version loaded: the commit of a changed
 document, or the rewrite that collects a fired key behind an unchanged
 one. `DelTimer` deletes the key replaced and the key fired, and the node
 remembers the key kept. `Done` closes a request that changed nothing,
-with no round trip. A request's response joins a ghost log at `Process`
-or at `Done`, when the client is answered. Each put carries the store's
+with no round trip. A request's response joins a ghost log at `Process`,
+when its write lands, or at `Prepare` when it changed nothing — at the
+read its answer was decided from, which is the instant the answer is
+linearized at. Each put carries the store's
 answer: applied, refused by its condition — both decided by the bucket's
 contents — or unknown, where the bucket applied it or did not,
 nondeterministically, and the node, told only that it failed, forgets
@@ -656,15 +624,15 @@ bucket once ahead of the clock and fires what it owns from its wheel, so a
 key another node arms into a bucket already listed, for a target this node
 owns, would wait for the next membership change; the node lists a bucket
 once more when the clock leaves it, which bounds the wait by a bucket or
-two (`handler_timers`, `Listing::Relist`). The simulator found the gap through
+two (`timers.rs`, `Listing::Relist`). The simulator found the gap through
 a schedule created on one node and owned by another, never fired. The
 Occurrences theorem is why a fire commits the origin before the schedule.
 
 What the model asks of a node's step is exactly what the node's verified
-functions ensure, and nothing else. A request's document is the handler's
-function then `drain`; a sweep's is `sweep` then `drain`; a fire's two are
-`spec_fire` then `drain`, and a schedule's key with nothing due is what
-`schedule_due` answers. `drain` and `sweep` are proved to keep every
+functions ensure, and nothing else. A request normalizes, runs the handler,
+then normalizes its result once; timer work is one normalization; a fire is
+`spec_fire` followed by one normalization, and a schedule's key with nothing
+due is what `schedule_due` answers. The normalization is proved to keep every
 object's key and the schedules; every handler is proved to drop no object
 and to keep the other kind's rows (`lemma_spec_handle_keeps`). From these
 the proof derives what it needs of a step — that a document keeps its
@@ -676,6 +644,47 @@ All four as corollaries of one invariant that `init` establishes and every
 action preserves, assembled into `spec ⊨ □inv` by the embedding's induction
 rule. A witness shows the invariant is not vacuous. Nothing is assumed of
 any clock.
+
+A fifth theorem, in `refinement/` (`system_sim.rs`,
+`theorem_system_refines_abstract`), is the one the others serve:
+
+- **Refinement.** In every execution from `init` by `next` within the
+  doors, it is always the case that the requests served so far, with the
+  answers they were given, are the responses of some Abstract run from the
+  Abstract's initial state — a run that ends related to the bucket read as
+  one kernel state, every object in its origin's document and every
+  schedule in its own. The Abstract run is constructed, step by step.
+
+The statement is on what is observed, the ghost log; the states are
+related through the bucket, not aligned step by step, so the fleet's
+interleavings, retries and lost acknowledgements are free. The proof is an
+invariant by the same induction rule: the bucket is partitioned, every
+flight is the kernel's functions on what it loaded, and some Abstract run
+explains the cluster. A step that moves only a node or a timer, or
+rewrites a document with its own content, keeps the run; a commit writes
+one document's kernel step, which by locality is that step on the whole
+bucket, and so, by the document-level theorem, an Abstract run; a fire is
+two commits, the promise's then the schedule's advance, as the Abstract
+fires in two. A request that changed nothing is answered at its read,
+where its answer was decided; the model logs it there, which is what made
+the log linearizable.
+
+The doors (`admitted`) are the document theorem's on each step — the
+wire's numeric bounds, canonical ids, no targeted timer — with a
+heartbeat's refs of one origin and a well-formed id for each occurrence's
+promise. One hypothesis is on behaviours, not on inputs: `schedule_held`,
+that a fire's schedule document is as the fire read it until the promise's
+commit. The proof found it. The node commits the occurrence's promise on
+the origin's document conditionally on that document's version alone;
+another node may delete and recreate the schedule between the fire's read
+and that commit, and then the promise written is one the Abstract never
+creates, since its fire is of a schedule that exists. The fix is the
+node's: carry the schedule's version into the origin's commit, or re-read
+the schedule before it. Until then the theorem holds of the executions in
+which a schedule's document does not move while a fire from it is between
+its read and the promise's commit — which also sets aside the benign case
+of two nodes firing the same occurrence, where the second finds the
+promise already there.
 
 The proof changed the design twice. A node that fires a key could delete
 it while a commit that armed it was still between its key and its
@@ -696,12 +705,11 @@ specification functions; their executable functions are verified
 to compute those functions; `echod-logic` keeps its membership, cache and
 deadline-key state in the core and takes its decisions from it, runs
 the step module's loops, and serves every request through the kernel's
-`handle`: the runtime turns the envelope into a `Request`, the core makes one
-call, and the runtime renders the `Response`, so the request the model's `Prepare`
+`handle`: the dispatch turns the envelope into a `Request`, makes one
+call, and renders the `Response`, so the request the model's `Prepare`
 carries is the request the node runs. That is Anvil's shape of refinement: functional,
-per step, with a trusted shim. The shim here is `handler_docs`,
-`handler_sched`, `handler_node` and `handler_timers`, and it is now a pure
-function of its events: that the
+per step, with a trusted shim. The shim here is `flight.rs`, `members.rs`
+and `timers.rs`, and it is now a pure function of its events: that the
 configuration handed to `read_config` is the object read, that every
 version read or written is reported, that the store calls are issued in
 the protocol's order with the decisions the core made, that the document
@@ -715,6 +723,6 @@ version per content. The S3 model's fidelity and liveness are not proved.
 `examples/ts` runs the TypeScript SDK against the node. The SDK's default
 message source long-polls; `examples/ts/push.ts` is the push side, an HTTP
 listener plugged into the SDK's `HttpNetwork` as its adapter, so the worker's
-address is a URL. One concession in the runtime's codec: the SDK creates a sleep as a
+address is a URL. One concession in `wire.rs`: the SDK creates a sleep as a
 timer with a target, which the specification refuses; the node drops the
 target, and the timer is armed on its own as the specification arms it.
