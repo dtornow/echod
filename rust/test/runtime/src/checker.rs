@@ -162,7 +162,10 @@ mod tests {
             now: at,
             invoke: at,
             ret: at,
-            outcome: None,
+            outcome: Some(echod_types::Response::Promise(echod_types::PromiseRes {
+                status: 404,
+                promise: None,
+            })),
             attempts: 1,
         };
         let sent = Sent {
@@ -176,6 +179,7 @@ mod tests {
         let clock = events.iter().position(|e| matches!(e, HistoryEvent::Clock { at: t } if *t == at)).unwrap();
         let invoke = events.iter().position(|e| matches!(e, HistoryEvent::Invoke { call: 214, .. })).unwrap();
         let receive = events.iter().position(|e| matches!(e, HistoryEvent::Receive { .. })).unwrap();
-        assert!(clock < invoke && invoke < receive);
+        let ret = events.iter().position(|e| matches!(e, HistoryEvent::Return { call: 214, .. })).unwrap();
+        assert!(clock < invoke && invoke < receive && receive < ret);
     }
 }

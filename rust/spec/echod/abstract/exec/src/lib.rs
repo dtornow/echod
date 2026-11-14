@@ -13,3 +13,6 @@ pub mod coverage;
 
 pub use echod_abstract_spec::Config;
 pub use rover::{Proc, Spec};
+
+#[cfg(test)]
+mod protocol_bounds_tests;
