@@ -10,15 +10,15 @@ use vstd::prelude::*;
 use rover_spec::rover::comm::{ProcessEvent, Time};
 use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
 
-use crate::model::{Config, Message, Pid, Proc};
+use crate::rover::{Config, Message, Pid, Proc};
 #[cfg(verus_keep_ghost)]
-use crate::model::spec_world;
-use crate::node::{DocumentBodyV, NodeV};
+use crate::rover::spec_world;
+use crate::state::{DocumentBodyV, NodeV};
 #[cfg(verus_keep_ghost)]
-use crate::node::{spec_owns, spec_sorted_present};
-use crate::store::StoreV;
+use crate::state::{spec_owns, spec_sorted_present};
+use crate::state::StoreV;
 #[cfg(verus_keep_ghost)]
-use crate::store::{spec_before, spec_find};
+use crate::state::{spec_before, spec_find};
 
 verus! {
 

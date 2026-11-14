@@ -12,7 +12,7 @@ use echod_types::{
 #[cfg(verus_keep_ghost)]
 use echod_types::origin;
 #[cfg(verus_keep_ghost)]
-use crate::store::spec_sat_add;
+use crate::state::spec_sat_add;
 #[cfg(verus_keep_ghost)]
 use crate::document::{
     callback_targets_well_formed, promise_well_formed, suspended_rung_well_formed,
@@ -20,7 +20,7 @@ use crate::document::{
     StoredDocumentV, TkV, WorkflowDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::node::{
+use crate::state::{
     spec_advance_stored, spec_awaitable, spec_body_deadline, spec_earliest_in,
     spec_due_id, spec_handle, spec_key, spec_obj_due, spec_project_obj, spec_request_document, spec_request_transition,
     spec_resume, spec_run_due, spec_sorted, spec_sorted_present, spec_stored_body, spec_sweep,

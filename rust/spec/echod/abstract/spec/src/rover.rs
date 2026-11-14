@@ -9,8 +9,6 @@ use rover_spec::rover::RoverSpec;
 use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
 use echod_types::{Request, Response};
 use super::state::*;
-use super::requests::*;
-use super::work::*;
 use super::protocol::{BoundaryEvent, Call, Message, Output};
 #[cfg(verus_keep_ghost)]
 use super::axioms::{pset_seq, spec_expand};

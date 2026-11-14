@@ -1,4 +1,8 @@
 //! Standalone mathematical Resonate model interpreted by Rover.
+//!
+//! `state.rs` contains state, request, and internal-work transitions;
+//! `rover.rs` contains process orchestration and the Rover adapter.
+//! Property claims and proofs remain separate.
 
 #![allow(
     clippy::ptr_arg,
@@ -12,8 +16,6 @@
 
 pub mod state;
 pub mod protocol;
-pub mod requests;
-pub mod work;
 pub mod rover;
 pub mod property_claim;
 #[cfg(verus_keep_ghost)]

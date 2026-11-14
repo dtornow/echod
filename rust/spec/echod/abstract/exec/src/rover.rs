@@ -12,7 +12,7 @@ use echod_abstract_spec::state::Config;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::pset_seq;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::requests::spec_handler;
+use echod_abstract_spec::state::spec_handler;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::rover::{
     empty_store, lemma_losses_map, remove_at, spec_derived, spec_due_result, spec_idle,
@@ -25,7 +25,7 @@ use echod_abstract_spec::rover::{Pid, Proc as SpecProc, Spec as SpecModel};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::work::spec_body;
+use echod_abstract_spec::state::spec_body;
 
 verus! {
 #[derive(Clone, PartialEq, Eq, Debug)]

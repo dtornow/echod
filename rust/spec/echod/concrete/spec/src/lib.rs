@@ -14,9 +14,8 @@
 //! and takes one flight at a time.
 //!
 //! ```text
-//! node.rs             document/node state and transitions
-//! store.rs            passive calls/outcomes and the mathematical store step
-//! model.rs            the Rover spec: nodes, one store, the initial world, one step
+//! state.rs            node and store state, protocol algebra, and transitions
+//! rover.rs            the Rover spec: nodes, one store, the initial world, one step
 //! property_claim.rs   concrete integrity statements
 //! property_proof.rs   their machine-checked proofs
 //! ```
@@ -27,19 +26,18 @@
 )]
 #![allow(non_shorthand_field_patterns)]
 
-pub mod node;
+pub mod state;
 pub mod document;
 pub mod request_claim;
 pub mod effects_claim;
 #[cfg(verus_keep_ghost)]
 mod document_proof;
-pub mod store;
-pub mod model;
+pub mod rover;
 pub mod property_claim;
 #[cfg(verus_keep_ghost)]
 mod property_proof;
 
-pub use model::{Config, Proc, Spec};
-pub use store::{Etag, Read, StoreReq, StoreError, StoreRes};
+pub use rover::{Config, Proc, Spec};
+pub use state::{Etag, Read, StoreReq, StoreError, StoreRes};
 #[cfg(verus_keep_ghost)]
 pub use property_proof::property_proof;
