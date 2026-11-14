@@ -1,24 +1,20 @@
 # echod
 
 A Resonate server whose only durable state is objects in an S3 bucket, with
-the state machine it runs verified in Verus, from one document up through
-the whole process.
+Verus specifications and proof code for its document and process transitions.
+The inherited trust limitations below prevent a formal correctness claim.
 
 The server speaks the Resonate protocol, one `POST /` and one envelope. Every
 origin is one document in the bucket, committed with a conditional write;
 deadlines are keys; nodes find each other in the bucket. What the server does
-to a document is `echod_logic::concrete`'s document machine, each step proved
-to compute `echod_concrete_spec`'s specification, and
-`echod_refinement` proves that model refines the abstract Resonate
-model. The process around it, `echod_logic`, is proved
-whole: `State::on_event`, the one step of the node — a request, a store
-answer, the heartbeat, the wheel — ensures it computes `spec_on_event`, and
-every function beneath it ensures its own specification, the membership, the
-cache, the deadline keys, and the order of the store calls that commit a step
-— key, document, previous key, fired key — included. What the proof assumes,
-the text of keys, the bytes of documents, hashing, and S3 itself, is listed in
-`rust/impl/process/src/verified/mod.rs`; a deterministic simulator holds the
-whole to the Resonate model under crashes, outages and lost acks.
+to a document is `echod_logic::concrete`'s document machine, specified by
+`echod_concrete_spec`; `echod_refinement` contains the concrete-to-abstract
+refinement proof code. The process contract relates `State::on_event` to
+`spec_on_event`, including membership, cache, deadline keys, and store-call
+ordering. These checks depend on trusted assumptions, including declarations
+in `rust/impl/process/src/verified/mod.rs` and the limitations below.
+The deterministic simulator supplies runtime evidence under crashes, outages,
+and lost acknowledgements.
 
 ## Layout
 
@@ -41,7 +37,6 @@ lean/src/concrete     nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
 jeps                  Jepsen, from outside the process: a pass means the pipeline a client can see produced a correct result
-rust/impl/box         optional Docker/Nix development CLI (not a server dependency)
 rust/experiment/claude-quickjs  optional Messages API agent-loop experiment
 ```
 
@@ -75,6 +70,28 @@ the process's concrete document module; its mathematical counterpart is
 
 These local transitions do not establish global document invariants.
 
+## Verification scope and deferred trust repair
+
+Runtime tests and successful Verus runs are separate evidence. The inherited
+`axiom_next_cron_after` in `rust/spec/echod/abstract/spec/src/axioms.rs` asserts
+that a `u64` result exceeds every `u64` input, which is inconsistent at
+`u64::MAX`; executable cron wrappers also promise this unconditionally.
+String, byte-vector, and dispatch realization contracts assume that arbitrary
+mathematical views have Rust representatives. They need representability
+premises and propagation through callers; a character-count bound alone does
+not establish UTF-8 byte capacity.
+
+Repair is deferred to the retained `prove-trust-contracts` work. No partial
+contract tightening is included here. Until those assumptions and their
+callers are repaired, passing Verus checks must not be treated as soundness or
+formal correctness validation.
+
+The simulator's Rover certificates target the finer-grained abstract model:
+raw request handlers with separate internal work steps. They do not establish
+the production request's atomic pre/post-closure contract. A bounded search
+that finds no certificate reports `Unknown`, not a correctness verdict.
+Verified atomic-checker alignment and representation redesign remain deferred.
+
 ## Build, verify, soak
 
 ```
@@ -99,50 +116,7 @@ and echod in debug mode and drives both over HTTP. The model driver is
 path. `cargo build` is the other compiler for the same sources: it sees the
 executable code alone.
 
-## Optional development tools
-
-Neither tool is started by the server or reads credentials during a normal
-server build/run. Workspace tests include their offline tests.
-
-The `box` binary opens the current directory at `/workspace` in an ephemeral
-Docker container. It first applies `~/.box/.box.nix`, when present, and then
-the current directory's `box.nix`, using nested `nix-shell` environments
-before opening Bash. The global `~/.box` directory is mounted read-only; the
-working directory is mounted read-write. Container deletion does not undo
-changes to the working directory. Run only trusted Nix expressions and images.
-
-```sh
-cargo install --path rust/impl/box --locked
-box
-box -- cargo test
-box --credential ANTHROPIC_API_KEY
-BOX_CREDENTIALS=ANTHROPIC_API_KEY,OPENAI_API_KEY box
-```
-
-Credential forwarding is opt-in. Values are inherited by Docker rather than
-placed in its command line, but are readable inside the container and by
-Docker administrators. Do not use this mode as secret isolation.
-
-`box.nix` is a normal Nix shell expression:
-
-```nix
-{ pkgs ? import <nixpkgs> {} }:
-pkgs.mkShell {
-  packages = with pkgs; [ git rustc cargo ];
-}
-```
-
-Docker and network access to pull `nixos/nix:latest` are required. Override
-the runtime or image with `--runtime` / `BOX_RUNTIME` and `--image` /
-`BOX_IMAGE`; for example, `BOX_RUNTIME=podman box`.
-
-The vendored Strands credential and egress-gateway libraries retain their
-licenses and upstream documentation under `rust/vendor/strands-box`.
-They are excluded from workspace membership and disabled in normal builds.
-`cargo check -p echod-box --features strands-proxy --locked` explicitly compiles
-them, but **does not start a proxy or provide proxy custody of credentials**.
-Their upstream guidance refers to the original Strands repository; those
-upstream consumers and policy components are not part of echod.
+## Optional QuickJS experiment
 
 The [QuickJS experiment](rust/experiment/claude-quickjs/README.md) runs a small
 Messages API loop, not an agent SDK. It requires an explicit model, prompt, and
@@ -150,6 +124,6 @@ API key to make paid calls. Its unit tests use synthetic responses with no
 external API calls:
 
 ```sh
-cargo test -p echod-box -p claude-quickjs --locked
+cargo test -p claude-quickjs --locked
 cargo run -p claude-quickjs -- --help
 ```
