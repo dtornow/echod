@@ -19,6 +19,13 @@ members = [
   "rust/test/cli/model",
   "rust/test/cli/store",
   "rust/test/cli/fakes3",
+  "rust/impl/box",
+  "rust/experiment/claude-quickjs",
+]
+exclude = [
+  "rust/vendor/strands-box",
+  "rust/vendor/strands-box/credentials",
+  "rust/vendor/strands-box/egress-gateway",
 ]
 
 [workspace.package]
