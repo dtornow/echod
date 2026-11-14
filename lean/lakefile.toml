@@ -34,4 +34,5 @@ roots = [
   "refinement_handlers",
   "refinement_proof",
   "refinement_claim",
+  "settlement_tests",
 ]
