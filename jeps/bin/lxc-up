@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Jepsen LXC nodes for echod.
+#
+# Each node is its own network namespace on lxcbr0 (10.0.3.0/24). That is
+# what makes --nemesis partition real: iptables inside the node drops only
+# the bucket port, and the client on the host can still talk to the node.
+#
+# This machine may not be running systemd. The script brings the bridge,
+# NAT, and DHCP up itself when lxc-net cannot start. Docker-style hosts
+# keep FORWARD DROP in iptables-legacy, and an nft masquerade never sees
+# those packets, so the rules go in both tables.
+#
+#   jeps/bin/lxc-up
+#   JEPS_LXC_NODES=2 jeps/bin/lxc-up
+set -euo pipefail
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  exec sudo -E -- "$0" "$@"
+fi
+
+NODES="${JEPS_LXC_NODES:-2}"
+BRIDGE=lxcbr0
+GW=10.0.3.1
+CIDR=10.0.3.0/24
+DHCP_START=10.0.3.2
+DHCP_END=10.0.3.200
+STORE_PORT="${JEPS_STORE_PORT:-18014}"
+STORE_ROOT="${JEPS_STORE_ROOT:-/var/lib/jeps/s3}"
+S3S="${JEPS_S3S_FS:-}"
+if [[ -z "$S3S" ]]; then
+  if command -v s3s-fs >/dev/null 2>&1; then
+    S3S="$(command -v s3s-fs)"
+  elif [[ -x /usr/local/cargo/bin/s3s-fs ]]; then
+    S3S=/usr/local/cargo/bin/s3s-fs
+  fi
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+if ! command -v lxc-create >/dev/null 2>&1 || ! command -v dnsmasq >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq lxc lxc-templates debootstrap dnsmasq iptables iproute2 bridge-utils curl ca-certificates openssh-client sshpass
+fi
+if ! command -v sshpass >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq sshpass
+fi
+
+if ! ip link show "$BRIDGE" >/dev/null 2>&1; then
+  ip link add "$BRIDGE" type bridge
+fi
+ip addr show "$BRIDGE" | grep -q "${GW}/" || ip addr add "${GW}/24" dev "$BRIDGE" || true
+ip link set "$BRIDGE" up
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+allow_bridge() {
+  local ipt="$1"
+  "$ipt" -C FORWARD -i "$BRIDGE" -j ACCEPT 2>/dev/null || "$ipt" -I FORWARD 1 -i "$BRIDGE" -j ACCEPT
+  "$ipt" -C FORWARD -o "$BRIDGE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    "$ipt" -I FORWARD 1 -o "$BRIDGE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  "$ipt" -t nat -C POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE 2>/dev/null || \
+    "$ipt" -t nat -A POSTROUTING -s "$CIDR" ! -d "$CIDR" -j MASQUERADE
+}
+allow_bridge iptables
+if command -v iptables-legacy >/dev/null 2>&1; then
+  allow_bridge iptables-legacy
+fi
+
+DNS_PID=/run/lxc-dnsmasq.pid
+if [[ -f "$DNS_PID" ]] && kill -0 "$(cat "$DNS_PID")" 2>/dev/null; then
+  echo "dnsmasq already running"
+else
+  dns_upstream="$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf)"
+  dns_upstream="${dns_upstream:-1.1.1.1}"
+  mkdir -p /var/lib/misc
+  dnsmasq --interface="$BRIDGE" --bind-interfaces --except-interface=lo \
+    --dhcp-range="${DHCP_START},${DHCP_END},12h" \
+    --dhcp-leasefile=/var/lib/misc/lxc-dnsmasq.leases \
+    --pid-file="$DNS_PID" --dhcp-authoritative --no-hosts \
+    --server="$dns_upstream"
+fi
+
+mkdir -p /etc/lxc
+cat > /etc/lxc/default.conf <<EOF
+lxc.net.0.type = veth
+lxc.net.0.link = ${BRIDGE}
+lxc.net.0.flags = up
+lxc.apparmor.profile = unconfined
+lxc.apparmor.allow_nesting = 1
+EOF
+
+unconfine() {
+  local cfg="$1"
+  if grep -q '^lxc.apparmor.profile' "$cfg"; then
+    sed -i 's/^lxc.apparmor.profile.*/lxc.apparmor.profile = unconfined/' "$cfg"
+  else
+    echo 'lxc.apparmor.profile = unconfined' >> "$cfg"
+  fi
+}
+
+names=()
+for i in $(seq 1 "$NODES"); do
+  names+=("n${i}")
+done
+
+for name in "${names[@]}"; do
+  cfg="/var/lib/lxc/${name}/config"
+  if [[ ! -f "$cfg" ]]; then
+    lxc-create -n "$name" -t download -- --dist ubuntu --release noble --arch amd64
+  fi
+  unconfine "$cfg"
+  if ! lxc-info -n "$name" -s 2>/dev/null | grep -q RUNNING; then
+    lxc-start -n "$name" -l info -o "/tmp/lxc-${name}.log"
+  fi
+done
+
+wait_ip() {
+  local name="$1" ip=""
+  for _ in $(seq 1 60); do
+    ip="$(lxc-info -n "$name" -iH 2>/dev/null | awk 'NF {print; exit}')"
+    if [[ -n "$ip" && "$ip" != "-" ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "no DHCP address for $name" >&2
+  return 1
+}
+
+declare -A ips=()
+for name in "${names[@]}"; do
+  ips["$name"]="$(wait_ip "$name")"
+  echo "$name ${ips[$name]}"
+done
+
+for name in "${names[@]}"; do
+  echo "provision $name"
+  lxc-attach -n "$name" -- bash -s <<'EOS'
+set -euo pipefail
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq openssh-server sudo iptables iproute2 curl ca-certificates >/dev/null
+echo 'root:root' | chpasswd
+mkdir -p /etc/ssh/sshd_config.d
+printf '%s\n' 'PermitRootLogin yes' 'PasswordAuthentication yes' > /etc/ssh/sshd_config.d/jeps.conf
+systemctl enable ssh >/dev/null 2>&1 || true
+systemctl restart ssh
+EOS
+done
+
+sed -i '/# jeps-lxc$/,/# jeps-lxc-end$/d' /etc/hosts
+{
+  echo '# jeps-lxc'
+  for name in "${names[@]}"; do
+    echo "${ips[$name]} $name"
+  done
+  echo '# jeps-lxc-end'
+} >> /etc/hosts
+
+owner="${SUDO_USER:-}"
+home=""
+if [[ -n "$owner" ]]; then
+  home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+fi
+if [[ -n "$owner" && -n "$home" && -d "$home" ]]; then
+  mkdir -p "$home/.ssh"
+  chown "$owner:$owner" "$home/.ssh"
+  key="$home/.ssh/jeps_lxc"
+  if [[ ! -f "$key" ]]; then
+    sudo -u "$owner" ssh-keygen -t ed25519 -f "$key" -N '' -C jeps-lxc >/dev/null
+  fi
+  pub="$(cat "$key.pub")"
+  for name in "${names[@]}"; do
+    lxc-attach -n "$name" -- bash -c 'mkdir -p /root/.ssh && chmod 700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys'
+    if ! lxc-attach -n "$name" -- grep -qxF "$pub" /root/.ssh/authorized_keys; then
+      printf '%s\n' "$pub" | lxc-attach -n "$name" -- tee -a /root/.ssh/authorized_keys >/dev/null
+    fi
+  done
+  touch "$home/.ssh/known_hosts"
+  for name in "${names[@]}"; do
+    ssh-keygen -R "$name" -f "$home/.ssh/known_hosts" >/dev/null 2>&1 || true
+    ssh-keygen -R "${ips[$name]}" -f "$home/.ssh/known_hosts" >/dev/null 2>&1 || true
+    ssh-keyscan -H "$name" "${ips[$name]}" >> "$home/.ssh/known_hosts" 2>/dev/null || true
+  done
+  chown -R "$owner:$owner" "$home/.ssh"
+fi
+
+for name in "${names[@]}"; do
+  sshpass -p root ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+    "root@${name}" 'echo ssh-ok; iptables -S OUTPUT >/dev/null'
+  echo "ssh root@${name} ok"
+done
+
+if [[ -n "$S3S" && -x "$S3S" ]]; then
+  mkdir -p "$STORE_ROOT/echod" /var/lib/jeps
+  if ! timeout 1 bash -c "echo >/dev/tcp/${GW}/${STORE_PORT}" 2>/dev/null; then
+    nohup "$S3S" --host "$GW" --port "$STORE_PORT" --access-key k --secret-key s "$STORE_ROOT" \
+      >>/var/lib/jeps/s3s.log 2>&1 &
+    echo $! >/var/lib/jeps/s3s.pid
+    for _ in $(seq 1 50); do
+      if timeout 1 bash -c "echo >/dev/tcp/${GW}/${STORE_PORT}" 2>/dev/null; then
+        break
+      fi
+      sleep 0.2
+    done
+  fi
+  echo "s3s-fs http://${GW}:${STORE_PORT} bucket s3://echod"
+else
+  echo "s3s-fs not found; start it yourself on ${GW}:${STORE_PORT}" >&2
+fi
+
+echo
+echo "Jepsen's SSH client throws if no agent is running, before it tries a password."
+echo "eval \"\$(ssh-agent -s)\" && ssh-add ~/.ssh/jeps_lxc"
+echo
+echo "AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s AWS_REGION=us-east-1 AWS_EC2_METADATA_DISABLED=true \\"
+echo "lein run test --bin ../target/release/echod \\"
+echo "  --store s3://echod --endpoint http://${GW}:${STORE_PORT} \\"
+echo "  --region us-east-1 --worker-host ${GW} \\"
+printf '  --nemesis partition'
+for name in "${names[@]}"; do
+  printf ' -n %s' "$name"
+done
+echo

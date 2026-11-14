@@ -40,6 +40,7 @@ lean/src/abstract     the Resonate model, for experiment
 lean/src/concrete     nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
+jeps                  Jepsen, from outside the process: a pass means the pipeline a client can see produced a correct result
 rust/impl/box         optional Docker/Nix development CLI (not a server dependency)
 rust/experiment/claude-quickjs  optional Messages API agent-loop experiment
 ```
