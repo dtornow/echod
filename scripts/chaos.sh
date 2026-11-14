@@ -8,7 +8,7 @@
 #   scripts/chaos.sh                        # seed 1, a minute of faults
 #   scripts/chaos.sh --seed 7 --duration-secs 120
 #   scripts/chaos.sh --no-chaos             # the same run on a healthy fleet
-#   scripts/chaos.sh --keep                 # leave the fleet up afterwards
+#   scripts/chaos.sh --keep                 # retain stopped containers for inspection
 #   COMPOSE="podman compose" scripts/chaos.sh
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

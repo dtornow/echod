@@ -445,8 +445,8 @@ the model checker requires.
 
 Run `scripts/chaos.sh --no-chaos` for a healthy baseline, or
 `scripts/chaos.sh --seed 7 --duration-secs 120` for faults. Reports and logs
-land in `target/chaos/`. `--keep` leaves that run's uniquely named Compose
-project up for inspection; remove that project explicitly when finished.
+land in `target/chaos/`. `--keep` retains that run's stopped containers in
+its uniquely named Compose project; remove that project explicitly when finished.
 Docker Compose (or `COMPOSE="podman compose"`) and a Linux container runtime
 supporting `NET_ADMIN`, iptables and optionally `sch_netem` are required.
 A missing netem capability is reported as skipped, not validated.
