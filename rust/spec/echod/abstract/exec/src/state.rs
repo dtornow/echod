@@ -371,7 +371,7 @@ pub open spec fn exec_server_ok(s: Store) -> bool {
 /// its delay.
 pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, tags: &Tags, runnable: bool) -> (born: (Promise, Option<Task>))
     ensures
-        promise_ok(born.0),
+        exec_promise_ok(born.0),
         born.0.timeout_at == timeout_at,
         born.0@ == spec_new_object(timeout_at, at, now, *param, *tags, runnable).0,
         match born.1 {
@@ -419,7 +419,7 @@ pub(crate) fn new_object(timeout_at: Time, at: Time, now: Time, param: &Value, t
     proof {
         assert(promise.created_at <= timeout_at);
         assert(promise.settled_at == if live_now { None } else { Some(timeout_at) });
-        assert(promise_ok(promise));
+        assert(exec_promise_ok(promise));
     }
     (promise, task)
 }

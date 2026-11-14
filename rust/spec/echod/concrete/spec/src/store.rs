@@ -54,23 +54,6 @@ pub enum StoreReq {
 }
 
 
-impl StoreReq {
-    #[verifier::external_body]
-    pub fn key(&self) -> &str {
-        match self {
-            StoreReq::Get { key }
-            | StoreReq::GetIfNoneMatch { key, .. }
-            | StoreReq::PutIfMatch { key, .. }
-            | StoreReq::PutIfNoneMatch { key, .. }
-            | StoreReq::AppIfMatch { key, .. }
-            | StoreReq::Put { key, .. }
-            | StoreReq::Del { key } => key,
-            StoreReq::List { prefix, .. } | StoreReq::ListPrefixes { prefix } => prefix,
-        }
-    }
-}
-
-
 /// The operation-shaped response from the store.
 #[allow(inconsistent_fields)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

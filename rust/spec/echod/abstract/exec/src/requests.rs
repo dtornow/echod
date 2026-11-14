@@ -84,10 +84,10 @@ impl<'cfg> Handlers<'cfg> {
         ensures
             forall|i: int|
                 0 <= i < outs.len() ==> {
-                    &&& (server_ok(*s) ==> server_ok(#[trigger] outs[i].next))
-                    &&& (server_ok(*s) ==> response_ok(outs[i].resp))
+                    &&& (exec_server_ok(*s) ==> exec_server_ok(#[trigger] outs[i].next))
+                    &&& (exec_server_ok(*s) ==> response_ok(outs[i].resp))
                     &&& (!s.promises@.contains_key(req.id@) && outs[i].next.promises@.contains_key(req.id@)
-                        ==> promise_ok(outs[i].next.promises@[req.id@]))
+                        ==> exec_promise_ok(outs[i].next.promises@[req.id@]))
                     // the frame
                     &&& outs[i].next.promises@.remove(req.id@) == s.promises@.remove(req.id@)
                     &&& outs[i].next.tasks@.remove(req.id@) == s.tasks@.remove(req.id@)
@@ -104,8 +104,8 @@ impl<'cfg> Handlers<'cfg> {
         match s.promises.get(&req.id) {
             Some(p) => {
                 proof {
-                    if server_ok(*s) {
-                        assert(promise_ok(s.promises@[req.id@]));
+                    if exec_server_ok(*s) {
+                        assert(exec_promise_ok(s.promises@[req.id@]));
                     }
                 }
                 let seen = p.project(now);
@@ -122,8 +122,8 @@ impl<'cfg> Handlers<'cfg> {
             n.tasks.insert(req.id.clone(), task);
         }
         proof {
-            if server_ok(*s) {
-                assert forall|k: Seq<char>| #[trigger] n.promises@.contains_key(k) implies promise_ok(
+            if exec_server_ok(*s) {
+                assert forall|k: Seq<char>| #[trigger] n.promises@.contains_key(k) implies exec_promise_ok(
                     n.promises@[k],
                 ) by {
                     if k != req.id@ {
