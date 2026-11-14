@@ -31,9 +31,8 @@ pub type Trace = Vec<HistoryEvent>;
 
 /// The trace, from what the run recorded.
 pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
-    // (instant, rank, event): at one instant, returns and receives before
-    // invokes, so a call never returns before it is invoked in the trace
-    // order and a message is received where the clock had already reached.
+    // At one instant, an invocation precedes the dispatch it can cause,
+    // and the response follows both.
     // The clock moves to the instants the nodes stamp at: a request's
     // `debug_time`, its invoke, and the nodes' own steps (`marks`). A return
     // or a receive moves it nowhere: nothing is stamped at those instants,
@@ -43,7 +42,7 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
     for e in entries {
         items.push((
             e.now,
-            2,
+            0,
             e.id,
             HistoryEvent::Invoke {
                 call: e.id,
@@ -53,7 +52,7 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
         if let Some(response) = &e.outcome {
             items.push((
                 e.ret.max(e.now),
-                3,
+                2,
                 e.id,
                 HistoryEvent::Return {
                     call: e.id,
@@ -85,7 +84,7 @@ pub fn trace(entries: &[Entry], marks: &[u64], sent: &[Sent]) -> Trace {
             }
             mi += 1;
         }
-        if rank == 2 && clock.is_none_or(|c| t > c) {
+        if rank == 0 && clock.is_none_or(|c| t > c) {
             out.push(HistoryEvent::Clock { at: t });
             clock = Some(t);
         }
@@ -145,4 +144,38 @@ pub fn show(trace: &Trace, upto: usize) -> String {
         out.push_str(&format!("{i:>5}  {line}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echod_abstract_spec::Dispatch;
+    use echod_types::{PromiseGetReq, Request};
+
+    #[test]
+    fn a_message_follows_the_invoke_that_shares_its_instant() {
+        let at = 1_700_000_004_918;
+        let entry = Entry {
+            id: 214,
+            client: "client".into(),
+            req: Request::PromiseGet(PromiseGetReq { id: "o2:3".into() }),
+            now: at,
+            invoke: at,
+            ret: at,
+            outcome: None,
+            attempts: 1,
+        };
+        let sent = Sent {
+            at,
+            address: "sim://worker".into(),
+            kind: "execute".into(),
+            id: "o2:3".into(),
+            msg: Dispatch::Execute { id: "o2:3".into(), version: 0 },
+        };
+        let events = trace(&[entry], &[], &[sent]);
+        let clock = events.iter().position(|e| matches!(e, HistoryEvent::Clock { at: t } if *t == at)).unwrap();
+        let invoke = events.iter().position(|e| matches!(e, HistoryEvent::Invoke { call: 214, .. })).unwrap();
+        let receive = events.iter().position(|e| matches!(e, HistoryEvent::Receive { .. })).unwrap();
+        assert!(clock < invoke && invoke < receive);
+    }
 }

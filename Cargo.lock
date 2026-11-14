@@ -1324,6 +1324,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fakes3"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "md-5",
+ "tokio",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
