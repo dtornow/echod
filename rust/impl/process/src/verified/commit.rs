@@ -17,13 +17,29 @@
 use vstd::prelude::*;
 
 use super::node::*;
+use super::text::{starts_with, strip_prefix};
 
 #[cfg(verus_keep_ghost)]
 use super::commit_spec::*;
 
 verus! {
 
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+pub fn commit_document_origin(origin: &str) -> (document: String)
+    ensures
+        document@ == spec_commit_document_origin(origin@),
+{
+    match strip_prefix(origin, "w:") {
+        Some(document) => document,
+        None => match strip_prefix(origin, "s:") {
+            Some(document) => document,
+            None => origin.to_string(),
+        },
+    }
+}
+
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct Commit {
     pub origin: String,
     /// The nearest deadline of the document as it will be written.
@@ -61,10 +77,38 @@ impl View for Commit {
 // ---------------------------------------------------------------------------
 
 impl NodeCore {
+    pub fn commit_collected(&mut self, origin: &str, key: &Key)
+        ensures
+            final(self)@
+                == spec_commit_collected(old(self)@, origin@, key@),
+    {
+        self.collected(origin, key);
+        let document = commit_document_origin(origin);
+        if !str_eq(document.as_str(), origin)
+            && !starts_with(document.as_str(), "w:")
+            && !starts_with(document.as_str(), "s:")
+        {
+            self.collected(document.as_str(), key);
+        }
+    }
+
     pub fn prepare(&self, origin: &str, etag: Option<&String>, deadline: Option<u64>, changed: bool, fired: Option<Key>) -> (t: Commit)
         ensures t@ == spec_prepare(self@, origin@, opt_str(etag), opt_nat(deadline), changed, opt_key(fired)),
     {
-        let previous: Option<Key> = match self.armed.get(origin) {
+        let document = commit_document_origin(origin);
+        let canonical = origin.to_string();
+        let remembered = match self.armed.get(&canonical) {
+            Some(a) => Some(a),
+            None => if str_eq(document.as_str(), origin)
+                || starts_with(document.as_str(), "w:")
+                || starts_with(document.as_str(), "s:")
+            {
+                None
+            } else {
+                self.armed.get(&document)
+            },
+        };
+        let previous: Option<Key> = match remembered {
             Some(a) => {
                 let same_version = match etag {
                     Some(e) => str_eq(a.etag.as_str(), e.as_str()),
@@ -74,7 +118,18 @@ impl NodeCore {
                     Some(f) => key_eq(&a.key, f),
                     None => false,
                 };
-                if same_version && !same_key { Some(clone_key(&a.key)) } else { None }
+                let compatible_key =
+                    str_eq(a.key.origin.as_str(), origin)
+                        || (!str_eq(document.as_str(), origin)
+                            && str_eq(
+                                a.key.origin.as_str(),
+                                document.as_str(),
+                            ));
+                if compatible_key && same_version && !same_key {
+                    Some(clone_key(&a.key))
+                } else {
+                    None
+                }
             }
             None => None,
         };
@@ -89,6 +144,13 @@ impl NodeCore {
     pub fn finish(&mut self, t: &Commit, etag: &String)
         ensures final(self)@ == spec_finish(old(self)@, t@, etag@),
     {
+        let document = commit_document_origin(t.origin.as_str());
+        if !str_eq(document.as_str(), t.origin.as_str())
+            && !starts_with(document.as_str(), "w:")
+            && !starts_with(document.as_str(), "s:")
+        {
+            self.set_armed(document.as_str(), None);
+        }
         let keep: Option<Key> = match t.deadline {
             None => None,
             Some(_) => if t.rearm {

@@ -19,17 +19,17 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::{
+use echod_abstract::trusted::copy;
+use echod_concrete::{
     advance_stored, body_len, clone_stored, peek, stored_body, stored_is_workflow, DocumentBody,
     Outbound, StoredDocument,
 };
 
-use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequence};
+use crate::verified::flight::{self, Act, Decided, FiredKey, Job, Outcome, Sequence, Step};
 use crate::verified::node::Key;
 use crate::verified::table::Table;
 use crate::verified::text::{concat, copy_string, text};
-use crate::verified::{Request, Response, TaskFenceInnerRes, TaskFenceRes};
+use crate::verified::{Request, Response};
 
 use crate::cache::Cached;
 use crate::document::{self, Loaded};
@@ -56,14 +56,12 @@ use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use crate::verified::PromiseResSpec;
-#[cfg(verus_keep_ghost)]
-use crate::concrete::document::{
+use echod_concrete::node::{
     notes_v, spec_body_deadline, spec_workflow_map, DocumentBodyV, NoteV, ScheduleDocumentV,
     StoredDocumentV, WorkflowDocumentV,
 };
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
 #[cfg(verus_keep_ghost)]
 use echod_types::spec::AResponse;
 
@@ -74,8 +72,10 @@ verus! {
 // ---------------------------------------------------------------------------
 
 /// What a flight does.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Work {
-    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64, stage: Stage },
+    Request { id: RequestId, kind: String, corr: String, req: Request, action_kind: Option<String>, now: u64 },
     /// `fired` is the key whose firing this is; none for a sweep or a fire
     /// a test asked for.
     Sweep { fired: Option<FiredKey>, now: u64 },
@@ -84,7 +84,7 @@ pub enum Work {
 
 #[cfg(verus_keep_ghost)]
 pub ghost enum WorkSpec {
-    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64, stage: StageSpec },
+    Request { id: RequestId, kind: Seq<char>, corr: Seq<char>, req: Request, action_kind: Option<Seq<char>>, now: u64 },
     Sweep { fired: Option<AFired>, now: u64 },
     Fire { schedule: Seq<char>, fired: Option<AFired>, now: u64 },
 }
@@ -94,8 +94,8 @@ impl DeepView for Work {
     type V = WorkSpec;
     open spec fn deep_view(&self) -> WorkSpec {
         match self {
-            Work::Request { id, kind, corr, req, action_kind, now, stage } => WorkSpec::Request {
-                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now, stage: stage.deep_view(),
+            Work::Request { id, kind, corr, req, action_kind, now } => WorkSpec::Request {
+                id: *id, kind: kind@, corr: corr@, req: *req, action_kind: action_kind.deep_view(), now: *now,
             },
             Work::Sweep { fired, now } => WorkSpec::Sweep { fired: fired.deep_view(), now: *now },
             Work::Fire { schedule, fired, now } => WorkSpec::Fire { schedule: schedule@, fired: fired.deep_view(), now: *now },
@@ -127,40 +127,10 @@ impl Work {
     }
 }
 
-/// Where a request stands when it spans two documents: a fence whose create
-/// targets another origin (a detached workflow) commits the create on that
-/// origin first, then the fence's check on the task's, and answers as one
-/// fence. A request on one document is `Whole`.
-pub enum Stage {
-    Whole,
-    /// The create, with the check to run on the task's document once it has
-    /// committed.
-    Detached { then: Target, check: Option<Request> },
-    /// The check, with the create's answer to fold into the fence's.
-    Check { inner: Option<crate::verified::PromiseRes> },
-}
-
-#[cfg(verus_keep_ghost)]
-pub ghost enum StageSpec {
-    Whole,
-    Detached { then: TargetSpec, check: Option<Request> },
-    Check { inner: Option<PromiseResSpec> },
-}
-
-#[cfg(verus_keep_ghost)]
-impl DeepView for Stage {
-    type V = StageSpec;
-    open spec fn deep_view(&self) -> StageSpec {
-        match self {
-            Stage::Whole => StageSpec::Whole,
-            Stage::Detached { then, check } => StageSpec::Detached { then: then.deep_view(), check: *check },
-            Stage::Check { inner } => StageSpec::Check { inner: inner.deep_view() },
-        }
-    }
-}
-
 /// The key that fired a flight, for the timers when it ends.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Firing {
     pub key: String,
     pub at: u64,
@@ -179,6 +149,8 @@ impl Firing {
 
 /// The document a flight works on.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Working {
     /// The target's name.
     pub target: String,
@@ -191,6 +163,8 @@ pub struct Working {
 /// A commit in progress: the verified sequence, and the store call it
 /// asked for that is waited on.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Committing {
     pub w: Working,
     /// The document as the step left it.
@@ -201,6 +175,8 @@ pub struct Committing {
 }
 
 /// The call made for the sequence's last act, with what the answer needs.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Issued {
     /// A key put or deleted: the wheel follows the answer.
     Key { op: OpId, key: Key, name: String, arm: bool },
@@ -252,6 +228,7 @@ pub enum Progress {
     Issued,
     Done(Fired),
     Failed(StoreError),
+    Exhausted,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -259,6 +236,7 @@ pub ghost enum ProgressSpec {
     Issued,
     Done(Fired),
     Failed(StoreErrorSpec),
+    Exhausted,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -269,17 +247,14 @@ impl DeepView for Progress {
             Progress::Issued => ProgressSpec::Issued,
             Progress::Done(f) => ProgressSpec::Done(*f),
             Progress::Failed(e) => ProgressSpec::Failed(e.deep_view()),
+            Progress::Exhausted => ProgressSpec::Exhausted,
         }
     }
 }
 
-/// How many due steps one sweep runs before it commits. A document with
-/// more due is committed with its nearest deadline past, which arms a key
-/// that fires at once.
-pub const SWEEP_STEPS: u64 = crate::concrete::document::REQUEST_SWEEP_STEPS;
-
 /// What a committed step answers with.
-#[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Done {
     pub response: Option<Response>,
     /// Why the request was refused, in the protocol's words, if it was.
@@ -289,19 +264,48 @@ pub struct Done {
     pub did: bool,
 }
 
+#[cfg(verus_keep_ghost)]
+pub ghost struct DoneSpec {
+    pub response: Option<Response>,
+    pub why: Option<Seq<char>>,
+    pub outbox: Seq<(Seq<char>, MessageSpec)>,
+    pub did: bool,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Done {
+    type V = DoneSpec;
+
+    open spec fn deep_view(&self) -> DoneSpec {
+        DoneSpec {
+            response: match &self.response {
+                Some(response) => Some(*response),
+                None => None,
+            },
+            why: self.why.deep_view(),
+            outbox: self.outbox.deep_view(),
+            did: self.did,
+        }
+    }
+}
+
 /// A fire past its decision: the schedule as loaded and as advanced, the
 /// occurrence due, and the origin it is born in.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct FireCtx {
     pub ws: Working,
     pub row: crate::verified::Schedule,
     pub advanced: DocumentBody,
-    pub pending: crate::concrete::Pending,
+    pub pending: echod_concrete::Pending,
     pub t1: u64,
     pub origin: String,
     pub next: u64,
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Phase {
     Idle,
     Loading { op: OpId, revalidating: Option<Cached> },
@@ -311,7 +315,7 @@ pub enum Phase {
     FireWaitingOrigin(FireCtx),
     FireLoadingOrigin { op: OpId, revalidating: Option<Cached>, ctx: FireCtx },
     FireIdle { commit: Committing },
-    FireOrigin { commit: Committing, ctx: FireCtx, t: u64 },
+    FireOrigin { commit: Committing, ctx: FireCtx, t: u64, outbox: Vec<(String, Message)> },
     FireSchedule { commit: Committing },
 }
 
@@ -325,7 +329,7 @@ pub ghost enum PhaseSpec {
     FireWaitingOrigin(FireCtxSpec),
     FireLoadingOrigin { op: OpId, revalidating: Option<CachedSpec>, ctx: FireCtxSpec },
     FireIdle { commit: CommittingSpec },
-    FireOrigin { commit: CommittingSpec, ctx: FireCtxSpec, t: u64 },
+    FireOrigin { commit: CommittingSpec, ctx: FireCtxSpec, t: u64, outbox: Seq<(Seq<char>, MessageSpec)> },
     FireSchedule { commit: CommittingSpec },
 }
 
@@ -342,7 +346,7 @@ impl DeepView for Phase {
             Phase::FireWaitingOrigin(ctx) => PhaseSpec::FireWaitingOrigin(ctx.deep_view()),
             Phase::FireLoadingOrigin { op, revalidating, ctx } => PhaseSpec::FireLoadingOrigin { op: *op, revalidating: revalidating.deep_view(), ctx: ctx.deep_view() },
             Phase::FireIdle { commit } => PhaseSpec::FireIdle { commit: commit.deep_view() },
-            Phase::FireOrigin { commit, ctx, t } => PhaseSpec::FireOrigin { commit: commit.deep_view(), ctx: ctx.deep_view(), t: *t },
+            Phase::FireOrigin { commit, ctx, t, outbox } => PhaseSpec::FireOrigin { commit: commit.deep_view(), ctx: ctx.deep_view(), t: *t, outbox: outbox.deep_view() },
             Phase::FireSchedule { commit } => PhaseSpec::FireSchedule { commit: commit.deep_view() },
         }
     }
@@ -376,6 +380,8 @@ impl Phase {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Flight {
     pub id: FlightId,
     pub target: Target,
@@ -389,6 +395,8 @@ pub struct Flight {
     pub idle: bool,
 }
 
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Queued {
     Work { target: Target, work: Work, firing: Option<Firing>, debug: bool },
     Waiter(FlightId),
@@ -413,12 +421,16 @@ impl DeepView for Queued {
 
 /// One document's lane: the flight on it, and the ones waiting.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Slot {
     pub busy: Option<FlightId>,
     pub queue: Vec<Queued>,
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Flights {
     pub slots: Table<String, Slot>,
     pub inflight: Table<FlightId, Flight>,
@@ -440,6 +452,20 @@ impl Flights {
 
 pub open spec fn spec_empty_slot() -> SlotSpec {
     SlotSpec { busy: None, queue: Seq::empty() }
+}
+
+pub open spec fn spec_abandon_slot(s: S, name: Seq<char>) -> S {
+    let slot = spec_slot_of(s, name);
+    S {
+        flights: FlightsSpec {
+            slots: s.flights.slots.insert(
+                name,
+                SlotSpec { busy: None, ..slot },
+            ),
+            ..s.flights
+        },
+        ..s
+    }
 }
 
 /// The slot of `name`, or an empty one.
@@ -482,7 +508,7 @@ pub open spec fn spec_dispatch(doc: DocumentBodyV, n: NoteV) -> Option<(Seq<char
                 None
             }
         },
-        NoteV::Unblock { address, promise } => Some((address, MessageSpec::Unblock(promise.deep_view()))),
+        NoteV::Unblock { address, promise } => Some((address, MessageSpec::Unblock(promise))),
     }
 }
 
@@ -522,14 +548,14 @@ pub fn dispatches(doc: &DocumentBody, notes: &Vec<Outbound>) -> (r: Vec<(String,
         let ghost before = out.deep_view();
         proof {
             assert(nv[i as int] == notes@[i as int]@);
-            crate::concrete::lemma_outbound_view(&notes@[i as int]);
+            echod_concrete::lemma_outbound_view(&notes@[i as int]);
         }
         match &notes[i] {
             Outbound::Execute { id, version } => {
                 match peek(doc, id) {
                     Some(obj) => {
                         proof {
-                            crate::concrete::lemma_obj_view(&obj);
+                            echod_concrete::lemma_obj_view(&obj);
                         }
                         match crate::reason::target_of(&obj.promise.tags) {
                             Some(address) => {
@@ -569,7 +595,7 @@ pub fn is_workflow(d: &DocumentBody) -> (r: bool)
         r == (d@ is Workflow),
 {
     proof {
-        crate::concrete::lemma_doc_view(d);
+        echod_concrete::lemma_doc_view(d);
     }
     match d {
         DocumentBody::Workflow(_) => true,
@@ -602,8 +628,15 @@ pub open spec fn spec_start(s: S, target: TargetSpec, work: WorkSpec, firing: Op
     let id = s.next_flight;
     let name = crate::target::spec_name(target);
     let slot = spec_slot_of(s, name);
-    let s = spec_with_slot(S { next_flight: id.wrapping_add(1), ..s }, name, SlotSpec { busy: Some(id), ..slot });
-    spec_begin(s, FlightSpec { id, target, work, attempt: 0, phase: PhaseSpec::Idle, firing, debug, idle: false })
+    let (s, allocated) = crate::state::spec_flight(s);
+    let f = FlightSpec { id, target, work, attempt: 0, phase: PhaseSpec::Idle, firing, debug, idle: false };
+    match allocated {
+        None => spec_op_exhausted(s, f),
+        Some(_) => {
+            let s = spec_with_slot(s, name, SlotSpec { busy: Some(id), ..slot });
+            spec_begin(s, f)
+        },
+    }
 }
 
 /// The slot of `name` is free: whatever waits on it goes next.
@@ -647,17 +680,48 @@ pub open spec fn spec_resume(s: S, fid: FlightId) -> S {
 pub open spec fn spec_begin(s: S, f: FlightSpec) -> S {
     match f.work {
         WorkSpec::Fire { schedule, .. } => {
-            let (s, op) = spec_store(s, StoreReqSpec::Get { key: spec_sched_key(s.keys.prefix, schedule) }, Owner::Flight(f.id));
-            spec_inflight(s, FlightSpec { phase: PhaseSpec::FireLoadingSchedule { op }, ..f })
+            let key = spec_sched_key(s.keys.prefix, schedule);
+            let (s, op) = spec_store_certified(
+                s,
+                StoreReqSpec::Get { key },
+                Owner::Flight(f.id),
+                crate::global_store_invariants::StoreEffectCertificateV::ScheduleRead {
+                    key,
+                    schedule,
+                    etag: None,
+                    fid: f.id,
+                },
+            );
+            match op {
+                Some(op) => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireLoadingSchedule { op }, ..f }),
+                None => spec_op_exhausted(s, f),
+            }
         },
         _ => match f.target {
             TargetSpec::Origin(o) => {
                 let (s, op, revalidating) = spec_load_origin(s, f.id, o);
-                spec_inflight(s, FlightSpec { phase: PhaseSpec::Loading { op, revalidating }, ..f })
+                match op {
+                    Some(op) => spec_inflight(s, FlightSpec { phase: PhaseSpec::Loading { op, revalidating }, ..f }),
+                    None => spec_op_exhausted(s, f),
+                }
             },
             TargetSpec::Schedule(id) => {
-                let (s, op) = spec_store(s, StoreReqSpec::Get { key: spec_sched_key(s.keys.prefix, id) }, Owner::Flight(f.id));
-                spec_inflight(s, FlightSpec { phase: PhaseSpec::Loading { op, revalidating: None }, ..f })
+                let key = spec_sched_key(s.keys.prefix, id);
+                let (s, op) = spec_store_certified(
+                    s,
+                    StoreReqSpec::Get { key },
+                    Owner::Flight(f.id),
+                    crate::global_store_invariants::StoreEffectCertificateV::ScheduleRead {
+                        key,
+                        schedule: id,
+                        etag: None,
+                        fid: f.id,
+                    },
+                );
+                match op {
+                    Some(op) => spec_inflight(s, FlightSpec { phase: PhaseSpec::Loading { op, revalidating: None }, ..f }),
+                    None => spec_op_exhausted(s, f),
+                }
             },
         },
     }
@@ -704,7 +768,7 @@ pub open spec fn spec_answered_phase(s: S, fid: FlightId, f0: FlightSpec, phase:
         PhaseSpec::FireLoadingSchedule { .. } => spec_answered_fire_loading_schedule(s, f0, outcome),
         PhaseSpec::FireLoadingOrigin { revalidating, ctx, .. } => spec_answered_fire_loading_origin(s, f0, revalidating, ctx, outcome),
         PhaseSpec::FireIdle { commit } => spec_answered_fire_idle(s, fid, f0, commit, outcome),
-        PhaseSpec::FireOrigin { commit, ctx, t } => spec_answered_fire_origin(s, fid, f0, commit, ctx, t, outcome),
+        PhaseSpec::FireOrigin { commit, ctx, t, outbox } => spec_answered_fire_origin(s, fid, f0, commit, ctx, t, outbox, outcome),
         PhaseSpec::FireSchedule { commit } => spec_answered_fire_schedule(s, fid, f0, commit, outcome),
         _ => spec_fail(s, f0, "an answer the flight did not wait for"@),
     }
@@ -737,6 +801,7 @@ pub open spec fn spec_answered_origin(s: S, fid: FlightId, f0: FlightSpec, commi
         ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Origin { commit, done }, ..f0 }),
         ProgressSpec::Done(fired) => spec_committed(s, f0, done, fired),
         ProgressSpec::Failed(e) => spec_commit_failed(s, f0, e),
+        ProgressSpec::Exhausted => spec_op_exhausted(s, f0),
     }
 }
 
@@ -747,6 +812,7 @@ pub open spec fn spec_answered_schedule(s: S, fid: FlightId, f0: FlightSpec, com
         ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Schedule { commit, done }, ..f0 }),
         ProgressSpec::Done(fired) => spec_committed(s, f0, done, fired),
         ProgressSpec::Failed(e) => spec_commit_failed(s, f0, e),
+        ProgressSpec::Exhausted => spec_op_exhausted(s, f0),
     }
 }
 
@@ -769,7 +835,16 @@ pub open spec fn spec_answered_fire_loading_origin(s: S, f0: FlightSpec, revalid
     let (s, r) = spec_loaded_origin(s, ctx.origin, revalidating, outcome);
     match r {
         Ok(wo) => crate::handler_sched::spec_fire_run(s, f0, ctx, wo),
-        Err(e) => spec_fail(spec_release(s, ctx.origin), f0, e),
+        Err(e) => spec_fail(
+            spec_release(
+                s,
+                crate::target::spec_name(
+                    crate::target::TargetSpec::Origin(ctx.origin),
+                ),
+            ),
+            f0,
+            e,
+        ),
     }
 }
 
@@ -787,25 +862,56 @@ pub open spec fn spec_answered_fire_idle(s: S, fid: FlightId, f0: FlightSpec, co
             let s = spec_note(s, NoteSpec::SweepEnd { flight: fid, committed: false });
             spec_commit_failed(s, f0, e)
         },
+        ProgressSpec::Exhausted => spec_op_exhausted(s, f0),
     }
 }
 
 #[verifier::opaque]
-pub open spec fn spec_answered_fire_origin(s: S, fid: FlightId, f0: FlightSpec, commit: CommittingSpec, ctx: FireCtxSpec, t: u64, outcome: StoreRes) -> S {
+pub open spec fn spec_answered_fire_origin(
+    s: S,
+    fid: FlightId,
+    f0: FlightSpec,
+    commit: CommittingSpec,
+    ctx: FireCtxSpec,
+    t: u64,
+    outbox: Seq<(Seq<char>, MessageSpec)>,
+    outcome: StoreRes,
+) -> S {
     let (s, commit, p) = spec_commit_advance(s, fid, commit, Some(outcome));
     match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t }, ..f0 }),
+        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t, outbox }, ..f0 }),
         ProgressSpec::Done(_) => {
             let s = spec_note(s, NoteSpec::FireEnd { flight: fid, committed: true });
             let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
-            let s = spec_release(s, ctx.origin);
+            let s = spec_send_all(s, outbox);
+            let s = spec_release(
+                s,
+                crate::target::spec_name(
+                    crate::target::TargetSpec::Origin(ctx.origin),
+                ),
+            );
             crate::handler_sched::spec_fire_advance(s, f0, ctx, t)
         },
         ProgressSpec::Failed(e) => {
             let s = spec_note(s, NoteSpec::FireEnd { flight: fid, committed: false });
             let s = spec_forget_origin(s, ctx.origin);
-            let s = spec_release(s, ctx.origin);
+            let s = spec_release(
+                s,
+                crate::target::spec_name(
+                    crate::target::TargetSpec::Origin(ctx.origin),
+                ),
+            );
             spec_commit_failed(s, f0, e)
+        },
+        ProgressSpec::Exhausted => {
+            let s = spec_forget_origin(s, ctx.origin);
+            let s = spec_abandon_slot(
+                s,
+                crate::target::spec_name(
+                    crate::target::TargetSpec::Origin(ctx.origin),
+                ),
+            );
+            spec_op_exhausted(s, f0)
         },
     }
 }
@@ -824,24 +930,45 @@ pub open spec fn spec_answered_fire_schedule(s: S, fid: FlightId, f0: FlightSpec
             let s = spec_note(s, NoteSpec::AdvanceEnd { flight: fid, committed: false });
             spec_commit_failed(s, f0, e)
         },
+        ProgressSpec::Exhausted => spec_op_exhausted(s, f0),
     }
 }
 
 /// Ask for a workflow document: revalidated against the store when the
 /// cache holds a version, read in full otherwise.
 #[verifier::opaque]
-pub open spec fn spec_load_origin(s: S, fid: FlightId, origin: Seq<char>) -> (S, OpId, Option<CachedSpec>) {
+pub open spec fn spec_load_origin(s: S, fid: FlightId, origin: Seq<char>) -> (S, Option<OpId>, Option<CachedSpec>) {
     let key = spec_doc_key(s.keys.prefix, origin);
     let (cache, hit) = crate::cache::spec_get(s.cache, origin);
     let s = S { cache, ..s };
     match hit {
         Some(c) => {
-            let (s, op) = spec_store(s, StoreReqSpec::GetIfNoneMatch { key, etag: c.etag }, Owner::Flight(fid));
+            let (s, op) = spec_store_certified(
+                s,
+                StoreReqSpec::GetIfNoneMatch { key, etag: c.etag },
+                Owner::Flight(fid),
+                crate::global_store_invariants::StoreEffectCertificateV::WorkflowRead {
+                    key,
+                    origin,
+                    etag: Some(c.etag),
+                    fid,
+                },
+            );
             (s, op, Some(c))
         },
         None => {
             let s = spec_note(s, NoteSpec::Cache(CacheResult::Miss));
-            let (s, op) = spec_store(s, StoreReqSpec::Get { key }, Owner::Flight(fid));
+            let (s, op) = spec_store_certified(
+                s,
+                StoreReqSpec::Get { key },
+                Owner::Flight(fid),
+                crate::global_store_invariants::StoreEffectCertificateV::WorkflowRead {
+                    key,
+                    origin,
+                    etag: None,
+                    fid,
+                },
+            );
             (s, op, None)
         },
     }
@@ -860,9 +987,17 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
     match revalidating {
         Some(c) => match outcome {
             StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) } => {
-                let s = spec_note(s, NoteSpec::Cache(CacheResult::Revalidated));
-                let s = spec_remember(s, origin, CachedSpec { filled_at: now, ..c });
-                (s, Ok(spec_working(origin, key, c.loaded, Some(c.etag))))
+                match document::spec_validate_workflow_identity(
+                    c.loaded,
+                    origin,
+                ) {
+                    Ok(loaded) => {
+                        let s = spec_note(s, NoteSpec::Cache(CacheResult::Revalidated));
+                        let s = spec_remember(s, origin, CachedSpec { loaded, filled_at: now, ..c });
+                        (s, Ok(spec_working(origin, key, loaded, Some(c.etag))))
+                    },
+                    Err(e) => (s, Err(e)),
+                }
             },
             StoreRes::GetIfNoneMatch { result: Ok(Read::Absent) } => {
                 let s = spec_note(s, NoteSpec::Cache(CacheResult::Absent));
@@ -872,10 +1007,17 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
             StoreRes::GetIfNoneMatch { result: Ok(Read::Body(bytes, etag)) } => {
                 let s = spec_note(s, NoteSpec::Cache(CacheResult::Refreshed));
                 match document::spec_decode_workflow(bytes@) {
-                    Ok(loaded) => {
-                        let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
-                        (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
-                    },
+                    Ok(loaded) =>
+                        match document::spec_validate_workflow_identity(
+                            loaded,
+                            origin,
+                        ) {
+                            Ok(loaded) => {
+                                let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
+                                (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
+                            },
+                            Err(e) => (s, Err(e)),
+                        },
                     Err(e) => (s, Err(e)),
                 }
             },
@@ -885,10 +1027,17 @@ pub open spec fn spec_loaded_origin(s: S, origin: Seq<char>, revalidating: Optio
         None => match outcome {
             StoreRes::Get { result: Ok(None) } => (s, Ok(spec_working(origin, key, document::spec_empty_workflow(origin), None))),
             StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::spec_decode_workflow(bytes@) {
-                Ok(loaded) => {
-                    let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
-                    (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
-                },
+                Ok(loaded) =>
+                    match document::spec_validate_workflow_identity(
+                        loaded,
+                        origin,
+                    ) {
+                        Ok(loaded) => {
+                            let s = spec_remember(s, origin, CachedSpec { loaded, etag: etag.deep_view(), filled_at: now });
+                            (s, Ok(spec_working(origin, key, loaded, Some(etag.deep_view()))))
+                        },
+                        Err(e) => (s, Err(e)),
+                    },
                 Err(e) => (s, Err(e)),
             },
             StoreRes::Get { result: Err(e) } => (s, Err(spec_error_text(e.deep_view()))),
@@ -906,11 +1055,36 @@ pub open spec fn spec_run_origin(s: S, f: FlightSpec, w: WorkingSpec) -> S {
         ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Origin { commit, done }, ..f }),
         ProgressSpec::Done(fired) => spec_committed(s, f, done, fired),
         ProgressSpec::Failed(e) => spec_commit_failed(s, f, e),
+        ProgressSpec::Exhausted => spec_op_exhausted(s, f),
     }
 }
 
 /// The step: the concrete model's, on the document, decided no earlier
 /// than the last step on it.
+pub open spec fn spec_effective_retry_timeout(raw: u64) -> u64 {
+    if raw == 0 {
+        1
+    } else if raw > echod_types::MAX_TIME {
+        echod_types::MAX_TIME
+    } else {
+        raw
+    }
+}
+
+pub fn effective_retry_timeout(raw: u64) -> (result: u64)
+    ensures
+        result == spec_effective_retry_timeout(raw),
+        0 < result <= echod_types::MAX_TIME,
+{
+    if raw == 0 {
+        1
+    } else if raw > echod_types::MAX_TIME {
+        echod_types::MAX_TIME
+    } else {
+        raw
+    }
+}
+
 #[verifier::opaque]
 pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, CommittingSpec, DoneSpec) {
     let now = document::spec_clamp_now(document::spec_loaded_committed_at(w.loaded), work.now());
@@ -919,7 +1093,8 @@ pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, Commit
         WorkSpec::Sweep { .. } => AJob::Sweep,
         WorkSpec::Fire { .. } => AJob::Fire,
     };
-    let (after, response, _born, notes) = spec_step(job, document::spec_loaded_body(w.loaded), now, s.cfg.retry_timeout, SWEEP_STEPS as nat);
+    let retry_timeout = spec_effective_retry_timeout(s.cfg.retry_timeout);
+    let (after, response, _born, notes) = spec_step(job, document::spec_loaded_body(w.loaded), now, retry_timeout);
     let why = match work {
         WorkSpec::Request { req, kind, .. } => match response {
             Some(r) => {
@@ -938,7 +1113,7 @@ pub open spec fn spec_decide(s: S, work: WorkSpec, w: WorkingSpec) -> (S, Commit
     };
     let (s, commit) = spec_commit_new(s, w, after, deadline, now, fired);
     let did = work.is_sweep() && commit.seq.changed;
-    (s, commit, DoneSpec { response: response.deep_view(), why, outbox, did })
+    (s, commit, DoneSpec { response, why, outbox, did })
 }
 
 pub open spec fn spec_send_all(s: S, outbox: Seq<(Seq<char>, MessageSpec)>) -> S
@@ -957,26 +1132,7 @@ pub open spec fn spec_committed(s: S, f: FlightSpec, done: DoneSpec, fired: Fire
     let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
     let s = spec_send_all(s, done.outbox);
     let s = match f.work {
-        WorkSpec::Request { id, kind, corr, action_kind, now, stage: StageSpec::Detached { then, check }, .. } => {
-            match (done.response, check) {
-                (Some(AResponse::Promise(inner)), Some(check)) => {
-                    let work = WorkSpec::Request { id, kind, corr, req: check, action_kind, now, stage: StageSpec::Check { inner: Some(inner) } };
-                    spec_submit(s, then, work, None, f.debug)
-                },
-                _ => spec_emit(s, EffectSpec::Reply { id, response: Err("no answer"@) }),
-            }
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Check { inner }, .. } => {
-            let response = match (done.response, inner) {
-                (Some(AResponse::Status(st)), Some(inner)) => {
-                    let action = if st.status == 200 { Some(crate::verified::spec::ATaskFenceInnerRes::Create(inner)) } else { None };
-                    Ok(AnswerSpec::Step { kind, corr, action_kind, response: AResponse::TaskFence(crate::verified::TaskFenceResSpec { status: st.status, action }), why: done.why })
-                },
-                _ => Err("no answer"@),
-            };
-            spec_emit(s, EffectSpec::Reply { id, response })
-        },
-        WorkSpec::Request { id, kind, corr, action_kind, stage: StageSpec::Whole, .. } => {
+        WorkSpec::Request { id, kind, corr, action_kind, .. } => {
             let response = match done.response {
                 Some(response) => Ok(AnswerSpec::Step { kind, corr, action_kind, response, why: done.why }),
                 None => Err("no answer"@),
@@ -1027,6 +1183,45 @@ pub open spec fn spec_fail(s: S, f: FlightSpec, e: Seq<char>) -> S {
     spec_finish(s, f, Err(e))
 }
 
+/// End a flight when no fresh store operation identifier remains. Client
+/// work receives the established state-exhaustion response; internal work
+/// emits nothing and is left to its normal retry path.
+#[verifier::opaque]
+pub open spec fn spec_op_exhausted(s: S, f: FlightSpec) -> S {
+    let e = "store operation ids exhausted"@;
+    let s = match f.firing {
+        Some(firing) =>
+            crate::handler_timers::spec_timer_op_exhausted(
+                s,
+                firing,
+            ),
+        None => s,
+    };
+    let s = match f.work {
+        WorkSpec::Request { id, kind, corr, req, action_kind, .. } => {
+            spec_emit(s, EffectSpec::Reply {
+                id,
+                response: Ok(AnswerSpec::Step {
+                    kind,
+                    corr,
+                    action_kind,
+                    response: echod_abstract::machine::spec_exhausted(req),
+                    why: None,
+                }),
+            })
+        },
+        WorkSpec::Sweep { .. } => {
+            let s = spec_note(s, NoteSpec::Sweep(SweepOutcome::Failed));
+            spec_note(s, NoteSpec::SweepEnd { flight: f.id, committed: false })
+        },
+        WorkSpec::Fire { .. } => s,
+    };
+    // Exhaustion is permanent for this incarnation. Remove the active
+    // flight without starting another queued flight (which would immediately
+    // exhaust recursively); a process restart is the retry boundary.
+    spec_abandon_slot(s, crate::target::spec_name(f.target))
+}
+
 /// The flight is over: its slot goes to the next, and the key that fired
 /// it hears how it went.
 #[verifier::opaque]
@@ -1049,10 +1244,50 @@ pub open spec fn spec_commit_new(s: S, w: WorkingSpec, after: DocumentBodyV, dea
         Some(e) => Some(e.0),
         None => None,
     };
-    let (s, token) = spec_token(s);
-    let seq = spec_new(s.node.core, w.target, etag, deadline, changed_any, fired, token as nat);
-    let after = crate::concrete::document::spec_advance_stored(w.loaded.document, after, now);
+    // The token is filled immediately before a PutKey is issued. Keeping a
+    // placeholder here means unchanged/no-op commits consume no identity.
+    let seq = spec_new(
+        s.node.core,
+        spec_commit_sequence_origin(w),
+        etag,
+        deadline,
+        changed_any,
+        fired,
+        0,
+    );
+    let after = echod_concrete::node::spec_advance_stored(w.loaded.document, after, now);
     (s, CommittingSpec { w, after, now, seq, issued: None })
+}
+
+/// Lazily allocate the identity for a new timer key. Allocation happens only
+/// at the untouched start of a sequence that will arm a key. Store-op
+/// exhaustion is checked first so failure is a complete stutter.
+pub open spec fn spec_allocate_arm_token(
+    s: S,
+    c: CommittingSpec,
+) -> (S, CommittingSpec, bool) {
+    if c.seq.step is Start
+        && c.seq.plan.rearm
+        && c.seq.plan.deadline is Some
+    {
+        if s.ops_exhausted {
+            (s, c, false)
+        } else {
+            match spec_token(s) {
+                (next, Some(token)) => (
+                    next,
+                    CommittingSpec {
+                        seq: ASequence { token: token as nat, ..c.seq },
+                        ..c
+                    },
+                    true,
+                ),
+                (_, None) => (s, c, false),
+            }
+        }
+    } else {
+        (s, c, true)
+    }
 }
 
 /// Drive a commit: `answer` is the store's answer to the call the commit
@@ -1064,27 +1299,100 @@ pub open spec fn spec_commit_advance(s: S, fid: FlightId, c: CommittingSpec, ans
         Some(issued) => spec_answered(s, CommittingSpec { issued: None, ..c }, issued, answer),
         None => (s, c),
     };
-    let (seq, core, outcome) = spec_advance(c.seq, s.node.core, answer_v(c.seq.step, answer));
-    let s = S { node: NodeSpec { core, ..s.node }, ..s };
-    let c = CommittingSpec { seq, ..c };
-    match outcome {
+    let (s, c, allocated) = spec_allocate_arm_token(s, c);
+    if !allocated {
+        (s, c, ProgressSpec::Exhausted)
+    } else {
+      let (seq, core, outcome) = spec_advance(c.seq, s.node.core, answer_v(c.seq.step, answer));
+      let s = S { node: NodeSpec { core, ..s.node }, ..s };
+      let c = CommittingSpec { seq, ..c };
+      match outcome {
         AOutcome::Act(AAct::PutKey(key)) => {
             let name = spec_key_name(s, key, s.cfg.node_id);
-            let (s, op) = spec_store(s, StoreReqSpec::Put { key: name, body: Seq::empty() }, Owner::Flight(fid));
-            (s, CommittingSpec { issued: Some(IssuedSpec::Key { op, key, name, arm: true }), ..c }, ProgressSpec::Issued)
+            let (s, op) = crate::state::spec_store_certified(
+                s,
+                StoreReqSpec::Put {
+                    key: name,
+                    body: Seq::empty(),
+                },
+                Owner::Flight(fid),
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::TimerPut { key, name },
+            );
+            match op {
+                Some(op) => (s, CommittingSpec { issued: Some(IssuedSpec::Key { op, key, name, arm: true }), ..c }, ProgressSpec::Issued),
+                None => (s, c, ProgressSpec::Exhausted),
+            }
         },
         AOutcome::Act(AAct::Write { cond, idle }) => {
-            let (s, c) = spec_issue_write(s, fid, c, cond, idle);
-            (s, c, ProgressSpec::Issued)
+            let (s, c, issued) = spec_issue_write(s, fid, c, cond, idle);
+            (s, c, if issued { ProgressSpec::Issued } else { ProgressSpec::Exhausted })
         },
         AOutcome::Act(AAct::DeleteKey { key, by }) => {
             let name = spec_key_name(s, key, by);
-            let (s, op) = spec_store(s, StoreReqSpec::Del { key: name }, Owner::Flight(fid));
-            (s, CommittingSpec { issued: Some(IssuedSpec::Key { op, key, name, arm: false }), ..c }, ProgressSpec::Issued)
+            let (s, op) = crate::state::spec_store_certified(
+                s,
+                StoreReqSpec::Del { key: name },
+                Owner::Flight(fid),
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::TimerDelete {
+                        key,
+                        name,
+                    },
+            );
+            match op {
+                Some(op) => (s, CommittingSpec { issued: Some(IssuedSpec::Key { op, key, name, arm: false }), ..c }, ProgressSpec::Issued),
+                None => (s, c, ProgressSpec::Exhausted),
+            }
         },
         AOutcome::Act(AAct::Done { deleted }) => (s, c, ProgressSpec::Done(if deleted { Fired::Deleted } else { Fired::Kept })),
         AOutcome::Failed(Some(e)) => (s, c, ProgressSpec::Failed(e.deep_view())),
         AOutcome::Failed(None) => (s, c, ProgressSpec::Failed(spec_unexpected())),
+      }
+    }
+}
+
+pub open spec fn spec_commit_sequence_origin(
+    w: WorkingSpec,
+) -> Seq<char> {
+    match w.loaded.document {
+        StoredDocumentV::Workflow(_) =>
+            crate::target::spec_name(TargetSpec::Origin(w.target)),
+        StoredDocumentV::Schedule(_) => w.target,
+    }
+}
+
+fn commit_sequence_origin(w: &Working) -> (origin: String)
+    ensures
+        origin@ == spec_commit_sequence_origin(w.deep_view()),
+{
+    proof {
+        reveal(spec_commit_sequence_origin);
+        echod_concrete::node::lemma_stored_document_variant_view(
+            &w.loaded.document,
+        );
+    }
+    match &w.loaded.document {
+        StoredDocument::Workflow(_) => {
+            let target = copy_string(&w.target);
+            let origin = Target::Origin(target).name();
+            proof {
+                assert(w.deep_view().loaded.document is Workflow);
+                assert(origin@
+                    == crate::target::spec_name(
+                        TargetSpec::Origin(w.deep_view().target),
+                    ));
+            }
+            origin
+        },
+        StoredDocument::Schedule(_) => {
+            let origin = copy_string(&w.target);
+            proof {
+                assert(w.deep_view().loaded.document is Schedule);
+                assert(origin@ == w.deep_view().target);
+            }
+            origin
+        },
     }
 }
 
@@ -1120,6 +1428,7 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
                             document: c.after,
                             change_count: change_count,
                             bytes,
+                            append_certified: true,
                         },
                         etag: etag.deep_view(),
                         filled_at: spec_now(s),
@@ -1138,37 +1447,112 @@ pub open spec fn spec_answered(s: S, c: CommittingSpec, issued: IssuedSpec, answ
 /// version loaded: the rows the step changed appended, or the whole
 /// document.
 #[verifier::opaque]
-pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec) {
-    let (call, mode, change_count, bytes) = match cond {
-        None => {
-            let after = crate::concrete::document::spec_stored_body(c.after);
-            let body = document::spec_encode_body(c.after);
-            (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, crate::concrete::document::spec_body_len(after) as usize, body.len() as u64)
-        },
-        Some(etag) => {
-            let etag = EtagSpec(etag);
-            let after = crate::concrete::document::spec_stored_body(c.after);
-            let (delta, changed) = document::spec_encode_delta(c.w.loaded.document, c.after);
-            let removed = document::spec_removed_any(document::spec_loaded_body(c.w.loaded), after);
-            let after_len = crate::concrete::document::spec_body_len(after) as usize;
-            let stale_after = c.w.loaded.change_count.saturating_add(changed).saturating_sub(after_len);
-            let append = document::spec_loaded_version(c.w.loaded) > 0 && !removed && s.cfg.appendable && s.cfg.compact > 0 && stale_after < s.cfg.compact as usize;
-            if append {
-                let n = c.w.loaded.change_count.saturating_add(changed);
-                let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
-                (StoreReqSpec::AppIfMatch { key: c.w.key, offset: c.w.loaded.bytes, body: delta, etag }, WriteMode::Append, n, b)
-            } else {
-                let body = document::spec_encode_body(c.after);
-                (StoreReqSpec::PutIfMatch { key: c.w.key, body, etag }, WriteMode::Rewrite, after_len, body.len() as u64)
-            }
-        },
-    };
-    let len = match call {
-        StoreReqSpec::PutIfNoneMatch { body, .. } | StoreReqSpec::AppIfMatch { body, .. } | StoreReqSpec::PutIfMatch { body, .. } => body.len() as usize,
-        _ => 0usize,
-    };
-    let (s, op) = spec_store(s, call, Owner::Flight(fid));
-    (s, CommittingSpec { issued: Some(IssuedSpec::Write { op, mode, change_count, bytes, len }), ..c })
+pub open spec fn spec_issue_write(s: S, fid: FlightId, c: CommittingSpec, cond: Option<Seq<char>>, idle: bool) -> (S, CommittingSpec, bool) {
+    if !echod_concrete::document::well_formed(c.after) {
+        (s, c, false)
+    } else {
+        let (call, mode, change_count, bytes) = match cond {
+            None => {
+                let body = document::spec_encode(c.after);
+                (StoreReqSpec::PutIfNoneMatch { key: c.w.key, body }, WriteMode::Create, 1, body.len() as u64)
+            },
+            Some(etag) => {
+                let etag = EtagSpec(etag);
+                let after = echod_concrete::node::spec_stored_body(c.after);
+                let (delta, changed) = document::spec_encode_delta(c.w.loaded.document, c.after);
+                let removed = document::spec_removed_any(document::spec_loaded_body(c.w.loaded), after);
+                let after_len = echod_concrete::node::spec_body_len(after) as usize;
+                let stale_after = c.w.loaded.change_count.saturating_add(changed).saturating_sub(after_len);
+                let append = c.w.loaded.append_certified
+                    && document::spec_loaded_version(c.w.loaded) > 0
+                    && document::spec_loaded_version(c.w.loaded)
+                        < u64::MAX
+                    && !removed
+                    && s.cfg.appendable
+                    && s.cfg.compact > 0
+                    && stale_after < s.cfg.compact as usize
+                    && delta.len()
+                        <= (u64::MAX - c.w.loaded.bytes) as nat;
+                if append {
+                    let n = c.w.loaded.change_count.saturating_add(changed);
+                    let b = c.w.loaded.bytes.saturating_add(
+                        delta.len() as u64,
+                    );
+                    (StoreReqSpec::AppIfMatch { key: c.w.key, offset: c.w.loaded.bytes, body: delta, etag }, WriteMode::Append, n, b)
+                } else {
+                    let body = document::spec_encode(c.after);
+                    (StoreReqSpec::PutIfMatch { key: c.w.key, body, etag }, WriteMode::Rewrite, 1, body.len() as u64)
+                }
+            },
+        };
+        let len = match call {
+            StoreReqSpec::PutIfNoneMatch { body, .. } | StoreReqSpec::AppIfMatch { body, .. } | StoreReqSpec::PutIfMatch { body, .. } => body.len() as usize,
+            _ => 0usize,
+        };
+        let required_timer = match c.after {
+            echod_concrete::node::StoredDocumentV::Workflow(workflow)
+                if crate::global_store_invariants::top_level_pending(
+                    workflow,
+                ) =>
+                    match crate::verified::commit_spec::spec_keep(
+                        c.seq.plan,
+                    ) {
+                        Some(key) => Some(
+                            crate::state::spec_key_name(
+                                s,
+                                key,
+                                s.node.core.id,
+                            ),
+                        ),
+                        None => None,
+                    },
+            _ => None,
+        };
+        let certificate = match mode {
+            WriteMode::Append =>
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::DocumentAppend {
+                        before: c.w.loaded.document,
+                        after: c.after,
+                        required_timer,
+                        before_change_count: c.w.loaded.change_count,
+                        change_count,
+                        bytes,
+                    },
+            _ =>
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::DocumentFull {
+                        before: c.w.loaded.document,
+                        after: c.after,
+                        required_timer,
+                        change_count,
+                        bytes,
+                    },
+        };
+        let (s, op) = crate::state::spec_store_certified(
+            s,
+            call,
+            Owner::Flight(fid),
+            certificate,
+        );
+        match op {
+            Some(op) => {
+                let s = if c.after is Workflow {
+                    S {
+                        cache: crate::cache::spec_remove(
+                            s.cache,
+                            c.w.target,
+                        ),
+                        ..s
+                    }
+                } else {
+                    s
+                };
+                (s, CommittingSpec { issued: Some(IssuedSpec::Write { op, mode, change_count, bytes, len }), ..c }, true)
+            },
+            None => (s, c, false),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1568,37 @@ pub proof fn lemma_remove_insert<K, V>(m: Map<K, V>, k: K, v: V)
 }
 
 impl State {
+    pub fn abandon_slot(&mut self, name: &str)
+        ensures
+            final(self).deep_view()
+                == spec_abandon_slot(old(self).deep_view(), name@),
+    {
+        let ghost before = self.deep_view();
+        let mut slot = self.slot_take(name);
+        let ghost without_slot = self.deep_view();
+        let ghost original_slot = slot.deep_view();
+        assert(without_slot == spec_without_slot(before, name@));
+        assert(original_slot == spec_slot_of(before, name@));
+        slot.busy = None;
+        assert(slot.deep_view() == SlotSpec {
+            busy: None,
+            ..original_slot
+        });
+        self.slot_put(name, slot);
+        proof {
+            reveal(spec_abandon_slot);
+            reveal(spec_without_slot);
+            reveal(spec_with_slot);
+            assert(self.deep_view().flights.slots
+                == before.flights.slots.insert(
+                    name@,
+                    SlotSpec { busy: None, ..original_slot },
+                ));
+            assert(self.deep_view().flights.inflight
+                == before.flights.inflight);
+        }
+    }
+
     /// The slot of `name`, taken out of the table; empty when it had none.
     pub fn slot_take(&mut self, name: &str) -> (r: Slot)
         ensures
@@ -1261,17 +1676,22 @@ impl State {
             reveal(spec_start);
         }
         let id = self.next_flight;
-        self.next_flight = self.next_flight.wrapping_add(1);
+        let allocated = self.allocate_flight();
         let name = target.name();
-        let ghost s1 = self.deep_view();
-        let mut slot = self.slot_take(name.as_str());
-        slot.busy = Some(id);
-        self.slot_put(name.as_str(), slot);
-        proof {
-            lemma_remove_insert(s1.flights.slots, name@, self.flights.slots.deep_view()[name@]);
-        }
         let f = Flight { id, target, work, attempt: 0, phase: Phase::Idle, firing, debug, idle: false };
-        self.begin(f);
+        match allocated {
+            None => self.op_exhausted(f),
+            Some(_) => {
+                let ghost s1 = self.deep_view();
+                let mut slot = self.slot_take(name.as_str());
+                slot.busy = Some(id);
+                self.slot_put(name.as_str(), slot);
+                proof {
+                    lemma_remove_insert(s1.flights.slots, name@, self.flights.slots.deep_view()[name@]);
+                }
+                self.begin(f);
+            },
+        }
     }
 
     /// The slot of `name` is free: whatever waits on it goes next.
@@ -1358,31 +1778,115 @@ impl State {
     }
 
     /// Start, or start over after a lost race.
+    #[verifier::rlimit(30)]
     pub fn begin(&mut self, f: Flight)
         ensures
             final(self).deep_view() == spec_begin(old(self).deep_view(), f.deep_view()),
     {
         proof {
             reveal(spec_begin);
+            reveal(spec_load_origin);
+            reveal(spec_op_exhausted);
+            reveal(spec_abandon_slot);
+            reveal(crate::handler_timers::spec_timer_op_exhausted);
         }
+        let ghost s0 = self.deep_view();
+        let ghost f0 = f.deep_view();
         let Flight { id, target, work, attempt, phase: _, firing, debug, idle } = f;
         match &work {
             Work::Fire { schedule, .. } => {
                 let key = self.keys.sched_key(schedule.as_str());
-                let op = self.store(StoreReq::Get { key }, Owner::Flight(id));
-                let f = Flight { id, target, work, attempt, phase: Phase::FireLoadingSchedule { op }, firing, debug, idle };
-                self.inflight(f);
+                let op = self.store_certified(
+                    StoreReq::Get { key },
+                    Owner::Flight(id),
+                    Ghost(
+                        crate::global_store_invariants::
+                            StoreEffectCertificateV::ScheduleRead {
+                                key: spec_sched_key(
+                                    s0.keys.prefix,
+                                    schedule@,
+                                ),
+                                schedule: schedule@,
+                                etag: None,
+                                fid: id,
+                            },
+                    ),
+                );
+                match op {
+                    Some(op) => {
+                        let f = Flight { id, target, work, attempt, phase: Phase::FireLoadingSchedule { op }, firing, debug, idle };
+                        self.inflight(f);
+                        proof {
+                            assert(self.deep_view() == spec_begin(s0, f0));
+                        }
+                    },
+                    None => {
+                        let f = Flight { id, target, work, attempt, phase: Phase::Idle, firing, debug, idle };
+                        self.op_exhausted(f);
+                        proof {
+                            assert(self.deep_view() == spec_begin(s0, f0));
+                        }
+                    },
+                }
             },
             _ => {
-                let (op, revalidating) = match &target {
-                    Target::Origin(o) => self.load_origin(id, o.as_str()),
+                match &target {
+                    Target::Origin(o) => {
+                        let (op, revalidating) =
+                            self.load_origin(id, o.as_str());
+                        match op {
+                            Some(op) => {
+                                let f = Flight { id, target, work, attempt, phase: Phase::Loading { op, revalidating }, firing, debug, idle };
+                                self.inflight(f);
+                                proof {
+                                    assert(self.deep_view() == spec_begin(s0, f0));
+                                }
+                            },
+                            None => {
+                                let f = Flight { id, target, work, attempt, phase: Phase::Idle, firing, debug, idle };
+                                self.op_exhausted(f);
+                                proof {
+                                    assert(self.deep_view() == spec_begin(s0, f0));
+                                }
+                            },
+                        }
+                    },
                     Target::Schedule(sid) => {
                         let key = self.keys.sched_key(sid.as_str());
-                        (self.store(StoreReq::Get { key }, Owner::Flight(id)), None)
+                        let op = self.store_certified(
+                            StoreReq::Get { key },
+                            Owner::Flight(id),
+                            Ghost(
+                                crate::global_store_invariants::
+                                    StoreEffectCertificateV::ScheduleRead {
+                                        key: spec_sched_key(
+                                            s0.keys.prefix,
+                                            sid@,
+                                        ),
+                                        schedule: sid@,
+                                        etag: None,
+                                        fid: id,
+                                    },
+                            ),
+                        );
+                        match op {
+                            Some(op) => {
+                                let f = Flight { id, target, work, attempt, phase: Phase::Loading { op, revalidating: None }, firing, debug, idle };
+                                self.inflight(f);
+                                proof {
+                                    assert(self.deep_view() == spec_begin(s0, f0));
+                                }
+                            },
+                            None => {
+                                let f = Flight { id, target, work, attempt, phase: Phase::Idle, firing, debug, idle };
+                                self.op_exhausted(f);
+                                proof {
+                                    assert(self.deep_view() == spec_begin(s0, f0));
+                                }
+                            },
+                        }
                     },
-                };
-                let f = Flight { id, target, work, attempt, phase: Phase::Loading { op, revalidating }, firing, debug, idle };
-                self.inflight(f);
+                }
             },
         }
     }
@@ -1454,7 +1958,7 @@ impl State {
             Phase::FireLoadingSchedule { .. } => self.answered_fire_loading_schedule(f, outcome),
             Phase::FireLoadingOrigin { revalidating, ctx, .. } => self.answered_fire_loading_origin(f, revalidating, ctx, outcome),
             Phase::FireIdle { commit } => self.answered_fire_idle(fid, f, commit, outcome),
-            Phase::FireOrigin { commit, ctx, t } => self.answered_fire_origin(fid, f, commit, ctx, t, outcome),
+            Phase::FireOrigin { commit, ctx, t, outbox } => self.answered_fire_origin(fid, f, commit, ctx, t, outbox, outcome),
             Phase::FireSchedule { commit } => self.answered_fire_schedule(fid, f, commit, outcome),
             _ => self.fail(f, text("an answer the flight did not wait for")),
         }
@@ -1499,6 +2003,7 @@ impl State {
             },
             Progress::Done(fired) => self.committed(f, done, fired),
             Progress::Failed(e) => self.commit_failed(f, e),
+            Progress::Exhausted => self.op_exhausted(f),
         }
     }
 
@@ -1516,6 +2021,7 @@ impl State {
             },
             Progress::Done(fired) => self.committed(f, done, fired),
             Progress::Failed(e) => self.commit_failed(f, e),
+            Progress::Exhausted => self.op_exhausted(f),
         }
     }
 
@@ -1548,7 +2054,9 @@ impl State {
         match self.loaded_origin(ctx.origin.as_str(), revalidating, outcome) {
             Ok(wo) => self.fire_run(f, ctx, wo),
             Err(e) => {
-                self.release(ctx.origin.as_str());
+                let lane =
+                    Target::Origin(copy_string(&ctx.origin)).name();
+                self.release(lane.as_str());
                 self.fail(f, e);
             },
         }
@@ -1575,32 +2083,64 @@ impl State {
                 self.note(Note::SweepEnd { flight: fid, committed: false });
                 self.commit_failed(f, e);
             },
+            Progress::Exhausted => self.op_exhausted(f),
         }
     }
 
-    fn answered_fire_origin(&mut self, fid: FlightId, f: Flight, mut commit: Committing, ctx: FireCtx, t: u64, outcome: StoreRes)
+    #[verifier::rlimit(30)]
+    fn answered_fire_origin(
+        &mut self,
+        fid: FlightId,
+        f: Flight,
+        mut commit: Committing,
+        ctx: FireCtx,
+        t: u64,
+        outbox: Vec<(String, Message)>,
+        outcome: StoreRes,
+    )
         ensures
-            final(self).deep_view() == spec_answered_fire_origin(old(self).deep_view(), fid, f.deep_view(), commit.deep_view(), ctx.deep_view(), t, outcome),
+            final(self).deep_view() == spec_answered_fire_origin(
+                old(self).deep_view(),
+                fid,
+                f.deep_view(),
+                commit.deep_view(),
+                ctx.deep_view(),
+                t,
+                outbox.deep_view(),
+                outcome,
+            ),
     {
         proof {
             reveal(spec_answered_fire_origin);
         }
         match self.commit_advance(fid, &mut commit, Some(outcome)) {
             Progress::Issued => {
-                let f = Flight { phase: Phase::FireOrigin { commit, ctx, t }, ..f };
+                let f = Flight { phase: Phase::FireOrigin { commit, ctx, t, outbox }, ..f };
                 self.inflight(f);
             },
             Progress::Done(_) => {
                 self.note(Note::FireEnd { flight: fid, committed: true });
                 self.note(Note::Commit(CommitOutcome::Committed));
-                self.release(ctx.origin.as_str());
+                self.send_all(outbox);
+                let lane =
+                    Target::Origin(copy_string(&ctx.origin)).name();
+                self.release(lane.as_str());
                 self.fire_advance(f, ctx, t);
             },
             Progress::Failed(e) => {
                 self.note(Note::FireEnd { flight: fid, committed: false });
                 self.forget(ctx.origin.as_str());
-                self.release(ctx.origin.as_str());
+                let lane =
+                    Target::Origin(copy_string(&ctx.origin)).name();
+                self.release(lane.as_str());
                 self.commit_failed(f, e);
+            },
+            Progress::Exhausted => {
+                self.forget(ctx.origin.as_str());
+                let lane =
+                    Target::Origin(copy_string(&ctx.origin)).name();
+                self.abandon_slot(lane.as_str());
+                self.op_exhausted(f);
             },
         }
     }
@@ -1626,6 +2166,7 @@ impl State {
                 self.note(Note::AdvanceEnd { flight: fid, committed: false });
                 self.commit_failed(f, e);
             },
+            Progress::Exhausted => self.op_exhausted(f),
         }
     }
 
@@ -1635,7 +2176,7 @@ impl State {
 
     /// Ask for a workflow document: revalidated against the store when
     /// the cache holds a version, read in full otherwise.
-    pub fn load_origin(&mut self, fid: FlightId, origin: &str) -> (r: (OpId, Option<Cached>))
+    pub fn load_origin(&mut self, fid: FlightId, origin: &str) -> (r: (Option<OpId>, Option<Cached>))
         ensures
             ({
                 let (s, op, c) = spec_load_origin(old(self).deep_view(), fid, origin@);
@@ -1645,15 +2186,53 @@ impl State {
         proof {
             reveal(spec_load_origin);
         }
+        let ghost s0 = self.deep_view();
         let key = self.keys.doc_key(origin);
         match self.cache.get(origin) {
             Some(c) => {
                 let etag = Etag(copy_string(&c.etag.0));
-                (self.store(StoreReq::GetIfNoneMatch { key, etag }, Owner::Flight(fid)), Some(c))
+                let ghost requested = etag.deep_view();
+                (
+                    self.store_certified(
+                        StoreReq::GetIfNoneMatch { key, etag },
+                        Owner::Flight(fid),
+                        Ghost(
+                            crate::global_store_invariants::
+                                StoreEffectCertificateV::WorkflowRead {
+                                    key: spec_doc_key(
+                                        s0.keys.prefix,
+                                        origin@,
+                                    ),
+                                    origin: origin@,
+                                    etag: Some(requested),
+                                    fid,
+                                },
+                        ),
+                    ),
+                    Some(c),
+                )
             },
             None => {
                 self.note(Note::Cache(CacheResult::Miss));
-                (self.store(StoreReq::Get { key }, Owner::Flight(fid)), None)
+                (
+                    self.store_certified(
+                        StoreReq::Get { key },
+                        Owner::Flight(fid),
+                        Ghost(
+                            crate::global_store_invariants::
+                                StoreEffectCertificateV::WorkflowRead {
+                                    key: spec_doc_key(
+                                        s0.keys.prefix,
+                                        origin@,
+                                    ),
+                                    origin: origin@,
+                                    etag: None,
+                                    fid,
+                                },
+                        ),
+                    ),
+                    None,
+                )
             },
         }
     }
@@ -1673,10 +2252,18 @@ impl State {
         match revalidating {
             Some(c) => match outcome {
                 StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) } => {
-                    self.note(Note::Cache(CacheResult::Revalidated));
                     let Cached { loaded, etag, filled_at: _ } = c;
-                    self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
-                    Ok(Working { target, key, loaded, etag: Some(etag) })
+                    match document::validate_workflow_identity(
+                        loaded,
+                        origin,
+                    ) {
+                        Ok(loaded) => {
+                            self.note(Note::Cache(CacheResult::Revalidated));
+                            self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
+                            Ok(Working { target, key, loaded, etag: Some(etag) })
+                        },
+                        Err(e) => Err(e),
+                    }
                 },
                 StoreRes::GetIfNoneMatch { result: Ok(Read::Absent) } => {
                     self.note(Note::Cache(CacheResult::Absent));
@@ -1686,10 +2273,17 @@ impl State {
                 StoreRes::GetIfNoneMatch { result: Ok(Read::Body(bytes, etag)) } => {
                     self.note(Note::Cache(CacheResult::Refreshed));
                     match document::decode_workflow(bytes.as_slice()) {
-                        Ok(loaded) => {
-                            self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
-                            Ok(Working { target, key, loaded, etag: Some(etag) })
-                        },
+                        Ok(loaded) =>
+                            match document::validate_workflow_identity(
+                                loaded,
+                                origin,
+                            ) {
+                                Ok(loaded) => {
+                                    self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
+                                    Ok(Working { target, key, loaded, etag: Some(etag) })
+                                },
+                                Err(e) => Err(e),
+                            },
                         Err(e) => Err(e),
                     }
                 },
@@ -1699,10 +2293,17 @@ impl State {
             None => match outcome {
                 StoreRes::Get { result: Ok(None) } => Ok(Working { target, key, loaded: Loaded::empty_workflow(text(origin)), etag: None }),
                 StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::decode_workflow(bytes.as_slice()) {
-                    Ok(loaded) => {
-                        self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
-                        Ok(Working { target, key, loaded, etag: Some(etag) })
-                    },
+                    Ok(loaded) =>
+                        match document::validate_workflow_identity(
+                            loaded,
+                            origin,
+                        ) {
+                            Ok(loaded) => {
+                                self.remember(origin, Cached { loaded: loaded.copy(), etag: Etag(copy_string(&etag.0)), filled_at: now });
+                                Ok(Working { target, key, loaded, etag: Some(etag) })
+                            },
+                            Err(e) => Err(e),
+                        },
                     Err(e) => Err(e),
                 },
                 StoreRes::Get { result: Err(e) } => Err(error_text(&e)),
@@ -1731,14 +2332,13 @@ impl State {
             },
             Progress::Done(fired) => self.committed(f, done, fired),
             Progress::Failed(e) => self.commit_failed(f, e),
+            Progress::Exhausted => self.op_exhausted(f),
         }
     }
 
-    /// The step: `verified::flight::decide`, the concrete model's step on
-    /// the document, decided no earlier than the last step on the
-    /// document. A request is `handle`; a due key is `sweep`, every due
-    /// step on the document up to `SWEEP_STEPS`. A lost race runs this
-    /// again on what it re-read.
+    /// The step: `verified::flight::decide`, the concrete model's transition
+    /// on the document, decided no earlier than the last transition on it.
+    /// A lost race recomputes the transition on the reloaded document.
     pub fn decide(&mut self, work: &Work, w: Working) -> (r: (Committing, Done))
         ensures
             ({
@@ -1755,7 +2355,8 @@ impl State {
             Work::Sweep { .. } => Job::Sweep,
             Work::Fire { .. } => Job::Fire,
         };
-        let Decided { doc: after, response, born: _, notes } = flight::decide(job, document::loaded_body(&w.loaded), now, self.cfg.retry_timeout, SWEEP_STEPS);
+        let retry_timeout = effective_retry_timeout(self.cfg.retry_timeout);
+        let Decided { doc: after, response, born: _, notes } = flight::decide(job, document::loaded_body(&w.loaded), now, retry_timeout);
         let why = match work {
             Work::Request { req, kind, .. } => match &response {
                 Some(r) => {
@@ -1777,7 +2378,7 @@ impl State {
         (commit, Done { response, why, outbox, did })
     }
 
-    fn send_all(&mut self, outbox: Vec<(String, Message)>)
+    pub(crate) fn send_all(&mut self, outbox: Vec<(String, Message)>)
         ensures
             final(self).deep_view() == spec_send_all(old(self).deep_view(), outbox.deep_view()),
     {
@@ -1821,33 +2422,7 @@ impl State {
         self.send_all(outbox);
         let mut f = f;
         match &f.work {
-            Work::Request { id, kind, corr, action_kind, now, stage: Stage::Detached { then, check }, .. } => {
-                match (response, check) {
-                    (Some(Response::Promise(inner)), Some(check)) => {
-                        let work = Work::Request { id: *id, kind: copy_string(kind), corr: copy_string(corr), req: copy(check), action_kind: copy(action_kind), now: *now, stage: Stage::Check { inner: Some(inner) } };
-                        let then = then.copy();
-                        let debug = f.debug;
-                        self.submit(then, work, None, debug);
-                    },
-                    _ => {
-                        let id = *id;
-                        self.emit(Effect::Reply { id, response: Err(text("no answer")) });
-                    },
-                }
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Check { inner }, .. } => {
-                let response = match (response, inner) {
-                    (Some(Response::Status(st)), Some(inner)) => {
-                        let action = if st.status == 200 { Some(TaskFenceInnerRes::Create(copy(inner))) } else { None };
-                        let response = Response::TaskFence(TaskFenceRes { status: st.status, action });
-                        Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why })
-                    },
-                    _ => Err(text("no answer")),
-                };
-                let id = *id;
-                self.emit(Effect::Reply { id, response });
-            },
-            Work::Request { id, kind, corr, action_kind, stage: Stage::Whole, .. } => {
+            Work::Request { id, kind, corr, action_kind, .. } => {
                 let response = match response {
                     Some(response) => Ok(Answer::Step { kind: copy_string(kind), corr: copy_string(corr), action_kind: copy(action_kind), response, why }),
                     None => Err(text("no answer")),
@@ -1916,6 +2491,42 @@ impl State {
         self.finish(f, Err(e));
     }
 
+    pub fn op_exhausted(&mut self, f: Flight)
+        ensures
+            final(self).deep_view() == spec_op_exhausted(old(self).deep_view(), f.deep_view()),
+    {
+        proof {
+            reveal(spec_op_exhausted);
+        }
+        if let Some(firing) = &f.firing {
+            self.timer_op_exhausted(firing);
+        }
+        match &f.work {
+            Work::Request { id, kind, corr, req, action_kind, .. } => {
+                let id = *id;
+                let response = echod_abstract::machine::exhausted(req);
+                self.emit(Effect::Reply {
+                    id,
+                    response: Ok(Answer::Step {
+                        kind: copy_string(kind),
+                        corr: copy_string(corr),
+                        action_kind: copy(action_kind),
+                        response,
+                        why: None,
+                    }),
+                });
+            },
+            Work::Sweep { .. } => {
+                self.note(Note::Sweep(SweepOutcome::Failed));
+                let flight = f.id;
+                self.note(Note::SweepEnd { flight, committed: false });
+            },
+            Work::Fire { .. } => {},
+        }
+        let name = f.target.name();
+        self.abandon_slot(name.as_str());
+    }
+
     /// The flight is over: its slot goes to the next, and the key that
     /// fired it hears how it went.
     pub fn finish(&mut self, f: Flight, r: Result<Fired, String>)
@@ -1953,7 +2564,7 @@ impl State {
     /// nearest deadline. `fired` is the key whose firing this is.
     pub fn commit_new(&mut self, w: Working, after: DocumentBody, deadline: Option<u64>, now: u64, fired: Option<FiredKey>) -> (c: Committing)
         ensures
-            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, crate::concrete::document::nat_v(deadline), now, fired.deep_view()),
+            (final(self).deep_view(), c.deep_view()) == spec_commit_new(old(self).deep_view(), w.deep_view(), after@, echod_concrete::node::nat_v(deadline), now, fired.deep_view()),
     {
         proof {
             reveal(spec_commit_new);
@@ -1963,20 +2574,58 @@ impl State {
             Some(e) => Some(copy_string(&e.0)),
             None => None,
         };
-        let token = self.token();
         let etag_ref: Option<&String> = match &etag {
             Some(e) => Some(e),
             None => None,
         };
-        let seq = Sequence::new(&self.node.core, w.target.as_str(), etag_ref, deadline, changed_any, fired, token);
+        let sequence_origin = commit_sequence_origin(&w);
+        let seq = Sequence::new(
+            &self.node.core,
+            sequence_origin.as_str(),
+            etag_ref,
+            deadline,
+            changed_any,
+            fired,
+            0,
+        );
         let after = advance_stored(&w.loaded.document, after, now);
         Committing { w, after, now, seq, issued: None }
+    }
+
+    fn allocate_arm_token(&mut self, c: &mut Committing) -> (allocated: bool)
+        ensures
+            (final(self).deep_view(), final(c).deep_view(), allocated)
+                == spec_allocate_arm_token(
+                    old(self).deep_view(),
+                    old(c).deep_view(),
+                ),
+    {
+        proof {
+            reveal(spec_allocate_arm_token);
+        }
+        let needs_token = matches!(&c.seq.step, Step::Start)
+            && c.seq.plan.arm_at().is_some();
+        if !needs_token {
+            return true;
+        }
+        if self.ops_exhausted {
+            return false;
+        }
+        match self.token() {
+            Some(token) => {
+                c.seq.token = token;
+                true
+            },
+            None => false,
+        }
     }
 
     /// Drive a commit: `answer` is the store's answer to the call the
     /// commit waits on, if it waits on one. The wheel and the cache follow
     /// the answer; the sequence decides the next call; this makes it.
     /// Returns with that call issued, or the commit over.
+    #[verifier::rlimit(40)]
+    #[verifier::spinoff_prover]
     pub fn commit_advance(&mut self, fid: FlightId, c: &mut Committing, answer: Option<StoreRes>) -> (p: Progress)
         ensures
             (final(self).deep_view(), final(c).deep_view(), p.deep_view()) == spec_commit_advance(old(self).deep_view(), fid, old(c).deep_view(), answer),
@@ -1988,6 +2637,9 @@ impl State {
         if let Some(issued) = issued {
             self.answered(c, issued, &answer);
         }
+        if !self.allocate_arm_token(c) {
+            return Progress::Exhausted;
+        }
         let answer_ref: Option<&StoreRes> = match &answer {
             Some(o) => Some(o),
             None => None,
@@ -1997,19 +2649,75 @@ impl State {
             Outcome::Act(Act::PutKey(key)) => {
                 let by = copy_string(&self.cfg.node_id);
                 let name = self.key_name(&key, by.as_str());
-                let op = self.store(StoreReq::Put { key: copy_string(&name), body: Vec::new() }, Owner::Flight(fid));
-                c.issued = Some(Issued::Key { op, key, name, arm: true });
-                Progress::Issued
+                let ghost certificate =
+                    crate::global_store_invariants::
+                        StoreEffectCertificateV::TimerPut {
+                            key: key@,
+                            name: name@,
+                        };
+                proof {
+                    crate::global_store_invariants::
+                        lemma_key_name_is_certificate_timer(
+                            self.deep_view(),
+                            key@,
+                            by@,
+                        );
+                    reveal(
+                        crate::global_store_invariants::
+                            certificate_matches_request,
+                    );
+                }
+                let op = self.store_certified(
+                    StoreReq::Put {
+                        key: copy_string(&name),
+                        body: Vec::new(),
+                    },
+                    Owner::Flight(fid),
+                    Ghost(certificate),
+                );
+                match op {
+                    Some(op) => {
+                        c.issued = Some(Issued::Key { op, key, name, arm: true });
+                        Progress::Issued
+                    },
+                    None => Progress::Exhausted,
+                }
             },
             Outcome::Act(Act::Write { cond, idle }) => {
-                self.issue_write(fid, c, cond, idle);
-                Progress::Issued
+                if self.issue_write(fid, c, cond, idle) { Progress::Issued } else { Progress::Exhausted }
             },
             Outcome::Act(Act::DeleteKey { key, by }) => {
                 let name = self.key_name(&key, by.as_str());
-                let op = self.store(StoreReq::Del { key: copy_string(&name) }, Owner::Flight(fid));
-                c.issued = Some(Issued::Key { op, key, name, arm: false });
-                Progress::Issued
+                let ghost certificate =
+                    crate::global_store_invariants::
+                        StoreEffectCertificateV::TimerDelete {
+                            key: key@,
+                            name: name@,
+                        };
+                proof {
+                    crate::global_store_invariants::
+                        lemma_key_name_is_certificate_timer(
+                            self.deep_view(),
+                            key@,
+                            by@,
+                        );
+                    reveal(
+                        crate::global_store_invariants::
+                            certificate_matches_request,
+                    );
+                }
+                let op = self.store_certified(
+                    StoreReq::Del { key: copy_string(&name) },
+                    Owner::Flight(fid),
+                    Ghost(certificate),
+                );
+                match op {
+                    Some(op) => {
+                        c.issued = Some(Issued::Key { op, key, name, arm: false });
+                        Progress::Issued
+                    },
+                    None => Progress::Exhausted,
+                }
             },
             Outcome::Act(Act::Done { deleted }) => Progress::Done(if deleted { Fired::Deleted } else { Fired::Kept }),
             Outcome::Failed(Some(e)) => Progress::Failed(e),
@@ -2057,6 +2765,7 @@ impl State {
                                 document: clone_stored(&c.after),
                                 change_count,
                                 bytes,
+                                append_certified: true,
                             },
                             etag: Etag(copy_string(&etag.0)),
                             filled_at,
@@ -2073,20 +2782,27 @@ impl State {
     /// Write the document at a new version, conditionally on `cond`, the
     /// version loaded: the rows the step changed appended, or the whole
     /// document.
-    fn issue_write(&mut self, fid: FlightId, c: &mut Committing, cond: Option<String>, _idle: bool)
+    fn issue_write(&mut self, fid: FlightId, c: &mut Committing, cond: Option<String>, _idle: bool) -> (issued: bool)
         ensures
-            (final(self).deep_view(), final(c).deep_view()) == spec_issue_write(old(self).deep_view(), fid, old(c).deep_view(), cond.deep_view(), _idle),
+            ({
+                let (s, commit, ok) = spec_issue_write(old(self).deep_view(), fid, old(c).deep_view(), cond.deep_view(), _idle);
+                final(self).deep_view() == s && final(c).deep_view() == commit && issued == ok
+            }),
     {
         proof {
             reveal(spec_issue_write);
         }
+        let ghost spec_before = self.deep_view();
+        let ghost commit_before = c.deep_view();
+        let ghost cond_spec = cond.deep_view();
+        if !document::validate_for_write(&c.after) {
+            return false;
+        }
         let (call, mode, change_count, bytes) = match cond {
             None => {
-                let after = stored_body(&c.after);
                 let body = document::encode(&c.after);
-                let n = body_len(&after);
                 let b = body.len() as u64;
-                (StoreReq::PutIfNoneMatch { key: copy_string(&c.w.key), body }, WriteMode::Create, n, b)
+                (StoreReq::PutIfNoneMatch { key: copy_string(&c.w.key), body }, WriteMode::Create, 1, b)
             },
             Some(etag) => {
                 let etag = Etag(etag);
@@ -2098,15 +2814,26 @@ impl State {
                 let removed = document::removed_any(&before, &after);
                 let after_len = body_len(&after);
                 let stale_after = c.w.loaded.change_count.saturating_add(changed).saturating_sub(after_len);
-                let append = document::loaded_version(&c.w.loaded) > 0 && !removed && self.cfg.appendable && self.cfg.compact > 0 && stale_after < self.cfg.compact as usize;
+                let delta_len128 = delta.len() as u128;
+                let delta_len = delta.len() as u64;
+                let append = c.w.loaded.append_certified
+                    && document::loaded_version(&c.w.loaded) > 0
+                    && document::loaded_version(&c.w.loaded)
+                        < u64::MAX
+                    && !removed
+                    && self.cfg.appendable
+                    && self.cfg.compact > 0
+                    && stale_after < self.cfg.compact as usize
+                    && delta_len128
+                        <= (u64::MAX - c.w.loaded.bytes) as u128;
                 if append {
                     let n = c.w.loaded.change_count.saturating_add(changed);
-                    let b = c.w.loaded.bytes.saturating_add(delta.len() as u64);
+                    let b = c.w.loaded.bytes + delta_len;
                     (StoreReq::AppIfMatch { key: copy_string(&c.w.key), offset: c.w.loaded.bytes, body: delta, etag }, WriteMode::Append, n, b)
                 } else {
                     let body = document::encode(&c.after);
                     let b = body.len() as u64;
-                    (StoreReq::PutIfMatch { key: copy_string(&c.w.key), body, etag }, WriteMode::Rewrite, after_len, b)
+                    (StoreReq::PutIfMatch { key: copy_string(&c.w.key), body, etag }, WriteMode::Rewrite, 1, b)
                 }
             },
         };
@@ -2114,8 +2841,122 @@ impl State {
             StoreReq::PutIfNoneMatch { body, .. } | StoreReq::AppIfMatch { body, .. } | StoreReq::PutIfMatch { body, .. } => body.len(),
             _ => 0,
         };
-        let op = self.store(call, Owner::Flight(fid));
-        c.issued = Some(Issued::Write { op, mode, change_count, bytes, len });
+        let ghost required_timer = match c.after@ {
+            echod_concrete::node::StoredDocumentV::Workflow(workflow)
+                if crate::global_store_invariants::top_level_pending(
+                    workflow,
+                ) =>
+                    match crate::verified::commit_spec::spec_keep(
+                        c.seq@.plan,
+                    ) {
+                        Some(key) => Some(
+                            crate::state::spec_key_name(
+                                self.deep_view(),
+                                key,
+                                self.node.core.id@,
+                            ),
+                        ),
+                        None => None,
+                    },
+            _ => None,
+        };
+        let ghost certificate = match mode {
+            WriteMode::Append =>
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::DocumentAppend {
+                        before: c.w.loaded.document@,
+                        after: c.after@,
+                        required_timer,
+                        before_change_count: c.w.loaded.change_count,
+                        change_count,
+                        bytes,
+                    },
+            _ =>
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::DocumentFull {
+                        before: c.w.loaded.document@,
+                        after: c.after@,
+                        required_timer,
+                        change_count,
+                        bytes,
+                    },
+        };
+        let op = self.store_certified(
+            call,
+            Owner::Flight(fid),
+            Ghost(certificate),
+        );
+        let issued = match op {
+            Some(op) => {
+                if stored_is_workflow(&c.after) {
+                    let ghost before_forget = self.deep_view();
+                    let ghost target = c.w.target@;
+                    self.cache.forget(c.w.target.as_str());
+                    proof {
+                        assert(self.deep_view() == S {
+                            cache: crate::cache::spec_remove(
+                                before_forget.cache,
+                                target,
+                            ),
+                            ..before_forget
+                        });
+                    }
+                }
+                c.issued = Some(Issued::Write { op, mode, change_count, bytes, len });
+                proof {
+                    assert(c.deep_view() == CommittingSpec {
+                        issued: Some(IssuedSpec::Write {
+                            op,
+                            mode,
+                            change_count,
+                            bytes,
+                            len,
+                        }),
+                        ..commit_before
+                    });
+                }
+                true
+            },
+            None => false,
+        };
+        proof {
+            reveal(spec_issue_write);
+            let expected = spec_issue_write(
+                spec_before,
+                fid,
+                commit_before,
+                cond_spec,
+                _idle,
+            );
+            if issued {
+                assert(expected.1.issued is Some);
+                match expected.1.issued.unwrap() {
+                    IssuedSpec::Write {
+                        op,
+                        mode,
+                        change_count,
+                        bytes,
+                        len,
+                    } => {
+                        assert(c.deep_view().issued->Some_0->Write_op == op);
+                        assert(c.deep_view().issued->Some_0->Write_mode
+                            == mode);
+                        assert(c.deep_view().issued
+                            ->Some_0->Write_change_count == change_count);
+                        assert(c.deep_view().issued->Some_0->Write_bytes
+                            == bytes);
+                        assert(c.deep_view().issued->Some_0->Write_len
+                            == len);
+                    },
+                    _ => assert(false),
+                }
+            }
+            assert(c.deep_view().issued == expected.1.issued);
+            assert(self.deep_view() == expected.0);
+            assert(c.deep_view() == expected.1);
+            assert(issued == expected.2);
+        }
+        issued
     }
 }
 

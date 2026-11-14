@@ -33,7 +33,7 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_owner;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{StoreErrorSpec, StoreReqSpec};
 
 verus! {
 
@@ -95,11 +95,17 @@ pub open spec fn spec_timers_run(s: S, now: u64) -> S {
         } else if s.timers.loaded_through is Some && s.timers.loaded_through->Some_0 < spec_horizon(s, now) {
             let bucket = s.timers.loaded_through->Some_0.saturating_add(s.keys.bucket_ms);
             let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-            spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Extend { op, bucket }), ..s.timers })
+            match op {
+                Some(op) => spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Extend { op, bucket }), ..s.timers }),
+                None => s,
+            }
         } else if s.timers.closed_through is Some && s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms) < spec_bucket_of(now, s.keys.bucket_ms) {
             let bucket = s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms);
             let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-            spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Relist { op, bucket }), ..s.timers })
+            match op {
+                Some(op) => spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Relist { op, bucket }), ..s.timers }),
+                None => s,
+            }
         } else if s.timers.loaded_through is Some {
             spec_fire_due(s, now)
         } else {
@@ -116,7 +122,10 @@ pub open spec fn spec_reload(s: S, now: u64) -> S {
     let armed = s.timers.wheel.armed.filter(|k: SlotSpec| spec_owns_key(s, k.1));
     let s = spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed }, ..s.timers });
     let (s, op) = spec_store(s, StoreReqSpec::ListPrefixes { prefix: spec_timer_prefix(s.keys.prefix) }, Owner::Timers);
-    spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Prefixes { op, horizon }), ..s.timers })
+    match op {
+        Some(op) => spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Prefixes { op, horizon }), ..s.timers }),
+        None => s,
+    }
 }
 
 /// Take this node's share of a listed bucket into the wheel; `n` counts
@@ -153,7 +162,10 @@ pub open spec fn spec_list_buckets(s: S, prefixes: Seq<Seq<char>>, horizon: u64,
             Some(bucket) => {
                 if bucket <= horizon {
                     let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-                    (s, pending.insert(op, bucket))
+                    match op {
+                        Some(op) => (s, pending.insert(op, bucket)),
+                        None => (s, pending),
+                    }
                 } else {
                     (s, pending)
                 }
@@ -321,11 +333,11 @@ pub open spec fn spec_timer_fire(s: S, key: Seq<char>, at: u64, now: u64) -> S {
                 let firing = FiringSpec { key, at, kind, lag };
                 match entry {
                     TimerEntrySpec::Origin { origin, deadline, token, by } => {
-                        let fired = AFired { key: AKey { origin, at: deadline as nat, token: token as nat }, by };
+                        let fired = AFired { key: AKey { origin: "w:"@ + origin, at: deadline as nat, token: token as nat }, by };
                         spec_submit(s, TargetSpec::Origin(origin), WorkSpec::Sweep { fired: Some(fired), now }, Some(firing), false)
                     },
                     TimerEntrySpec::Schedule { id, deadline, token, by } => {
-                        let fired = AFired { key: AKey { origin: "sched:"@ + id, at: deadline as nat, token: token as nat }, by };
+                        let fired = AFired { key: AKey { origin: "s:"@ + id, at: deadline as nat, token: token as nat }, by };
                         spec_submit(s, TargetSpec::Schedule(id), WorkSpec::Fire { schedule: id, fired: Some(fired), now }, Some(firing), false)
                     },
                 }
@@ -349,6 +361,25 @@ pub open spec fn spec_timer_fired(s: S, firing: FiringSpec, now: u64, r: Result<
     };
     let s = spec_note(s, NoteSpec::TimerFire { kind: firing.kind, outcome, lag_ms: firing.lag });
     spec_dispatch_due(s, now, s.timers.backlog.len())
+}
+
+/// Allocation exhaustion happens before a fired key can issue its first Store
+/// request. Put the key back and undo the in-flight accounting without
+/// emitting any external effect.
+pub open spec fn spec_timer_op_exhausted(
+    s: S,
+    firing: FiringSpec,
+) -> S {
+    let fired_at = firing.at.saturating_add(firing.lag);
+    let rearm = spec_max(fired_at, firing.at)
+        .saturating_add(RETRY_AFTER_MS);
+    spec_with_timers(s, TimersSpec {
+        inflight: s.timers.inflight.saturating_sub(1),
+        wheel: TimerWheelSpec {
+            armed: spec_arm(s.timers.wheel.armed, rearm, firing.key),
+        },
+        ..s.timers
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +456,7 @@ impl State {
 
     /// Load what is owed, else fire what is due. Called whenever time
     /// passed or a listing ended.
+    #[verifier::spinoff_prover]
     pub fn timers_run(&mut self, now: u64)
         ensures
             final(self).deep_view() == spec_timers_run(old(self).deep_view(), now),
@@ -451,8 +483,9 @@ impl State {
                 // Bring the loaded range up to the horizon, one bucket at a time.
                 let bucket = through.saturating_add(self.keys.bucket_ms());
                 let prefix = self.keys.bucket_prefix(bucket);
-                let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
-                self.timers.listing = Some(Listing::Extend { op, bucket });
+                if let Some(op) = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers) {
+                    self.timers.listing = Some(Listing::Extend { op, bucket });
+                }
                 return;
             }
         }
@@ -462,8 +495,9 @@ impl State {
                 // The clock left a bucket this node listed ahead of time: list
                 // it once more, for what others armed into it since.
                 let prefix = self.keys.bucket_prefix(bucket);
-                let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
-                self.timers.listing = Some(Listing::Relist { op, bucket });
+                if let Some(op) = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers) {
+                    self.timers.listing = Some(Listing::Relist { op, bucket });
+                }
                 return;
             }
         }
@@ -519,8 +553,9 @@ impl State {
         }
         self.timers.wheel.armed = kept;
         let prefix = self.keys.timer_prefix();
-        let op = self.store(StoreReq::ListPrefixes { prefix }, Owner::Timers);
-        self.timers.listing = Some(Listing::Prefixes { op, horizon });
+        if let Some(op) = self.store(StoreReq::ListPrefixes { prefix }, Owner::Timers) {
+            self.timers.listing = Some(Listing::Prefixes { op, horizon });
+        }
     }
 
     /// Take this node's share of a listed bucket into the wheel.
@@ -588,8 +623,9 @@ impl State {
             if let Some(bucket) = self.keys.parse_bucket_prefix(prefixes[i].as_str()) {
                 if bucket <= horizon {
                     let prefix = self.keys.bucket_prefix(bucket);
-                    let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
-                    pending.insert(op, bucket);
+                    if let Some(op) = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers) {
+                        pending.insert(op, bucket);
+                    }
                 }
             }
             i += 1;
@@ -827,16 +863,36 @@ impl State {
         let firing = Firing { key, at, kind, lag };
         match entry {
             TimerEntry::Origin { origin, deadline, token, by } => {
-                let fired = FiredKey { key: Key { origin: copy_string(&origin), at: deadline, token }, by };
+                let fired = FiredKey { key: Key { origin: concat("w:", origin.as_str()), at: deadline, token }, by };
                 // The document handler sweeps the origin.
                 self.submit(Target::Origin(origin), Work::Sweep { fired: Some(fired), now }, Some(firing), false);
             },
             TimerEntry::Schedule { id, deadline, token, by } => {
-                let fired = FiredKey { key: Key { origin: concat("sched:", id.as_str()), at: deadline, token }, by };
+                let fired = FiredKey { key: Key { origin: concat("s:", id.as_str()), at: deadline, token }, by };
                 // The schedule handler runs the occurrence.
                 self.submit(Target::Schedule(copy_string(&id)), Work::Fire { schedule: id, fired: Some(fired), now }, Some(firing), false);
             },
         }
+    }
+
+    /// The flight a key fired is over.
+    pub fn timer_op_exhausted(&mut self, firing: &Firing)
+        ensures
+            final(self).deep_view()
+                == spec_timer_op_exhausted(
+                    old(self).deep_view(),
+                    firing.deep_view(),
+                ),
+    {
+        self.timers.inflight =
+            self.timers.inflight.saturating_sub(1);
+        let fired_at = firing.at.saturating_add(firing.lag);
+        let rearm = max_u64(fired_at, firing.at)
+            .saturating_add(RETRY_AFTER_MS);
+        self.timers.wheel.arm(
+            rearm,
+            copy_string(&firing.key),
+        );
     }
 
     /// The flight a key fired is over.

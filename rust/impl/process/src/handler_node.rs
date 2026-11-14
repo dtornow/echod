@@ -25,7 +25,7 @@ use crate::state_node::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::spec_read_config;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
+use echod_concrete::store::{EtagSpec, StoreErrorSpec, StoreReqSpec};
 
 verus! {
 
@@ -49,7 +49,10 @@ pub open spec fn spec_members_refresh(s: S, now: u64) -> S {
         let body = spec_announcement_bytes(me);
         let key = spec_node_key(s.keys.prefix, me.id);
         let (s, op) = spec_store(s, StoreReqSpec::Put { key, body }, Owner::Members);
-        spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Announcing { op, now }), ..s.node.members })
+        match op {
+            Some(op) => spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Announcing { op, now }), ..s.node.members }),
+            None => spec_refresh_ended(s, Err(spec_exhausted())),
+        }
     }
 }
 
@@ -74,7 +77,10 @@ pub open spec fn spec_read_nodes(s: S, keys: Seq<Seq<char>>, pending: Map<OpId, 
             (s, pending)
         } else {
             let (s, op) = spec_store(s, StoreReqSpec::Get { key }, Owner::Members);
-            (s, pending.insert(op, true))
+            match op {
+                Some(op) => (s, pending.insert(op, true)),
+                None => (s, pending),
+            }
         };
         spec_read_nodes(s, keys.drop_first(), pending)
     }
@@ -107,7 +113,10 @@ pub open spec fn spec_announced(s: S, now: u64, outcome: StoreRes) -> S {
     match outcome {
         StoreRes::Put { result: Ok(()) } => {
             let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_node_prefix(s.keys.prefix), max_keys: 10_000 }, Owner::Members);
-            spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Listing { op, now }), ..s.node.members })
+            match op {
+                Some(op) => spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Listing { op, now }), ..s.node.members }),
+                None => spec_refresh_ended(s, Err(spec_exhausted())),
+            }
         },
         StoreRes::Put { result: Err(e) } => spec_refresh_ended(s, Err(e.deep_view())),
         _ => spec_refresh_ended(s, Err(spec_unexpected())),
@@ -134,9 +143,14 @@ pub open spec fn spec_listed(s: S, now: u64, outcome: StoreRes) -> S {
 
 /// One announcement read: a live node joins the roster, a long dead one
 /// is collected, anything unreadable is not a node.
-#[verifier::opaque]
-pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec, now: u64, failed: Option<StoreErrorSpec>, outcome: StoreRes) -> S {
-    let (s, nodes, failed) = match outcome {
+pub open spec fn spec_read_one_outcome(
+    s: S,
+    nodes: RosterSpec,
+    now: u64,
+    failed: Option<StoreErrorSpec>,
+    outcome: StoreRes,
+) -> (S, RosterSpec, Option<StoreErrorSpec>) {
+    match outcome {
         StoreRes::Get { result: Ok(Some((bytes, _))) } => match spec_parse_announcement(bytes@) {
             Some(a) => {
                 let fleet_at = if s.node.fleet_at > a.at { s.node.fleet_at } else { a.at };
@@ -156,7 +170,13 @@ pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec
         StoreRes::Get { result: Ok(None) } => (s, nodes, failed),
         StoreRes::Get { result: Err(e) } => (s, nodes, Some(e.deep_view())),
         _ => (s, nodes, Some(spec_unexpected())),
-    };
+    }
+}
+
+#[verifier::opaque]
+pub open spec fn spec_read_one(s: S, pending: Map<OpId, bool>, nodes: RosterSpec, now: u64, failed: Option<StoreErrorSpec>, outcome: StoreRes) -> S {
+    let (s, nodes, failed) =
+        spec_read_one_outcome(s, nodes, now, failed, outcome);
     if !(pending =~= Map::<OpId, bool>::empty()) {
         spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Reading { pending, nodes, now, failed }), ..s.node.members })
     } else {
@@ -209,7 +229,10 @@ pub open spec fn spec_written(s: S, next: ConfigurationSpec, outcome: StoreRes) 
 #[verifier::opaque]
 pub open spec fn spec_read_configuration(s: S, nodes: RosterSpec) -> S {
     let (s, op) = spec_store(s, StoreReqSpec::Get { key: spec_members_key(s.keys.prefix) }, Owner::Members);
-    spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Config { op, nodes }), ..s.node.members })
+    match op {
+        Some(op) => spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Config { op, nodes }), ..s.node.members }),
+        None => spec_refresh_ended(s, Err(spec_exhausted())),
+    }
 }
 
 #[verifier::opaque]
@@ -242,7 +265,10 @@ pub open spec fn spec_write_members(s: S, config: ConfigurationSpec, etag: Optio
             None => StoreReqSpec::PutIfNoneMatch { key, body },
         };
         let (s, op) = spec_store(s, call, Owner::Members);
-        spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Writing { op, next }), ..s.node.members })
+        match op {
+            Some(op) => spec_with_members(s, MembersSpec { refresh: Some(RefreshSpec::Writing { op, next }), ..s.node.members }),
+            None => spec_refresh_ended(s, Err(spec_exhausted())),
+        }
     } else {
         spec_refresh_ended(s, Ok(()))
     }
@@ -299,8 +325,10 @@ impl State {
         self.node.members.me.at = now;
         let body = announcement_bytes(&self.node.members.me);
         let key = self.keys.node_key(self.node.members.me.id.as_str());
-        let op = self.store(StoreReq::Put { key, body }, Owner::Members);
-        self.node.members.refresh = Some(Refresh::Announcing { op, now });
+        match self.store(StoreReq::Put { key, body }, Owner::Members) {
+            Some(op) => self.node.members.refresh = Some(Refresh::Announcing { op, now }),
+            None => self.refresh_ended(Err(exhausted())),
+        }
     }
 
     pub fn members_tick(&mut self, now: u64)
@@ -348,8 +376,9 @@ impl State {
                 None => false,
             };
             if !mine {
-                let op = self.store(StoreReq::Get { key }, Owner::Members);
-                pending.insert(op, true);
+                if let Some(op) = self.store(StoreReq::Get { key }, Owner::Members) {
+                    pending.insert(op, true);
+                }
             }
             i += 1;
         }
@@ -396,8 +425,10 @@ impl State {
         match outcome {
             StoreRes::Put { result: Ok(()) } => {
                 let prefix = self.keys.node_prefix();
-                let op = self.store(StoreReq::List { prefix, max_keys: 10_000 }, Owner::Members);
-                self.node.members.refresh = Some(Refresh::Listing { op, now });
+                match self.store(StoreReq::List { prefix, max_keys: 10_000 }, Owner::Members) {
+                    Some(op) => self.node.members.refresh = Some(Refresh::Listing { op, now }),
+                    None => self.refresh_ended(Err(exhausted())),
+                }
             },
             StoreRes::Put { result: Err(e) } => self.refresh_ended(Err(e)),
             _ => self.refresh_ended(Err(unexpected())),
@@ -429,15 +460,28 @@ impl State {
         }
     }
 
-    /// One announcement read: a live node joins the roster, a long dead one
-    /// is collected, anything unreadable is not a node.
-    fn read_one(&mut self, pending: Table<OpId, bool>, mut nodes: Roster, now: u64, failed: Option<StoreError>, outcome: StoreRes)
+    #[verifier::spinoff_prover]
+    fn read_one_outcome(
+        &mut self,
+        mut nodes: Roster,
+        now: u64,
+        failed: Option<StoreError>,
+        outcome: StoreRes,
+    ) -> (result: (Roster, Option<StoreError>))
         ensures
-            final(self).deep_view() == spec_read_one(old(self).deep_view(), pending@, nodes.deep_view(), now, failed.deep_view(), outcome),
+            ({
+                let (s, ns, failure) = spec_read_one_outcome(
+                    old(self).deep_view(),
+                    nodes.deep_view(),
+                    now,
+                    failed.deep_view(),
+                    outcome,
+                );
+                &&& final(self).deep_view() == s
+                &&& result.0.deep_view() == ns
+                &&& result.1.deep_view() == failure
+            }),
     {
-        proof {
-            reveal(spec_read_one);
-        }
         let failed = match outcome {
             StoreRes::Get { result: Ok(Some((bytes, _))) } => {
                 if let Some(a) = parse_announcement(bytes.as_slice()) {
@@ -446,10 +490,16 @@ impl State {
                     }
                     if a.at.saturating_add(self.node.members.ttl) >= now {
                         nodes.insert(copy_string(&a.id), a);
-                    } else if a.at.saturating_add((2 as u64).saturating_mul(self.node.members.ttl)) < now {
-                        // Long dead: collect it. A node that is merely slow writes again.
+                    } else if a.at.saturating_add(
+                        (2 as u64).saturating_mul(
+                            self.node.members.ttl,
+                        ),
+                    ) < now {
                         let key = self.keys.node_key(a.id.as_str());
-                        self.store(StoreReq::Del { key }, Owner::Ignored);
+                        self.store(
+                            StoreReq::Del { key },
+                            Owner::Ignored,
+                        );
                     }
                 }
                 failed
@@ -458,6 +508,21 @@ impl State {
             StoreRes::Get { result: Err(e) } => Some(e),
             _ => Some(unexpected()),
         };
+        (nodes, failed)
+    }
+
+    /// One announcement read: a live node joins the roster, a long dead one
+    /// is collected, anything unreadable is not a node.
+    #[verifier::spinoff_prover]
+    fn read_one(&mut self, pending: Table<OpId, bool>, mut nodes: Roster, now: u64, failed: Option<StoreError>, outcome: StoreRes)
+        ensures
+            final(self).deep_view() == spec_read_one(old(self).deep_view(), pending@, nodes.deep_view(), now, failed.deep_view(), outcome),
+    {
+        proof {
+            reveal(spec_read_one);
+        }
+        let (nodes, failed) =
+            self.read_one_outcome(nodes, now, failed, outcome);
         if !pending.is_empty() {
             self.node.members.refresh = Some(Refresh::Reading { pending, nodes, now, failed });
         } else {
@@ -533,8 +598,10 @@ impl State {
             reveal(spec_read_configuration);
         }
         let key = self.keys.members_key();
-        let op = self.store(StoreReq::Get { key }, Owner::Members);
-        self.node.members.refresh = Some(Refresh::Config { op, nodes });
+        match self.store(StoreReq::Get { key }, Owner::Members) {
+            Some(op) => self.node.members.refresh = Some(Refresh::Config { op, nodes }),
+            None => self.refresh_ended(Err(exhausted())),
+        }
     }
 
     fn take_on(&mut self, config: Configuration, etag: Option<Etag>, nodes: Roster)
@@ -581,8 +648,10 @@ impl State {
                 Some(etag) => StoreReq::PutIfMatch { key, body, etag },
                 None => StoreReq::PutIfNoneMatch { key, body },
             };
-            let op = self.store(call, Owner::Members);
-            self.node.members.refresh = Some(Refresh::Writing { op, next });
+            match self.store(call, Owner::Members) {
+                Some(op) => self.node.members.refresh = Some(Refresh::Writing { op, next }),
+                None => self.refresh_ended(Err(exhausted())),
+            }
         } else {
             self.refresh_ended(Ok(()));
         }

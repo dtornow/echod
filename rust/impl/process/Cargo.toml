@@ -1,6 +1,6 @@
 [package]
 name = "echod-process"
-description = "The decision core of echod: the executable concrete document machine and a pure state machine from events to effects."
+description = "The decision core of echod: a pure state machine from events to effects, no I/O, no clock, no runtime. The document machine is echod-concrete's; src/verified is the node's own proved bookkeeping."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,10 +13,9 @@ path = "src/lib.rs"
 # spec, proof, requires and ensures under plain rustc. `cargo verus verify`
 # checks the whole crate: `State::on_event` computes `spec_on_event`.
 [dependencies]
-echod-abstract-spec = { path = "../../spec/echod/abstract/spec" }
-echod-concrete-spec = { path = "../../spec/echod/concrete/spec" }
-echod-cron = { path = "../../comm/cron" }
-rover-spec = { path = "../../spec/rover/spec" }
+echod-abstract = { path = "../../spec/abstract" }
+echod-concrete = { path = "../../spec/concrete" }
+echod-rover = { path = "../../spec/rover" }
 echod-types = { path = "../../comm/types" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
@@ -24,11 +23,13 @@ verus_builtin_macros = "=0.0.0-2026-09-20-0158"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-[dev-dependencies]
-rover-exec = { path = "../../spec/rover/exec" }
-
 [package.metadata.verus]
 verify = true
+
+[features]
+default = ["key-algebra-proofs", "key-parser-proofs"]
+key-algebra-proofs = []
+key-parser-proofs = []
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_verify_core)'] }

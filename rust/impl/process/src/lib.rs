@@ -38,8 +38,8 @@
 //! `cargo build` compiles the same sources with the ghost code erased.
 //! What is assumed is listed in `verified/mod.rs`.
 //!
-//! The concrete Rover model decides: a request is `crate::concrete::handle`,
-//! a sweep `crate::concrete::sweep`, a schedule's run `run_due` and
+//! The concrete Rover model decides: a request is `echod_concrete::handle`,
+//! a sweep `echod_concrete::sweep`, a schedule's run `fire_schedule` and
 //! `create_occurrence`, each proved there to compute its specification.
 //! The handlers turn a document's rows into the model's `DocumentBody`, run the
 //! step by `verified::flight::decide`, and commit by `verified::flight::
@@ -55,11 +55,17 @@
 
 // Every module is inside `verus!`: cargo compiles the code, cargo-verus
 // checks that `State::on_event` computes `spec_on_event`.
-pub mod concrete;
 pub mod cache;
 pub mod config;
 pub mod debug;
 pub mod document;
+pub mod global_store_base;
+pub mod global_store_bounds;
+pub mod global_store_control;
+pub mod global_store_core;
+pub mod global_store_invariants;
+pub mod global_store_lane;
+pub mod global_store_world;
 pub mod handler;
 pub mod handler_docs;
 pub mod handler_node;
@@ -67,6 +73,11 @@ pub mod handler_sched;
 pub mod handler_timers;
 pub mod keys;
 pub mod reason;
+pub mod rover;
+pub mod rover_refinement;
+pub mod production_relation;
+pub mod production_world_refinement;
+pub mod refinement;
 pub mod state;
 pub mod state_node;
 pub mod state_timers;

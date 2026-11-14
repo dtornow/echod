@@ -1,6 +1,6 @@
 [package]
 name = "echod-test-runtime"
-description = "Synchronous deterministic effect interpreter for echod: one seed, a virtual clock, an in-memory store, and recorded sends."
+description = "Deterministic effect interpreter for echod: one seed, a virtual clock, an in-memory store, and a bus. No wall clock and no sockets."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,15 +12,12 @@ path = "src/lib.rs"
 [dependencies]
 echod-process = { path = "../../impl/process" }
 echod-cron = { path = "../../comm/cron" }
-echod-types = { path = "../../comm/types" }
-rover-spec = { path = "../../spec/rover/spec" }
+echod = { package = "echod-runtime", path = "../../impl/runtime" }
+resonate-core = { git = "https://github.com/resonatehq/resonate", rev = "28dfd016aa970332dc283e2431c406845e2ccc8f" }
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
-rover-exec = { path = "../../spec/rover/exec" }
-echod-abstract-spec = { path = "../../spec/echod/abstract/spec" }
-echod-abstract-exec = { path = "../../spec/echod/abstract/exec" }
-echod-model-test = { path = "../model" }
-echod-concrete-spec = { path = "../../spec/echod/concrete/spec" }
-vstd = "=0.0.0-2026-10-11-0230"
-
-[dev-dependencies]
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "macros", "sync", "test-util"] }
+tracing = "0.1"
+echod-rover = { path = "../../spec/rover" }
+echod-abstract = { path = "../../spec/abstract" }

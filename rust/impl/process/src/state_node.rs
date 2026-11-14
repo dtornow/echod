@@ -39,7 +39,9 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::store::before;
+use echod_concrete::store::before;
+#[cfg(verus_keep_ghost)]
+use echod_concrete::store::StoreReqSpec;
 
 use crate::types::*;
 use crate::verified::node::{str_eq, NodeCore};
@@ -48,7 +50,7 @@ use crate::verified::text::copy_string;
 use crate::Config;
 
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
+use echod_concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::ANode;
 
@@ -96,6 +98,8 @@ pub type Announced = (String, Announcement);
 pub type AnnouncedSpec = (Seq<char>, AnnouncementSpec);
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Roster {
     pub entries: Vec<Announced>,
 }
@@ -342,6 +346,8 @@ pub fn copy_members(a: &Vec<String>) -> (r: Vec<String>)
 
 /// A refresh in progress: announce, list, read each, read the
 /// configuration, write the next epoch if the announced set moved.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Refresh {
     Announcing { op: OpId, now: u64 },
     Listing { op: OpId, now: u64 },
@@ -396,6 +402,8 @@ impl Refresh {
 }
 
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Members {
     pub me: Announcement,
     pub heartbeat_ms: u64,
@@ -468,6 +476,8 @@ impl Members {
 /// What this process holds of the fleet: the proved membership core, the
 /// refresh in progress, and the latest instant any announcement carried.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Node {
     pub core: NodeCore,
     pub members: Members,
@@ -509,6 +519,72 @@ pub uninterp spec fn spec_configuration_bytes(c: ConfigurationSpec) -> Seq<u8>;
 /// default: epoch 0, no members.
 pub uninterp spec fn spec_parse_configuration(bytes: Seq<u8>) -> ConfigurationSpec;
 
+pub open spec fn spec_announcement_store_body_representable(
+    announcement: AnnouncementSpec,
+) -> bool {
+    spec_announcement_bytes(announcement).len() <= usize::MAX as int
+}
+
+pub open spec fn spec_configuration_store_body_representable(
+    configuration: ConfigurationSpec,
+) -> bool {
+    spec_configuration_bytes(configuration).len() <= usize::MAX as int
+}
+
+pub proof fn lemma_unrepresentable_announcement_store_body_rejected(
+    state: crate::state::S,
+    key: Seq<char>,
+    announcement: AnnouncementSpec,
+)
+    requires
+        !spec_announcement_store_body_representable(announcement),
+    ensures
+        crate::state::spec_store(
+            state,
+            StoreReqSpec::Put {
+                key,
+                body: spec_announcement_bytes(announcement),
+            },
+            crate::state::Owner::Members,
+        ) == (state, None),
+{
+    crate::state::lemma_unrepresentable_store_request_stutters(
+        state,
+        StoreReqSpec::Put {
+            key,
+            body: spec_announcement_bytes(announcement),
+        },
+        crate::state::Owner::Members,
+    );
+}
+
+pub proof fn lemma_unrepresentable_configuration_store_body_rejected(
+    state: crate::state::S,
+    key: Seq<char>,
+    configuration: ConfigurationSpec,
+)
+    requires
+        !spec_configuration_store_body_representable(configuration),
+    ensures
+        crate::state::spec_store(
+            state,
+            StoreReqSpec::Put {
+                key,
+                body: spec_configuration_bytes(configuration),
+            },
+            crate::state::Owner::Members,
+        ) == (state, None),
+{
+    crate::state::lemma_unrepresentable_store_request_stutters(
+        state,
+        StoreReqSpec::Put {
+            key,
+            body: spec_configuration_bytes(configuration),
+        },
+        crate::state::Owner::Members,
+    );
+}
+
 pub assume_specification [codec::announcement_bytes](a: &Announcement) -> (r: Vec<u8>)
     ensures
         r@ == spec_announcement_bytes(a.deep_view());
@@ -528,8 +604,11 @@ pub assume_specification [codec::parse_configuration](bytes: &[u8]) -> (r: Confi
 pub fn announcement_bytes(a: &Announcement) -> (r: Vec<u8>)
     ensures
         r@ == spec_announcement_bytes(a.deep_view()),
+        spec_announcement_store_body_representable(a.deep_view()),
 {
-    codec::announcement_bytes(a)
+    let r = codec::announcement_bytes(a);
+    assert(r@.len() == r.len());
+    r
 }
 
 pub fn parse_announcement(bytes: &[u8]) -> (r: Option<Announcement>)
@@ -542,8 +621,11 @@ pub fn parse_announcement(bytes: &[u8]) -> (r: Option<Announcement>)
 pub fn configuration_bytes(c: &Configuration) -> (r: Vec<u8>)
     ensures
         r@ == spec_configuration_bytes(c.deep_view()),
+        spec_configuration_store_body_representable(c.deep_view()),
 {
-    codec::configuration_bytes(c)
+    let r = codec::configuration_bytes(c);
+    assert(r@.len() == r.len());
+    r
 }
 
 pub fn parse_configuration(bytes: &[u8]) -> (r: Configuration)

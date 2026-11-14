@@ -33,7 +33,7 @@ use crate::verified::node_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::StoreReqSpec;
+use echod_concrete::store::StoreReqSpec;
 
 verus! {
 
@@ -56,8 +56,50 @@ impl DeepView for Owner {
     }
 }
 
+#[cfg(verus_keep_ghost)]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct StoreRequestHistory {
+    pub inner: Ghost<Map<OpId, StoreReqSpec>>,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for StoreRequestHistory {
+    type V = Map<OpId, StoreReqSpec>;
+
+    open spec fn deep_view(&self) -> Self::V {
+        self.inner@
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct StoreCertificateHistory {
+    pub inner: Ghost<
+        Map<
+            OpId,
+            crate::global_store_invariants::StoreEffectCertificateV,
+        >,
+    >,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for StoreCertificateHistory {
+    type V = Map<
+        OpId,
+        crate::global_store_invariants::StoreEffectCertificateV,
+    >;
+
+    open spec fn deep_view(&self) -> Self::V {
+        self.inner@
+    }
+}
+
 /// The process. Every core transition uses `on_event`.
 #[make_spec_type]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct State {
     pub cfg: Config,
     pub keys: KeySpace,
@@ -69,9 +111,27 @@ pub struct State {
     /// The node's clock as the last event read it.
     pub clock: u64,
     pub tokens: u64,
+    /// `tokens` has passed `u64::MAX`. No timer arm token can be allocated
+    /// again during this process incarnation.
+    pub tokens_exhausted: bool,
     pub next_op: OpId,
+    /// `next_op` has passed `u64::MAX`. No operation id can be allocated
+    /// again during this process incarnation.
+    pub ops_exhausted: bool,
     pub next_flight: FlightId,
+    /// `next_flight` has passed `u64::MAX`. No flight id can be allocated
+    /// again during this process incarnation.
+    pub flights_exhausted: bool,
     pub ops: crate::verified::table::Table<OpId, Owner>,
+    /// Ghost-only immutable correlation from each active operation id to the
+    /// exact Store request issued under it. `on_event` consumes the matching
+    /// entry and atomically records every Store effect emitted by the event.
+    #[cfg(verus_keep_ghost)]
+    pub store_requests: StoreRequestHistory,
+    /// The complete immutable certificate captured atomically with each
+    /// active Store request and owner.
+    #[cfg(verus_keep_ghost)]
+    pub store_certificates: StoreCertificateHistory,
     /// One step in progress per document, and the queue behind it.
     pub flights: Flights,
     pub debug: crate::debug::Debug,
@@ -96,9 +156,14 @@ pub open spec fn spec_state_new(cfg: ConfigSpec) -> S {
         cache: crate::cache::spec_new(cfg.cache_entries, cfg.cache_bytes),
         clock: 0,
         tokens: (hash(cfg.url + "/"@ + cfg.node_id) as u64) | 1,
+        tokens_exhausted: false,
         next_op: 1,
+        ops_exhausted: false,
         next_flight: 1,
+        flights_exhausted: false,
         ops: Map::empty(),
+        store_requests: Map::empty(),
+        store_certificates: Map::empty(),
         flights: crate::handler_docs::spec_flights_new(),
         debug: crate::debug::spec_debug_new(),
         loops: false,
@@ -134,25 +199,316 @@ pub open spec fn spec_note(s: S, n: NoteSpec) -> S {
     S { out: s.out.push(EffectSpec::Note(n)), ..s }
 }
 
-/// Issue a store call; `owner` gets its answer.
-pub open spec fn spec_store(s: S, request: StoreReqSpec, owner: Owner) -> (S, OpId) {
-    let op = s.next_op;
-    (S {
-        next_op: s.next_op.wrapping_add(1),
-        ops: s.ops.insert(op, owner),
-        out: s.out.push(EffectSpec::Store { op, request }),
-        ..s
-    }, op)
+/// Rebuild the active Store-request correlation from the effects emitted by
+/// one atomic core event.  The core may recurse through Members, Timers, and
+/// document helpers while producing `effects`; keeping this fold at the event
+/// boundary avoids carrying append-only request history through every helper.
+pub open spec fn spec_record_store_requests(
+    requests: Map<OpId, StoreReqSpec>,
+    effects: Seq<EffectSpec>,
+) -> Map<OpId, StoreReqSpec>
+    decreases effects.len(),
+{
+    if effects.len() == 0 {
+        requests
+    } else {
+        let prefix = effects.drop_last();
+        let requests = spec_record_store_requests(requests, prefix);
+        match effects.last() {
+            EffectSpec::Store { op, request } =>
+                requests.insert(op, request),
+            _ => requests,
+        }
+    }
 }
 
-/// A token no other arm of this node has used.
-pub open spec fn spec_token(s: S) -> (S, u64) {
-    (S { tokens: s.tokens.wrapping_add(0x9e37_79b9_7f4a_7c15), ..s }, s.tokens)
+pub proof fn lemma_record_store_requests_contains_effect(
+    requests: Map<OpId, StoreReqSpec>,
+    effects: Seq<EffectSpec>,
+    i: int,
+    op: OpId,
+    request: StoreReqSpec,
+)
+    requires
+        0 <= i < effects.len(),
+        effects[i] == (EffectSpec::Store { op, request }),
+        forall|j: int, other: StoreReqSpec|
+            0 <= j < effects.len()
+                && effects[j] == (EffectSpec::Store {
+                        op,
+                        request: other,
+                    }) ==> j == i && other == request,
+    ensures
+        spec_record_store_requests(requests, effects)
+            .contains_key(op),
+        spec_record_store_requests(requests, effects)[op] == request,
+    decreases effects.len(),
+{
+    reveal(spec_record_store_requests);
+    if i < effects.len() - 1 {
+        lemma_record_store_requests_contains_effect(
+            requests,
+            effects.drop_last(),
+            i,
+            op,
+            request,
+        );
+        assert(effects.drop_last()[i] == effects[i]);
+        match effects.last() {
+            EffectSpec::Store {
+                op: last_op,
+                request: last_request,
+            } => {
+                if last_op == op {
+                    assert(i == effects.len() - 1);
+                    assert(last_request == request);
+                }
+            },
+            _ => {},
+        }
+    } else {
+        assert(i == effects.len() - 1);
+        assert(effects[i] == effects.last());
+    }
+}
+
+pub proof fn lemma_record_store_requests_preserves(
+    requests: Map<OpId, StoreReqSpec>,
+    effects: Seq<EffectSpec>,
+    op: OpId,
+)
+    requires
+        requests.contains_key(op),
+        forall|i: int, request: StoreReqSpec|
+            0 <= i < effects.len()
+                && effects[i]
+                    == (EffectSpec::Store { op, request }) ==> false,
+    ensures
+        spec_record_store_requests(requests, effects)
+            .contains_key(op),
+        spec_record_store_requests(requests, effects)[op]
+            == requests[op],
+    decreases effects.len(),
+{
+    reveal(spec_record_store_requests);
+    if effects.len() > 0 {
+        let prefix = effects.drop_last();
+        assert forall|i: int, request: StoreReqSpec|
+            0 <= i < prefix.len()
+                && prefix[i]
+                    == (EffectSpec::Store { op, request }) implies false by {
+            assert(prefix[i] == effects[i]);
+        };
+        lemma_record_store_requests_preserves(
+            requests,
+            prefix,
+            op,
+        );
+        match effects.last() {
+            EffectSpec::Store { op: last_op, request } => {
+                assert(last_op != op);
+            },
+            _ => {},
+        }
+    }
+}
+
+/// A Store request has an exact executable `StoreReq` carrier. This is the
+/// single totalization guard for every core-to-Store boundary: codec outputs
+/// and composed keys may be mathematical sequences in the pure model, but
+/// an effect is emitted only when all of them fit their Rust carriers.
+pub open spec fn spec_store_request_representable(
+    request: StoreReqSpec,
+) -> bool {
+    match request {
+        StoreReqSpec::Get { key }
+        | StoreReqSpec::Del { key } =>
+            key.len() <= usize::MAX as int,
+        StoreReqSpec::GetIfNoneMatch { key, etag } =>
+            key.len() <= usize::MAX as int
+                && etag.0.len() <= usize::MAX as int,
+        StoreReqSpec::PutIfMatch { key, body, etag }
+        | StoreReqSpec::AppIfMatch { key, body, etag, .. } =>
+            key.len() <= usize::MAX as int
+                && body.len() <= usize::MAX as int
+                && etag.0.len() <= usize::MAX as int,
+        StoreReqSpec::PutIfNoneMatch { key, body }
+        | StoreReqSpec::Put { key, body } =>
+            key.len() <= usize::MAX as int
+                && body.len() <= usize::MAX as int,
+        StoreReqSpec::List { prefix, .. }
+        | StoreReqSpec::ListPrefixes { prefix } =>
+            prefix.len() <= usize::MAX as int,
+    }
+}
+
+pub proof fn lemma_store_request_representable(request: &StoreReq)
+    ensures
+        spec_store_request_representable(request.deep_view()),
+{
+    match request {
+        StoreReq::Get { key } | StoreReq::Del { key } => {
+            crate::verified::text::string_bounded(&key);
+        },
+        StoreReq::GetIfNoneMatch { key, etag } => {
+            crate::verified::text::string_bounded(&key);
+            crate::verified::text::string_bounded(&etag.0);
+        },
+        StoreReq::PutIfMatch { key, body, etag }
+        | StoreReq::AppIfMatch { key, body, etag, .. } => {
+            crate::verified::text::string_bounded(&key);
+            assert(body@.len() == body.len());
+            crate::verified::text::string_bounded(&etag.0);
+        },
+        StoreReq::PutIfNoneMatch { key, body }
+        | StoreReq::Put { key, body } => {
+            crate::verified::text::string_bounded(&key);
+            assert(body@.len() == body.len());
+        },
+        StoreReq::List { prefix, .. }
+        | StoreReq::ListPrefixes { prefix } => {
+            crate::verified::text::string_bounded(&prefix);
+        },
+    }
+}
+
+/// Allocate and issue one Store call. `u64::MAX` is allocated once; after
+/// that, exhaustion is permanent for this process incarnation and no effect
+/// or owner is created. Unrepresentable pure-spec requests take the same safe
+/// no-effect path before operation allocation.
+pub open spec fn spec_store(
+    s: S,
+    request: StoreReqSpec,
+    owner: Owner,
+) -> (S, Option<OpId>) {
+    spec_store_raw(
+        s,
+        request,
+        owner,
+        crate::global_store_invariants::StoreEffectCertificateV::Other,
+    )
+}
+
+pub open spec fn spec_store_certified(
+    s: S,
+    request: StoreReqSpec,
+    owner: Owner,
+    certificate:
+        crate::global_store_invariants::StoreEffectCertificateV,
+) -> (S, Option<OpId>) {
+    spec_store_raw(s, request, owner, certificate)
+}
+
+pub open spec fn spec_store_raw(
+    s: S,
+    request: StoreReqSpec,
+    owner: Owner,
+    certificate:
+        crate::global_store_invariants::StoreEffectCertificateV,
+) -> (S, Option<OpId>) {
+    if s.ops_exhausted || !spec_store_request_representable(request) {
+        (s, None)
+    } else {
+        let op = s.next_op;
+        (S {
+            next_op: if op == u64::MAX { op } else { (op + 1) as u64 },
+            ops_exhausted: op == u64::MAX,
+            ops: s.ops.insert(op, owner),
+            store_requests: s.store_requests.insert(op, request),
+            store_certificates:
+                s.store_certificates.insert(op, certificate),
+            out: s.out.push(EffectSpec::Store { op, request }),
+            ..s
+        }, Some(op))
+    }
+}
+
+pub proof fn lemma_spec_store_totalized(
+    s: S,
+    request: StoreReqSpec,
+    owner: Owner,
+)
+    ensures
+        ({
+            let (next, op) = spec_store(s, request, owner);
+            match op {
+                None => next == s,
+                Some(op) => {
+                    &&& spec_store_request_representable(request)
+                    &&& next.store_requests.contains_key(op)
+                    &&& next.store_requests[op] == request
+                    &&& next.out.len() == s.out.len() + 1
+                    &&& next.out.last()
+                        == EffectSpec::Store { op, request }
+                },
+            }
+        }),
+{
+}
+
+pub proof fn lemma_unrepresentable_store_request_stutters(
+    s: S,
+    request: StoreReqSpec,
+    owner: Owner,
+)
+    requires
+        !spec_store_request_representable(request),
+    ensures
+        spec_store(s, request, owner) == (s, None),
+{
+}
+
+/// Allocate a timer-arm token. `u64::MAX` is allocated once; exhaustion is
+/// then permanent for this process incarnation.
+pub open spec fn spec_token(s: S) -> (S, Option<u64>) {
+    if s.tokens_exhausted {
+        (s, None)
+    } else {
+        let token = s.tokens;
+        (
+            S {
+                tokens: if token == u64::MAX {
+                    token
+                } else {
+                    (token + 1) as u64
+                },
+                tokens_exhausted: token == u64::MAX,
+                ..s
+            },
+            Some(token),
+        )
+    }
+}
+
+/// Allocate a flight id. `u64::MAX` is allocated once; exhaustion is then
+/// permanent for this process incarnation.
+pub open spec fn spec_flight(s: S) -> (S, Option<FlightId>) {
+    if s.flights_exhausted {
+        (s, None)
+    } else {
+        let flight = s.next_flight;
+        (
+            S {
+                next_flight: if flight == u64::MAX {
+                    flight
+                } else {
+                    (flight + 1) as u64
+                },
+                flights_exhausted: flight == u64::MAX,
+                ..s
+            },
+            Some(flight),
+        )
+    }
 }
 
 /// The name of a key in the bucket, armed by `by`.
 pub open spec fn spec_key_name(s: S, k: AKey, by: Seq<char>) -> Seq<char> {
-    if crate::verified::text::spec_starts_with(k.origin, "sched:"@) {
+    if crate::verified::text::spec_starts_with(k.origin, "s:"@) {
+        spec_sched_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin.skip(2), k.at as u64, k.token as u64, by)
+    } else if crate::verified::text::spec_starts_with(k.origin, "w:"@) {
+        spec_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin.skip(2), k.at as u64, k.token as u64, by)
+    } else if crate::verified::text::spec_starts_with(k.origin, "sched:"@) {
         spec_sched_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin.skip(6), k.at as u64, k.token as u64, by)
     } else {
         spec_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin, k.at as u64, k.token as u64, by)
@@ -242,9 +598,20 @@ impl State {
             cache,
             clock: 0,
             tokens: seed,
+            tokens_exhausted: false,
             next_op: 1,
+            ops_exhausted: false,
             next_flight: 1,
+            flights_exhausted: false,
             ops: crate::verified::table::Table::new(),
+            #[cfg(verus_keep_ghost)]
+            store_requests: StoreRequestHistory {
+                inner: Ghost(Map::empty()),
+            },
+            #[cfg(verus_keep_ghost)]
+            store_certificates: StoreCertificateHistory {
+                inner: Ghost(Map::empty()),
+            },
             flights: Flights::new(),
             debug: crate::debug::Debug::new(),
             loops: false,
@@ -276,6 +643,24 @@ impl State {
         self.node.core.fresh(self.now())
     }
 
+    pub(crate) fn allocate_flight(&mut self) -> (r: Option<FlightId>)
+        ensures
+            (final(self).deep_view(), r)
+                == spec_flight(old(self).deep_view()),
+    {
+        if self.flights_exhausted {
+            None
+        } else {
+            let flight = self.next_flight;
+            if flight == u64::MAX {
+                self.flights_exhausted = true;
+            } else {
+                self.next_flight = flight + 1;
+            }
+            Some(flight)
+        }
+    }
+
     /// Whether this node acts as owner of what the members make it the
     /// owner of: fresh, in a configuration with members.
     pub fn acting(&self) -> (r: bool)
@@ -305,25 +690,108 @@ impl State {
     }
 
     /// Issue a store call; `owner` gets its answer.
-    pub fn store(&mut self, request: StoreReq, owner: Owner) -> (op: OpId)
+    pub fn store(&mut self, request: StoreReq, owner: Owner) -> (op: Option<OpId>)
         ensures
             (final(self).deep_view(), op) == spec_store(old(self).deep_view(), request.deep_view(), owner),
     {
-        let op = self.next_op;
-        self.next_op = self.next_op.wrapping_add(1);
-        self.ops.insert(op, owner);
-        self.emit(Effect::Store { op, request });
-        op
+        self.store_raw(
+            request,
+            owner,
+            Ghost(
+                crate::global_store_invariants::
+                    StoreEffectCertificateV::Other,
+            ),
+        )
     }
 
-    /// A token no other arm of this node has used.
-    pub fn token(&mut self) -> (t: u64)
+    pub fn store_certified(
+        &mut self,
+        request: StoreReq,
+        owner: Owner,
+        certificate: Ghost<
+            crate::global_store_invariants::StoreEffectCertificateV,
+        >,
+    ) -> (op: Option<OpId>)
+        ensures
+            (final(self).deep_view(), op)
+                == spec_store_certified(
+                    old(self).deep_view(),
+                    request.deep_view(),
+                    owner,
+                    certificate@,
+                ),
+    {
+        self.store_raw(request, owner, certificate)
+    }
+
+    fn store_raw(
+        &mut self,
+        request: StoreReq,
+        owner: Owner,
+        certificate: Ghost<
+            crate::global_store_invariants::StoreEffectCertificateV,
+        >,
+    ) -> (op: Option<OpId>)
+        ensures
+            (final(self).deep_view(), op)
+                == spec_store_raw(
+                    old(self).deep_view(),
+                    request.deep_view(),
+                    owner,
+                    certificate@,
+                ),
+    {
+        proof {
+            lemma_store_request_representable(&request);
+        }
+        if self.ops_exhausted {
+            return None;
+        }
+        let op = self.next_op;
+        if op == u64::MAX {
+            self.ops_exhausted = true;
+        } else {
+            self.next_op = op + 1;
+        }
+        self.ops.insert(op, owner);
+        #[cfg(verus_keep_ghost)]
+        {
+            self.store_requests = StoreRequestHistory {
+                inner: Ghost(
+                    self.store_requests.deep_view().insert(
+                        op,
+                        request.deep_view(),
+                    ),
+                ),
+            };
+            self.store_certificates = StoreCertificateHistory {
+                inner: Ghost(
+                    self.store_certificates.deep_view().insert(
+                        op,
+                        certificate@,
+                    ),
+                ),
+            };
+        }
+        self.emit(Effect::Store { op, request });
+        Some(op)
+    }
+
+    /// Allocate a timer-arm token. The maximum token is returned once.
+    pub fn token(&mut self) -> (t: Option<u64>)
         ensures
             (final(self).deep_view(), t) == spec_token(old(self).deep_view()),
     {
+        if self.tokens_exhausted {
+            return None;
+        }
         let t = self.tokens;
-        self.tokens = self.tokens.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        t
+        if t == u64::MAX {
+            self.tokens_exhausted = true;
+        } else {
+            self.tokens = t + 1;
+        }
+        Some(t)
     }
 
     /// The name of a key in the bucket, armed by `by`.
@@ -331,20 +799,64 @@ impl State {
         ensures
             r@ == spec_key_name(self.deep_view(), k@, by@),
     {
-        match strip_prefix(k.origin.as_str(), "sched:") {
+        match strip_prefix(k.origin.as_str(), "s:") {
             Some(id) => {
                 proof {
-                    reveal_strlit("sched:");
-                    assert(k.origin@.subrange(0, 6) =~= "sched:"@);
-                    assert(k.origin@.skip(6) =~= id@);
+                    reveal_strlit("s:");
+                    assert(k.origin@.subrange(0, 2) =~= "s:"@);
+                    assert(k.origin@.skip(2) =~= id@);
                 }
                 self.keys.sched_timer_key(id.as_str(), k.at, k.token, by)
             },
-            None => {
-                proof {
-                    reveal_strlit("sched:");
-                }
-                self.keys.timer_key(k.origin.as_str(), k.at, k.token, by)
+            None => match strip_prefix(k.origin.as_str(), "w:") {
+                Some(origin) => {
+                    proof {
+                        reveal_strlit("s:");
+                        reveal_strlit("w:");
+                        assert(k.origin@.subrange(0, 2) =~= "w:"@);
+                        assert(k.origin@.skip(2) =~= origin@);
+                    }
+                    self.keys.timer_key(
+                        origin.as_str(),
+                        k.at,
+                        k.token,
+                        by,
+                    )
+                },
+                None => match strip_prefix(
+                    k.origin.as_str(),
+                    "sched:",
+                ) {
+                    Some(id) => {
+                        proof {
+                            reveal_strlit("s:");
+                            reveal_strlit("w:");
+                            reveal_strlit("sched:");
+                            assert(k.origin@.subrange(0, 6)
+                                =~= "sched:"@);
+                            assert(k.origin@.skip(6) =~= id@);
+                        }
+                        self.keys.sched_timer_key(
+                            id.as_str(),
+                            k.at,
+                            k.token,
+                            by,
+                        )
+                    },
+                    None => {
+                        proof {
+                            reveal_strlit("s:");
+                            reveal_strlit("w:");
+                            reveal_strlit("sched:");
+                        }
+                        self.keys.timer_key(
+                            k.origin.as_str(),
+                            k.at,
+                            k.token,
+                            by,
+                        )
+                    },
+                },
             },
         }
     }
@@ -495,5 +1007,248 @@ impl State {
 
     pub fn keys(&self) -> &KeySpace {
         &self.keys
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use echod_concrete::store::{StoreError, StoreReq, StoreRes};
+    use echod_types::{Request, Response, TaskGetReq};
+
+    #[test]
+    fn operation_id_max_is_issued_once_then_allocation_stutters() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.next_op = u64::MAX;
+
+        let first = state.store(
+            StoreReq::Get { key: "first".to_string() },
+            Owner::Ignored,
+        );
+        assert_eq!(first, Some(u64::MAX));
+        assert!(state.ops_exhausted);
+        let effects_after_first = state.out.len();
+        let owners_after_first = state.ops.entries.len();
+
+        let second = state.store(
+            StoreReq::Del { key: "second".to_string() },
+            Owner::Ignored,
+        );
+        assert_eq!(second, None);
+        assert_eq!(state.next_op, u64::MAX);
+        assert_eq!(state.out.len(), effects_after_first);
+        assert_eq!(state.ops.entries.len(), owners_after_first);
+    }
+
+    #[test]
+    fn flight_id_max_is_issued_once_then_allocation_stutters() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.next_flight = u64::MAX;
+
+        assert_eq!(state.allocate_flight(), Some(u64::MAX));
+        assert!(state.flights_exhausted);
+        assert_eq!(state.next_flight, u64::MAX);
+        assert_eq!(state.allocate_flight(), None);
+        assert_eq!(state.allocate_flight(), None);
+        assert_eq!(state.next_flight, u64::MAX);
+    }
+
+    #[test]
+    fn exhausted_max_response_replay_is_a_strict_stutter() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.node.members.next_heartbeat = Some(u64::MAX);
+        let current = state.store(
+            StoreReq::Get { key: "current".to_string() },
+            Owner::Ignored,
+        ).unwrap();
+        state.next_op = u64::MAX;
+        let old = state.store(
+            StoreReq::Get { key: "last".to_string() },
+            Owner::Ignored,
+        ).unwrap();
+        assert_eq!(old, u64::MAX);
+        let _ = state.take_out();
+
+        let response = StoreRes::Get {
+            result: Err(StoreError::PreconditionFailed),
+        };
+        let first = state.on_event(crate::types::Event::Store {
+            op: old,
+            response: response.clone(),
+            clock: 10,
+        });
+        assert!(first.is_empty());
+        assert!(!state.ops.contains(&old));
+        assert!(state.ops.contains(&current));
+
+        let owner_count = state.ops.entries.len();
+        let replay = state.on_event(crate::types::Event::Store {
+            op: old,
+            response,
+            clock: 99,
+        });
+        assert!(replay.is_empty());
+        assert_eq!(state.clock, 10);
+        assert_eq!(state.ops.entries.len(), owner_count);
+        assert_eq!(state.ops.get(&current), Some(&Owner::Ignored));
+        assert!(state.ops_exhausted);
+        assert_eq!(state.next_op, u64::MAX);
+    }
+
+    #[test]
+    fn exhausted_client_work_returns_409_without_store_effect() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.next_op = u64::MAX;
+        state.ops_exhausted = true;
+        state.node.members.next_heartbeat = Some(u64::MAX);
+        let event = crate::types::Event::Request {
+            clock: 1,
+            request: crate::types::RequestEvent::Protocol(
+                crate::types::Call {
+                    id: 7,
+                    kind: String::new(),
+                    corr: "client".to_string(),
+                    target: crate::target::Target::Origin(
+                        "order".to_string(),
+                    ),
+                    request: Request::TaskGet(TaskGetReq {
+                        id: "order:task".to_string(),
+                    }),
+                    action_kind: None,
+                    now: 1,
+                    pinned: false,
+                },
+            ),
+        };
+
+        let effects = state.on_event(event);
+        assert!(!effects.iter().any(|effect| {
+            matches!(effect, crate::types::Effect::Store { .. })
+        }));
+        assert!(effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::types::Effect::Reply {
+                    response: Ok(crate::types::Answer::Step {
+                        response: Response::TaskGet(response),
+                        ..
+                    }),
+                    ..
+                } if response.status == 409
+            )
+        }));
+    }
+
+    #[test]
+    fn exhausted_flight_client_work_returns_409_without_store_effect() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.next_flight = u64::MAX;
+        state.flights_exhausted = true;
+        state.node.members.next_heartbeat = Some(u64::MAX);
+        let effects = state.on_event(crate::types::Event::Request {
+            clock: 1,
+            request: crate::types::RequestEvent::Protocol(
+                crate::types::Call {
+                    id: 8,
+                    kind: String::new(),
+                    corr: "client".to_string(),
+                    target: crate::target::Target::Origin(
+                        "order".to_string(),
+                    ),
+                    request: Request::TaskGet(TaskGetReq {
+                        id: "order:task".to_string(),
+                    }),
+                    action_kind: None,
+                    now: 1,
+                    pinned: false,
+                },
+            ),
+        });
+
+        assert!(!effects.iter().any(|effect| {
+            matches!(effect, crate::types::Effect::Store { .. })
+        }));
+        assert!(effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::types::Effect::Reply {
+                    response: Ok(crate::types::Answer::Step {
+                        response: Response::TaskGet(response),
+                        ..
+                    }),
+                    ..
+                } if response.status == 409
+            )
+        }));
+        assert!(state.flights.inflight.entries.is_empty());
+    }
+
+    #[test]
+    fn exhausted_internal_timer_rearms_without_external_effect() {
+        use crate::handler_docs::{Firing, Flight, Phase, Work};
+        use crate::target::Target;
+        use crate::types::TimerKind;
+
+        let mut state = State::new(Config::memory("node-0"));
+        state.ops_exhausted = true;
+        state.next_op = u64::MAX;
+        state.timers.inflight = 1;
+        let flight = Flight {
+            id: 1,
+            target: Target::Origin("order".to_string()),
+            work: Work::Sweep { fired: None, now: 10 },
+            attempt: 0,
+            phase: Phase::Idle,
+            firing: Some(Firing {
+                key: "timer-key".to_string(),
+                at: 5,
+                kind: TimerKind::Origin,
+                lag: 5,
+            }),
+            debug: false,
+            idle: false,
+        };
+
+        state.op_exhausted(flight);
+        let effects = state.take_out();
+        assert_eq!(state.timers.inflight, 0);
+        assert_eq!(state.timers.wheel.len(), 1);
+        assert!(!effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::types::Effect::Store { .. }
+                    | crate::types::Effect::Reply { .. }
+                    | crate::types::Effect::Send { .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn timer_token_max_is_allocated_once_without_replay() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.tokens = u64::MAX;
+        state.tokens_exhausted = false;
+
+        assert_eq!(state.token(), Some(u64::MAX));
+        assert!(state.tokens_exhausted);
+        assert_eq!(state.tokens, u64::MAX);
+        assert_eq!(state.token(), None);
+        assert_eq!(state.token(), None);
+    }
+
+    #[test]
+    fn delayed_delete_identity_cannot_alias_after_token_exhaustion() {
+        let mut state = State::new(Config::memory("node-0"));
+        state.tokens = u64::MAX;
+        let old = state.keys.timer_key("order", 42, u64::MAX - 1, "node-0");
+
+        let current_token = state.token().expect("last fresh token");
+        let current = state.keys.timer_key("order", 42, current_token, "node-0");
+        assert_ne!(old, current);
+        assert_eq!(state.token(), None);
+
+        // No subsequent arm can recreate either identity: exhaustion occurs
+        // before a timer Put or a document CAS can be issued.
+        assert!(state.tokens_exhausted);
     }
 }

@@ -4,9 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use echod_abstract_spec::types as rows;
-use echod_abstract_exec::collections::{PMap, PSet};
-use echod_abstract_exec::state::{Promise, Store as AbstractStore, Task};
+use echod_abstract::types as rows;
+use echod_abstract::{PMap, PSet, Promise, Store as Model, Task};
 use serde_json::{json, Value};
 
 fn tags_out(t: &rows::Tags) -> Value {
@@ -191,7 +190,7 @@ pub fn decode(kind: &str, status: u16, data: &Value) -> rows::Response {
 }
 
 /// The model's state, from echod's snapshot: what the suggestions read.
-pub fn model_state(snap: &Value) -> AbstractStore {
+pub fn model_state(snap: &Value) -> Model {
     let mut promises: PMap<Promise> = PMap::empty();
     let mut callbacks: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for c in snap["callbacks"].as_array().into_iter().flatten() {
@@ -251,5 +250,5 @@ pub fn model_state(snap: &Value) -> AbstractStore {
             schedules.insert(c.id.clone(), c);
         }
     }
-    AbstractStore { promises, tasks, schedules }
+    Model { promises, tasks, schedules }
 }

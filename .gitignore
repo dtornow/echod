@@ -1,4 +1,5 @@
 target/
 node_modules/
 target-verus/
+.verus-solver-log/
 lib.long-type-*.txt

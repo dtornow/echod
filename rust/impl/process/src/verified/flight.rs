@@ -10,9 +10,9 @@
 
 use vstd::prelude::*;
 
-use crate::concrete::store::{StoreError, StoreRes};
-use crate::concrete::{
-    create_occurrence, request_transition, run_due, sweep, DocumentBody, Outbound, Pending,
+use echod_concrete::store::{StoreError, StoreRes};
+use echod_concrete::{
+    create_occurrence, fire_schedule, request_transition, sweep, DocumentBody, Outbound, Pending,
 };
 use echod_types::{Request, Response};
 
@@ -24,7 +24,7 @@ use super::commit_spec::*;
 #[cfg(verus_keep_ghost)]
 use super::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{notes_v, pend_v, NoteV, PendingV};
+use echod_concrete::node::{notes_v, pend_v, NoteV, PendingV};
 
 verus! {
 
@@ -63,9 +63,9 @@ pub struct Decided {
 }
 
 /// The step: the concrete model's, by the job.
-pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: u64) -> (r: Decided)
+pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64) -> (r: Decided)
     ensures
-        (r.doc@, r.response, pend_v(r.born@), notes_v(r.notes@)) == spec_step(job@, doc@, now, retry_timeout, limit as nat),
+        (r.doc@, r.response, pend_v(r.born@), notes_v(r.notes@)) == spec_step(job@, doc@, now, retry_timeout),
 {
     proof {
         assert(pend_v(Seq::<Pending>::empty()) =~= Seq::<PendingV>::empty());
@@ -74,16 +74,16 @@ pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: 
     match job {
         Job::Request(request) => {
             let (doc, response, born, notes) =
-                request_transition(doc, &request, now, retry_timeout, limit);
+                request_transition(doc, &request, now, retry_timeout);
             Decided { doc, response: Some(response), born, notes }
         },
         Job::Sweep => {
-            let (doc, born, notes) = sweep(doc, now, retry_timeout, limit);
+            let (doc, born, notes) = sweep(doc, now, retry_timeout);
             Decided { doc, response: None, born, notes }
         },
         Job::Fire => {
-            let (doc, born, notes) = run_due(doc, now, retry_timeout);
-            Decided { doc, response: None, born, notes }
+            let (doc, born) = fire_schedule(doc, now);
+            Decided { doc, response: None, born, notes: Vec::new() }
         },
         Job::Occurrence(pending) => {
             let doc = create_occurrence(doc, &pending, now);
@@ -97,7 +97,9 @@ pub fn decide(job: Job, doc: DocumentBody, now: u64, retry_timeout: u64, limit: 
 // ---------------------------------------------------------------------------
 
 /// The key that fired the flight, and the node that armed it.
-#[cfg_attr(not(verus_keep_ghost), derive(Clone, Debug))]
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
+#[cfg_attr(not(verus_keep_ghost), derive(Debug))]
 pub struct FiredKey {
     pub key: Key,
     pub by: String,
@@ -161,6 +163,8 @@ pub open spec fn answer_v(step: AStep, o: Option<&StoreRes>) -> AAnswer {
 }
 
 /// Where the commit stands: which call it waits on.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub enum Step {
     Start,
     PuttingKey(Key),
@@ -260,6 +264,8 @@ fn copy_step(s: &Step) -> (r: Step)
 }
 
 /// The commit of one step on one document.
+#[derive(Clone)]
+#[verifier::allow(autoderive_clone_without_spec)]
 pub struct Sequence {
     pub origin: String,
     /// The version loaded; after the write, the version written.
@@ -433,7 +439,7 @@ impl Sequence {
             Some(f) => {
                 let key = clone_key(&f.key);
                 let by = clone_string(&f.by);
-                core.collected(self.origin.as_str(), &key);
+                core.commit_collected(self.origin.as_str(), &key);
                 self.step = Step::DeletingFired(clone_key(&key));
                 Outcome::Act(Act::DeleteKey { key, by })
             },

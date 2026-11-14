@@ -6,9 +6,10 @@
 
 use vstd::prelude::*;
 
-use crate::handler_docs::{Stage, Work};
+use crate::handler_docs::Work;
 use crate::state::{Owner, State};
 use crate::types::*;
+use echod_types::{Response, StatusRes};
 
 #[cfg(verus_keep_ghost)]
 use crate::debug::*;
@@ -34,27 +35,42 @@ verus! {
 /// An event in, the effects it calls for out: the step of the process.
 #[verifier::opaque]
 pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
-    let clock = match event {
-        EventSpec::Request { clock, .. }
-        | EventSpec::Store { clock, .. }
-        | EventSpec::Wake { clock, .. } => clock,
-    };
-    let s = S { clock, ..s };
-    let s = if s.node.members.next_heartbeat is None
-        && !s.node.members.refreshing()
-    {
-        spec_members_tick(s, spec_now(s))
+    if event is Store && !s.ops.contains_key(event->Store_op) {
+        (S { out: Seq::empty(), ..s }, s.out)
     } else {
-        s
-    };
-    let s = match event {
+        spec_on_known_event(s, event)
+    }
+}
+
+pub open spec fn spec_dispatch_known_event(
+    s: S,
+    event: EventSpec,
+) -> S {
+    match event {
         EventSpec::Request { clock, request } => match request {
             RequestEventSpec::Protocol(call) => spec_request(s, call),
+            RequestEventSpec::EmptyHeartbeat { id, kind, corr, action_kind } =>
+                spec_emit(s, EffectSpec::Reply {
+                    id,
+                    response: Ok(AnswerSpec::Step {
+                        kind,
+                        corr,
+                        action_kind,
+                        response: Response::Status(StatusRes { status: 200 }),
+                        why: None,
+                    }),
+                }),
             RequestEventSpec::Debug(call) => spec_debug_begin(s, call),
         },
         EventSpec::Store { op, response, .. } => {
             let owner = if s.ops.contains_key(op) { Some(s.ops[op]) } else { None };
-            let s = S { ops: s.ops.remove(op), ..s };
+            let s = S {
+                ops: s.ops.remove(op),
+                store_requests: s.store_requests.remove(op),
+                store_certificates:
+                    s.store_certificates.remove(op),
+                ..s
+            };
             match owner {
                 Some(Owner::Flight(f)) => spec_flight_completed(s, f, op, response),
                 Some(Owner::Members) => spec_members_completed(s, op, response),
@@ -75,19 +91,77 @@ pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
                 s
             }
         },
+    }
+}
+
+pub open spec fn spec_on_known_event(
+    s: S,
+    event: EventSpec,
+) -> (S, Seq<EffectSpec>) {
+    let before = s;
+    let keys = s.keys;
+    let clock = match event {
+        EventSpec::Request { clock, .. }
+        | EventSpec::Store { clock, .. }
+        | EventSpec::Wake { clock, .. } => clock,
     };
+    let s = S { clock, ..s };
+    let s = if !(event is Store)
+        && s.node.members.next_heartbeat is None
+        && !s.node.members.refreshing()
+    {
+        spec_members_tick(s, spec_now(s))
+    } else {
+        s
+    };
+    let s = spec_dispatch_known_event(s, event);
     let s = spec_schedule_wake(s);
-    (S { out: Seq::empty(), ..s }, s.out)
+    let s = match event {
+        EventSpec::Store { op, .. }
+            if before.ops.contains_key(op)
+                && before.ops[op] is Flight => {
+            let freeze_before = S {
+                ops: before.ops.remove(op),
+                store_requests: before.store_requests.remove(op),
+                store_certificates:
+                    before.store_certificates.remove(op),
+                ..before
+            };
+            spec_freeze_active_store_certificates(freeze_before, s)
+        },
+        _ => s,
+    };
+    let next_op =
+        if s.next_op < before.next_op { before.next_op } else { s.next_op };
+    (S { out: Seq::empty(), keys, next_op, ..s }, s.out)
+}
+
+/// Certificates are immutable for the lifetime of an operation. Event
+/// handlers may consume one operation and issue fresh successors, but they
+/// must never rewrite a certificate belonging to an operation that remains
+/// active.
+pub open spec fn spec_freeze_active_store_certificates(
+    before: S,
+    after: S,
+) -> S {
+    S {
+        store_certificates: Map::new(
+            after.ops.dom(),
+            |op: u64|
+                if before.store_certificates.contains_key(op) {
+                    before.store_certificates[op]
+                } else {
+                    after.store_certificates[op]
+                },
+        ),
+        ..after
+    }
 }
 
 #[verifier::opaque]
 pub open spec fn spec_request(s: S, call: CallSpec) -> S {
     let now = if call.pinned || call.now > s.node.fleet_at { call.now } else { s.node.fleet_at };
-    let stage = match call.then {
-        Some((then, check)) => StageSpec::Detached { then, check: Some(check) },
-        None => StageSpec::Whole,
-    };
-    let work = WorkSpec::Request { id: call.id, kind: call.kind, corr: call.corr, req: call.request, action_kind: call.action_kind, now, stage };
+    let work = WorkSpec::Request { id: call.id, kind: call.kind, corr: call.corr, req: call.request, action_kind: call.action_kind, now };
     spec_submit(s, call.target, work, None, false)
 }
 
@@ -134,51 +208,202 @@ impl State {
     pub fn on_event(&mut self, event: Event) -> (out: Vec<Effect>)
         ensures
             (final(self).deep_view(), out.deep_view()) == spec_on_event(old(self).deep_view(), event.deep_view()),
+            final(self).keys.deep_view() == old(self).keys.deep_view(),
     {
         proof {
             reveal(spec_on_event);
         }
+        let ghost before = self.deep_view();
+        if let Event::Store { op, .. } = &event {
+            if !self.ops.contains(op) {
+                proof {
+                    assert(event.deep_view() is Store);
+                    assert(event.deep_view()->Store_op == *op);
+                    assert(!before.ops.contains_key(*op));
+                }
+                return self.take_out();
+            }
+        }
+        proof {
+            match &event {
+                Event::Store { op, .. } => {
+                    assert(before.ops.contains_key(*op));
+                    assert(event.deep_view()->Store_op == *op);
+                },
+                _ => {
+                    assert(!(event.deep_view() is Store));
+                },
+            }
+            assert(!(event.deep_view() is Store
+                && !before.ops.contains_key(
+                    event.deep_view()->Store_op,
+                )));
+        }
+        self.on_known_event(event)
+    }
+
+    fn preserve_next_op_floor(&mut self, floor: OpId)
+        ensures
+            final(self).deep_view() == (S {
+                next_op: if old(self).next_op < floor {
+                    floor
+                } else {
+                    old(self).next_op
+                },
+                ..old(self).deep_view()
+            }),
+    {
+        if self.next_op < floor {
+            self.next_op = floor;
+        }
+    }
+
+    #[verifier::rlimit(30)]
+    #[verifier::spinoff_prover]
+    fn on_known_event(&mut self, event: Event) -> (out: Vec<Effect>)
+        ensures
+            (final(self).deep_view(), out.deep_view())
+                == spec_on_known_event(
+                    old(self).deep_view(),
+                    event.deep_view(),
+                ),
+            final(self).keys.deep_view()
+                == old(self).keys.deep_view(),
+    {
+        proof {
+            reveal(spec_on_known_event);
+        }
+        let ghost before = self.deep_view();
+        let ghost event_v = event.deep_view();
+        let freeze_flight = match &event {
+            Event::Store { op, .. } => {
+                matches!(self.ops.get(op), Some(Owner::Flight(_)))
+            },
+            _ => false,
+        };
+        proof {
+            assert(freeze_flight == match event_v {
+                EventSpec::Store { op, .. }
+                    if before.ops.contains_key(op)
+                        && before.ops[op] is Flight => true,
+                _ => false,
+            });
+        }
+        let ghost freeze_before = match event_v {
+            EventSpec::Store { op, .. } => S {
+                ops: before.ops.remove(op),
+                store_requests: before.store_requests.remove(op),
+                store_certificates: before.store_certificates.remove(op),
+                ..before
+            },
+            _ => before,
+        };
+        let keys = self.keys.copy();
+        let next_op = self.next_op;
         let clock = match &event {
             Event::Request { clock, .. }
             | Event::Store { clock, .. }
             | Event::Wake { clock, .. } => *clock,
         };
         self.set_clock(clock);
-        if self.node.members.next_heartbeat.is_none()
+        proof {
+            assert(self.keys.deep_view() == before.keys);
+        }
+        let is_store_event = matches!(&event, Event::Store { .. });
+        if !is_store_event
+            && self.node.members.next_heartbeat.is_none()
             && !self.node.members.refreshing()
         {
             let now = self.now();
             self.members_tick(now);
         }
+        self.dispatch_known_event(event);
+        self.schedule_wake();
+        #[cfg(verus_keep_ghost)]
+        if freeze_flight {
+            self.freeze_active_store_certificates(Ghost(freeze_before));
+        }
+        self.preserve_next_op_floor(next_op);
+        self.keys = keys;
+        proof {
+            assert(self.keys.deep_view() == before.keys);
+            assert((
+                S {
+                    out: Seq::empty(),
+                    keys: before.keys,
+                    ..self.deep_view()
+                },
+                self.deep_view().out,
+            ) == spec_on_known_event(before, event_v));
+        }
+        self.take_out()
+    }
+
+    #[verifier::spinoff_prover]
+    fn dispatch_known_event(&mut self, event: Event)
+        ensures
+            final(self).deep_view()
+                == spec_dispatch_known_event(
+                    old(self).deep_view(),
+                    event.deep_view(),
+                ),
+    {
+        proof {
+            reveal(spec_dispatch_known_event);
+        }
         match event {
-            // -----------------------------------------------------------------
-            // From the network, already admitted by the runtime.
-            // -----------------------------------------------------------------
-            Event::Request { request, .. } => {
-                match request {
-                    RequestEvent::Protocol(call) => self.request(call),
-                    RequestEvent::Debug(call) => self.debug_begin(call),
-                }
+            Event::Request { request, .. } => match request {
+                RequestEvent::Protocol(call) => self.request(call),
+                RequestEvent::EmptyHeartbeat {
+                    id,
+                    kind,
+                    corr,
+                    action_kind,
+                } => self.emit(Effect::Reply {
+                    id,
+                    response: Ok(Answer::Step {
+                        kind,
+                        corr,
+                        action_kind,
+                        response:
+                            Response::Status(StatusRes { status: 200 }),
+                        why: None,
+                    }),
+                }),
+                RequestEvent::Debug(call) => self.debug_begin(call),
             },
-            // -----------------------------------------------------------------
-            // From the runtime, not the network.
-            // -----------------------------------------------------------------
             Event::Store { op, response, .. } => {
+                #[cfg(verus_keep_ghost)]
+                {
+                    self.store_requests = StoreRequestHistory {
+                        inner: Ghost(
+                            self.store_requests.deep_view().remove(op),
+                        ),
+                    };
+                    self.store_certificates = StoreCertificateHistory {
+                        inner: Ghost(
+                            self.store_certificates
+                                .deep_view()
+                                .remove(op),
+                        ),
+                    };
+                }
                 match self.ops.remove(&op) {
-                    Some(Owner::Flight(f)) => self.flight_completed(f, op, response),
-                    Some(Owner::Members) => self.members_completed(op, response),
-                    Some(Owner::Timers) => self.timers_completed(op, response),
-                    Some(Owner::Debug) => self.debug_completed(op, response),
+                    Some(Owner::Flight(f)) =>
+                        self.flight_completed(f, op, response),
+                    Some(Owner::Members) =>
+                        self.members_completed(op, response),
+                    Some(Owner::Timers) =>
+                        self.timers_completed(op, response),
+                    Some(Owner::Debug) =>
+                        self.debug_completed(op, response),
                     Some(Owner::Ignored) | None => {},
                 }
             },
             Event::Wake { armed, .. } => {
-                // A wake that came early asks again below.
                 self.clear_wake();
                 if self.loops {
                     let now = self.now();
-                    // The loop the sleep was for, then the other one: a late
-                    // wake may have overrun it. Each loop checks its own clock.
                     match armed {
                         Armed::Heartbeat => self.members_tick(now),
                         Armed::Wheel => self.timers_run(now),
@@ -190,8 +415,35 @@ impl State {
                 }
             },
         }
-        self.schedule_wake();
-        self.take_out()
+    }
+
+    #[cfg(verus_keep_ghost)]
+    fn freeze_active_store_certificates(
+        &mut self,
+        Ghost(before): Ghost<S>,
+    )
+        ensures
+            final(self).deep_view()
+                == spec_freeze_active_store_certificates(
+                    before,
+                    old(self).deep_view(),
+                ),
+    {
+        let ghost after = self.deep_view();
+        self.store_certificates = StoreCertificateHistory {
+            inner: Ghost(Map::new(
+                after.ops.dom(),
+                |op: u64|
+                    if before.store_certificates.contains_key(op) {
+                        before.store_certificates[op]
+                    } else {
+                        after.store_certificates[op]
+                    },
+            )),
+        };
+        proof {
+            reveal(spec_freeze_active_store_certificates);
+        }
     }
 
     fn request(&mut self, call: Call)
@@ -201,14 +453,10 @@ impl State {
         proof {
             reveal(spec_request);
         }
-        let Call { id, kind, corr, target, request, action_kind, now, pinned, then } = call;
+        let Call { id, kind, corr, target, request, action_kind, now, pinned } = call;
         // The fleet's time, unless the request named its own instant.
         let now = if pinned || now > self.node.fleet_at { now } else { self.node.fleet_at };
-        let stage = match then {
-            Some((then, check)) => Stage::Detached { then, check: Some(check) },
-            None => Stage::Whole,
-        };
-        let work = Work::Request { id, kind, corr, req: request, action_kind, now, stage };
+        let work = Work::Request { id, kind, corr, req: request, action_kind, now };
         self.submit(target, work, None, false);
     }
 
