@@ -1,5 +1,7 @@
 # echod
 
+The goal of this project is an end-to-end formally verified and deterministically simulation tested implementation of Resonate durable execution on S3.
+
 A Resonate server whose only durable state is objects in an S3 bucket, with
 Verus specifications and proof code for its document and process transitions.
 The inherited trust limitations below prevent a formal correctness claim.
