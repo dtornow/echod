@@ -20,7 +20,6 @@ members = [
   "rust/test/cli/store",
   "rust/test/cli/fakes3",
   "rust/test/cli/chaos",
-  "rust/experiment/claude-quickjs",
 ]
 
 [workspace.package]
