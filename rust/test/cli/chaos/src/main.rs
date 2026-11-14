@@ -278,10 +278,10 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(args.duration_secs)).await;
     run.stop.store(true, Ordering::Relaxed);
     for t in tasks {
-        let _ = t.await;
+        t.await.expect("client task");
     }
     if let Some(c) = chaos {
-        let _ = c.await;
+        c.await.expect("chaos task");
     }
 
     eprintln!("chaos: healing");
