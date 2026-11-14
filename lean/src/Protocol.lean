@@ -23,16 +23,6 @@ abbrev PromiseObject := AbstractModel.PromiseObject
 abbrev TaskObject := AbstractModel.TaskObject
 abbrev ServerConfig := AbstractModel.ServerConfig
 
-/-- A pending task whose retry is due. The promise it runs is still pending. -/
-def retryDue (promise : PromiseObject) (task : Option TaskObject) (now : Nat) : Bool :=
-  match task with
-  | some t =>
-    promise.state == .pending && t.state == .pending &&
-      match t.retryTimeoutAt with
-      | some due => decide (due ≤ now)
-      | none => false
-  | none => false
-
 /-- Pure environment value supplied to document decision functions. -/
 structure HandlerEnv where
   config : ServerConfig := {}
@@ -134,13 +124,13 @@ structure Object where
   task : Option TaskObject := none
   deriving Repr
 
-/-- The abstract world: a list of promise/task objects and a list of
+/-- The abstract system: a list of promise/task objects and a list of
 schedules. -/
 structure Store where
   objects : List Object := []
   schedules : List Schedule := []
 
-/-- Internal work values are shared data.  Their execution is implementation
+/-- Internal work values are shared data.  Their trace is implementation
 specific. -/
 inductive WorkItem where
   | promiseTimeout (id : ServerModel.Ident)

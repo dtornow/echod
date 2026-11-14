@@ -39,7 +39,7 @@
 use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
 
-use crate::concrete::store::before;
+use echod_concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::{str_eq, NodeCore};
@@ -48,7 +48,7 @@ use crate::verified::text::copy_string;
 use crate::Config;
 
 #[cfg(verus_keep_ghost)]
-use crate::concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
+use echod_concrete::store::{spec_before, EtagSpec, StoreErrorSpec};
 #[cfg(verus_keep_ghost)]
 use crate::verified::node_spec::ANode;
 
@@ -407,6 +407,8 @@ pub struct Members {
     pub refresh: Option<Refresh>,
     /// The first refresh that succeeded started the timers.
     pub read_once: bool,
+    /// The node stopped while a refresh was in flight: leave when it ends.
+    pub leave_pending: bool,
 }
 
 pub open spec fn spec_members_new(cfg: crate::config::ConfigSpec) -> MembersSpec {
@@ -419,6 +421,7 @@ pub open spec fn spec_members_new(cfg: crate::config::ConfigSpec) -> MembersSpec
         next_heartbeat: None,
         refresh: None,
         read_once: false,
+        leave_pending: false,
     }
 }
 
@@ -447,6 +450,7 @@ impl Members {
             next_heartbeat: None,
             refresh: None,
             read_once: false,
+            leave_pending: false,
         }
     }
 

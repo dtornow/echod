@@ -7,17 +7,13 @@ durable executions in V8. Built inside out, from the stored data up.
 
 | | |
 |---|---|
-| `rust/impl/process` | `echod-process` (library `echod_logic`): the executable concrete document machine and the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
+| `rust/impl/process` | `echod-process` (library `echod_logic`): the decision core, a pure state machine: `State`, `Event` in, `Effect`s out, `on_event` the one step; every store call a submission under an op id, every answer a completion under the same. The whole crate is proved: `State::on_event` computes `spec_on_event`; `src/verified` holds the node's bookkeeping, membership, cache versions, deadline keys, the commit, and the list of what is assumed. No I/O, no clock, no runtime |
 | `rust/impl/runtime` | `echod-runtime` (library `echod`): the node, the core's effects performed against a real store, a real clock and HTTP |
 | `rust/impl/cli` | `echod`: the binary |
-| `rust/spec/rover/spec` | `rover-spec` (library `rover_spec`): mathematical Rover processes, state, steps, and refinement |
-| `rust/spec/rover/exec` | `rover-exec` (library `rover_exec`): deterministic execution, bounded search, and verified certificate replay |
-| `rust/spec/echod/abstract/spec` | `echod-abstract-spec` (library `echod_abstract_spec`): the mathematical Resonate protocol model |
-| `rust/spec/echod/abstract/exec` | `echod-abstract-exec` (library `echod_abstract_exec`): executable realization of the mathematical model |
-| `rust/spec/echod/concrete/spec` | `echod-concrete-spec` (library `echod_concrete_spec`): the mathematical catalogue and Echod concrete model |
-| `rust/spec/echod/refinement` | `echod-refinement` (library `echod_refinement`): the verified interpretation, relation, and concrete-to-abstract simulation |
-| `rust/test/model` | `echod-model-test` (library `echod_model_test`): abstract-model trace translation and workload generation |
-| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the synchronous deterministic effect interpreter |
+| `rust/spec/rover` | `echod-rover` (library `echod_rover`): the Rover world, its checker, and its refinement theorem. The previous-generation `Model` stays inside this crate because the abstract handlers still implement it |
+| `rust/spec/abstract` | `echod-abstract` (library `resonate`): the Resonate protocol as a Rover model |
+| `rust/spec/concrete` | `echod-concrete`: the catalogue, the handler specifications, and the Rover model (nodes, one store, the initial world). The process depends on this crate. The refinement of that world to the abstract model is not written yet |
+| `rust/test/runtime` | `echod-test-runtime` (library `echod_sim`): the deterministic effect interpreter |
 | `rust/test/cli` | the simulator (`echod-sim`), the differential (`echod-diff`), the model driver (`echod-model`), and the store tests |
 | `lean/` | the same three layers, for experiment |
 
@@ -29,33 +25,29 @@ on `resonate-core` for the traits and protocol types. Origin:
 The Anvil cluster model and the earlier refinement of the store machine
 against the previous-generation `Model` are not in this tree. Catalogue,
 deadline keys, cache revalidation, and fired occurrences
-are to be restated as Echod concrete theorems. The document machine lives
-under `rust/impl/process/src/concrete`, where it is proved equal to
-`rust/spec/echod/concrete/spec`'s mathematical transitions.
+are to be restated as Rover concrete theorems. The document machine is
+`rust/spec/concrete`'s, proved equal to its specification there; the process
+runs it.
 The sections below that name `echod-system` or `refine/` describe that
 earlier proof.
 
 ## The document machine
 
-`echod_logic::concrete::document` (`rust/impl/process/src/concrete/document.rs`). A document is
+`echod_concrete::node` (`rust/spec/concrete/src/node.rs`). A document is
 `Doc`: an origin's objects, sorted by id, or a schedule. `handle` runs one
 request on it; `run_due` one due step — a promise's timeout, a lease or a
 retry timeout, one callback resumed, one listener told, or a schedule's
 occurrence; `sweep` runs `run_due` until a step changes nothing or a step
 limit is reached; `create_occurrence` births an occurrence in its origin.
 Each ensures it computes its specification — `spec_handle`, `spec_run_due`,
-`spec_sweep`, `spec_occurrence` — and those are the steps of the
-Echod concrete model. `echod_refinement::concrete_refines_abstract` states that this
-model refines the abstract one, and
-`echod_refinement::refinement_proof` proves it; the private machinery is
-consolidated in `rust/spec/echod/refinement/src/refinement_proof.rs`.
+`spec_sweep`, `spec_occurrence` — and those are the steps of the concrete
+Rover model, which `simulation.rs` proves refines the abstract one.
 
 The specification is `resonatehq/resonate`, `spec/02-abstract`, as the Lean
 models under `lean/` state it: 18 request handlers, the fence's check with
 no action for the detached create, and the due steps. Trusted there: the
-JSON codec (`assume_specification`), the key hash, `copy`, `expand`, and
-`next_cron`. Their contracts refer to the abstract crate's mathematical
-specifications; their executable bodies do not live in the spec crate.
+JSON codec (`assume_specification`), the key hash, `copy`, and the abstract
+crate's `expand` and `next_cron`.
 
 The process (`rust/impl/process`) runs that machine. `doc.rs` folds an
 object's rows into the model's `Doc` (`Objects::from_entries`) and writes
@@ -74,8 +66,7 @@ bytes of documents, announcements and configurations, `fnv1a`, `str_eq`,
 `clone_string`, `strip_prefix`, `u64_text`, and the store itself.
 
 `cargo build` compiles both with the ghost code erased; `cargo verus verify
--p echod-concrete-spec -p echod-refinement` and
-`-p echod-process` run Verus. Verus pins its own
+-p echod-concrete` and `-p echod-process` run Verus. Verus pins its own
 rustc, so the two are separate toolchains.
 
 ## echod-logic and echod
@@ -311,26 +302,15 @@ stale version are refused, a conditional read of the current version says
 so, listings page past a thousand keys and come back in order, keys with
 the characters ours use round-trip, and, on S3, a version is a function
 of the content — the same bytes are the same version, which is why every
-write of ours carries a nonce; and, on a store that appends, an append
-lands only at the current size under the current version. The end-to-end
-tests run on the same store under a prefix of their own when `ECHOD_STORE`
-is set, and once more through `S3Store` when `ECHOD_EXPRESS_BUCKET` names
-a directory bucket.
-
-No emulator serves S3 Express appends (RustFS answers 501, MinIO's open
-build has none), so `rust/test/cli/fakes3` is one of our own: the S3
-surface echod uses and nothing else, in memory — conditional reads and
-writes, `ListObjectsV2`, `DeleteObjects`, and `PutObject` with
-`x-amz-write-offset-bytes`, refused with `InvalidWriteOffset` anywhere but
-the current size, as S3 Express refuses it. ETags are the MD5, conditions
-are decided atomically against the object as it is, keys round-trip byte
-for byte, and the SDK's `aws-chunked` bodies are unframed. `scripts/s3-tests.sh`
-runs both suites against it by default, with both clients; against RustFS
-or `s3s-fs`, a second implementation's reading of the conditional writes,
-without appends; or against a bucket you name. RustFS honours conditional
-reads and makes versions from content, as S3 does; `s3s-fs` 0.17 ignores
-`If-None-Match` on reads and sends the body where S3 sends 304, which the
-store treats as a revalidation that found the version current.
+write of ours carries a nonce. The end-to-end tests run on the same store
+under a prefix of their own when `ECHOD_STORE` is set. `scripts/s3-tests.sh`
+runs both against `s3s-fs`, a Rust S3 emulator, against RustFS, the other
+Rust S3 server, or against a bucket you name; the SDK examples run
+unchanged against a server on either. Both servers refuse conditional
+writes as S3 does. RustFS also honours conditional reads and makes
+versions from content, as S3 does; `s3s-fs` 0.17 ignores `If-None-Match`
+on reads and sends the body where S3 sends 304, which the store treats as
+a revalidation that found the version current.
 
 ### Observability
 
@@ -373,18 +353,17 @@ the objects: what the simulator checks against the model (below).
 
 ### Simulation
 
-`echod-sim` runs several production decision cores over one in-memory store
-in a synchronous deterministic event loop. Virtual time advances directly
-to the next queued event, so the same seed replays the same run. The
-simulation owns every port: one clock the
+`echod-sim` runs several nodes over one in-memory store on one thread
+under tokio's paused clock, so time moves only between tasks and the same
+seed replays the same run. The simulation owns every port: one clock the
 clients stamp requests with and the nodes read (a node can be given skew,
 drift and jumps, backwards included, but the run leaves them off: the
 model it is checked against keeps one clock, and a node on a clock of its
 own would be reported, not tested); a store that
 answers nothing, loses acks or refuses conditional writes by seeded
 percentages and waits a seeded latency, and per node a store that can be cut
-off entirely; sent effects are recorded as model dispatches and checked
-against the bucket. Scheduled chaos events crash nodes, stop them
+off entirely; a bus that records every message as the model's dispatch and
+checks it against the bucket. A chaos task crashes nodes, stops them
 cleanly, starts new ones and cuts nodes off the store. Clients issue every
 request kind over a few origins, as the model types them; every attempt is
 a history entry, since an attempt that got no answer may have taken effect.
@@ -394,8 +373,7 @@ run ends with a read of every id, so what the bucket holds is what the
 model holds.
 
 The check is the Resonate model, the whole protocol
-as the Lean specification has it, through Rover execution
-(`rust/spec/rover/exec`): some
+as the Lean specification has it, with its checker (`checker.rs`): some
 execution of the model must show exactly what the clients saw and the bus
 carried, the model's internal work (a deadline, a lease's end, a resume, a
 retry, an occurrence) placed where the checker likes. The trace is what a
@@ -420,45 +398,6 @@ not landed, whose stamp precedes the read, which one clock cannot show.
 Besides that: every deadline a document owes has a key, every `execute`
 names a task that exists and every `unblock` a settled promise, every kind
 answered 200 at least once, and the history overlapped.
-
-`test/runtime/src/rover_sim.rs` is an isolated experiment using generic
-`RoverExec::exec` to generate a production-backed concrete trace before the
-same abstract check. It does not replace the primary DST.
-
-### Container chaos
-
-`scripts/chaos.sh` runs three disposable `echod` nodes over `fakes3`.
-Each node's PID 1 is `chaos-agent`, which starts and signals only its own
-child. The HTTP workload uses the current simulator generator and
-`echod-types` requests, translated at the harness boundary to the production
-wire protocol. It does not restore the old combined spec/execution crates
-or change the simulator's operation mix. Schedules are disabled in this
-bounded workload.
-
-The harness crashes, stops, pauses, partitions and slows nodes, then waits
-for every fault task before healing and settling the fleet. It checks
-observed state/version regressions, final reads, notifications, deadlines,
-current-format bucket documents and fleet health. These are black-box
-checks, not the simulator's typed model-history refinement proof: wall-clock
-HTTP observations lack the decision timestamps and autonomous steps that
-the model checker requires.
-
-Run `scripts/chaos.sh --no-chaos` for a healthy baseline, or
-`scripts/chaos.sh --seed 7 --duration-secs 120` for faults. Reports and logs
-land in `target/chaos/`. `--keep` retains that run's stopped containers in
-its uniquely named Compose project; remove that project explicitly when finished.
-Docker Compose (or `COMPOSE="podman compose"`) and a Linux container runtime
-supporting `NET_ADMIN`, iptables and optionally `sch_netem` are required.
-A missing netem capability is reported as skipped, not validated.
-
-Never point this tool at production. The agent requires explicit
-`--owned-test-node` acknowledgement and PID 1; the driver checks its ownership
-marker before faults. Control ports have no authentication and must stay on
-the private test network. Compose publishes no ports, mounts no host data
-into nodes and uses no host network or PID namespace. Cleanup flushes only
-the agent's exclusive firewall chains and removes only its tracked qdisc,
-never host firewall chains or store data. The script tears down only its
-own uniquely named Compose project.
 
 ### Differential
 

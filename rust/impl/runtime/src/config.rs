@@ -83,15 +83,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validate server dials before constructing a node or opening a listener.
-    pub fn validate(&self) -> Result<(), String> {
-        self.logic(
-            self.node_id.clone().unwrap_or_else(|| "validation".to_string()),
-            self.express,
-        )
-        .validate()
-    }
-
     /// A configuration for an in-memory, single-node server. Tests.
     pub fn memory(bind: &str) -> Self {
         Self {
@@ -136,24 +127,5 @@ impl Config {
             cache_bytes: self.cache_bytes,
             debug: self.debug,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Config;
-
-    #[test]
-    fn retry_timeout_must_be_safe() {
-        let mut cfg = Config::memory("127.0.0.1:0");
-
-        cfg.retry_timeout = 0;
-        assert!(cfg.validate().is_err());
-
-        cfg.retry_timeout = echod_logic::verified::MAX_TIME + 1;
-        assert!(cfg.validate().is_err());
-
-        cfg.retry_timeout = echod_logic::verified::MAX_TIME;
-        assert!(cfg.validate().is_ok());
     }
 }

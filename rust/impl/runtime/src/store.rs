@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 pub use echod_logic::types::{Etag, Read, StoreError};
-use echod_logic::types::{StoreReq, StoreRes};
+use echod_logic::types::{StoreCall, StoreOutcome};
 
 #[async_trait]
 pub trait Store: Send + Sync {
@@ -53,26 +53,44 @@ pub trait Store: Send + Sync {
 
 /// One call the core asked for, made on `store`, as the core wants it
 /// answered.
-pub async fn call(store: &dyn Store, request: StoreReq) -> StoreRes {
-    match request {
-        StoreReq::Get { key } =>
-            StoreRes::Get { result: store.get(&key).await },
-        StoreReq::GetIfNoneMatch { key, etag } =>
-            StoreRes::GetIfNoneMatch { result: store.get_if_none_match(&key, &etag).await },
-        StoreReq::PutIfMatch { key, body, etag } =>
-            StoreRes::PutIfMatch { result: store.put_if_match(&key, body, &etag).await },
-        StoreReq::PutIfNoneMatch { key, body } =>
-            StoreRes::PutIfNoneMatch { result: store.put_if_none_match(&key, body).await },
-        StoreReq::AppIfMatch { key, offset, body, etag } =>
-            StoreRes::AppIfMatch { result: store.append_if_match(&key, offset, body, &etag).await },
-        StoreReq::Put { key, body } =>
-            StoreRes::Put { result: store.put(&key, body).await },
-        StoreReq::Del { key } =>
-            StoreRes::Del { result: store.delete(&key).await },
-        StoreReq::List { prefix, max_keys } =>
-            StoreRes::List { result: store.list(&prefix, max_keys).await },
-        StoreReq::ListPrefixes { prefix } =>
-            StoreRes::ListPrefixes { result: store.list_prefixes(&prefix).await },
+pub async fn call(store: &dyn Store, c: StoreCall) -> StoreOutcome {
+    match c {
+        StoreCall::Get { key } => match store.get(&key).await {
+            Ok(r) => StoreOutcome::Got(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::GetIfNoneMatch { key, etag } => match store.get_if_none_match(&key, &etag).await {
+            Ok(r) => StoreOutcome::Read(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::PutIfMatch { key, body, etag } => match store.put_if_match(&key, body, &etag).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::PutIfNoneMatch { key, body } => match store.put_if_none_match(&key, body).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::AppendIfMatch { key, offset, body, etag } => match store.append_if_match(&key, offset, body, &etag).await {
+            Ok(e) => StoreOutcome::Written(e),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::Put { key, body } => match store.put(&key, body).await {
+            Ok(()) => StoreOutcome::Done,
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::Delete { key } => match store.delete(&key).await {
+            Ok(()) => StoreOutcome::Done,
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::List { prefix, max_keys } => match store.list(&prefix, max_keys).await {
+            Ok(r) => StoreOutcome::Listed(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
+        StoreCall::ListPrefixes { prefix } => match store.list_prefixes(&prefix).await {
+            Ok(r) => StoreOutcome::Listed(r),
+            Err(e) => StoreOutcome::Failed(e),
+        },
     }
 }
 
@@ -311,9 +329,7 @@ impl Store for S3Store {
         match self.client.put_object().bucket(&self.bucket).key(key).if_match(format!("\"{}\"", etag.0)).body(body.into()).send().await {
             Ok(out) => Ok(Self::strip(out.e_tag().map(str::to_string))),
             Err(e) => match status_of(&e) {
-                // S3 answers 404 to a condition on a key that is not there:
-                // the version named is not the current one either way.
-                Some(412) | Some(409) | Some(404) => Err(StoreError::PreconditionFailed),
+                Some(412) | Some(409) => Err(StoreError::PreconditionFailed),
                 _ => Err(Self::unavailable(e)),
             },
         }
@@ -346,9 +362,7 @@ impl Store for S3Store {
         {
             Ok(out) => Ok(Self::strip(out.e_tag().map(str::to_string))),
             Err(e) => match status_of(&e) {
-                // 400 is `InvalidWriteOffset`: the object is not the size
-                // the version implied, so it is not that version.
-                Some(412) | Some(409) | Some(400) | Some(404) => Err(StoreError::PreconditionFailed),
+                Some(412) | Some(409) | Some(400) => Err(StoreError::PreconditionFailed),
                 _ => Err(Self::unavailable(e)),
             },
         }

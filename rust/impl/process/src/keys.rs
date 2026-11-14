@@ -1,7 +1,7 @@
 //! Where everything lives under the bucket.
 //!
 //! ```text
-//! <prefix>wf/<origin>                                    a workflow document: rows
+//! <prefix>wf/<origin>                                    an origin's document: rows
 //! <prefix>sched/<id>                                     a schedule: one row
 //! <prefix>t/<bucket>/<deadline>_<origin>@<token>         a deadline for an origin, empty
 //! <prefix>t/<bucket>/<deadline>_sched:<id>@<token>       a schedule's next run, empty
@@ -276,9 +276,9 @@ pub fn bucket_of(at: u64, bucket_ms: u64) -> (r: u64)
 /// The version a body quotes, as an S3 ETag: the same bytes are the same version.
 pub fn content_etag(body: &[u8]) -> (r: crate::types::Etag)
     ensures
-        r == echod_concrete_spec::store::spec_etag(body@),
+        r == echod_concrete::store::spec_etag(body@),
 {
-    crate::concrete::content_etag(body)
+    echod_concrete::content_etag(body)
 }
 
 /// The origin of an id: everything before the first `:`.

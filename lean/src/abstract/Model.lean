@@ -153,14 +153,14 @@ def boundaryEvent : Rover.BoundaryEvent model → Option Resonate.BoundaryEvent
   | .input _ time message => message.observeInput time
   | .output _ time message => message.observeOutput time
 
-def boundaryTrace (execution : Execution model) : List Resonate.BoundaryEvent :=
-  (Rover.trace execution).filterMap boundaryEvent
+def boundaryTrace (trace : Trace model) : List Resonate.BoundaryEvent :=
+  (Rover.observe trace).filterMap boundaryEvent
 
 def ValidBoundaryTrace (config : Config)
     (events : List Resonate.BoundaryEvent) : Prop :=
-  ∃ execution,
-    Behavior model config execution ∧
-    boundaryTrace execution = events
+  ∃ trace,
+    ValidTrace model config trace ∧
+    boundaryTrace trace = events
 
 def initialProcess : Pid → State :=
   fun _ => State.init

@@ -81,16 +81,16 @@ theorem step_send_outputs {config : Config} {pid : Abstract.Pid}
             exact ⟨[], rfl⟩
 
 theorem reachable_network_to_outside {config : Config}
-    {world : World AModel} (hreachable : Reachable AModel config world)
+    {system : System AModel} (hreachable : Reachable AModel config system)
     {sender : Abstract.Pid} {message : Message}
-    (hmessage : (sender, Abstract.Pid.outside, message) ∈ world.network) :
+    (hmessage : (sender, Abstract.Pid.outside, message) ∈ system.network) :
     sender = .service ∧ ∃ output, message = .output output := by
   induction hreachable with
-  | init hinit => simp [World.initial] at hmessage
+  | init hinit => simp [System.initial] at hmessage
   | step hreachable hstep ih =>
       cases hstep with
       | inject htime hprocess hinjectable =>
-          simp only [World.inject, List.mem_append, List.mem_singleton]
+          simp only [System.inject, List.mem_append, List.mem_singleton]
             at hmessage
           rcases hmessage with hmessage | hmessage
           · exact ih hmessage
@@ -98,7 +98,7 @@ theorem reachable_network_to_outside {config : Config}
             exact (AModel.outside_not_process hprocess).elim
       | process htime hprocess hevent hresult =>
           rename_i process now event result
-          simp only [World.land, List.mem_append, List.mem_map] at hmessage
+          simp only [System.land, List.mem_append, List.mem_map] at hmessage
           rcases hmessage with hmessage | hmessage
           · exact ih hmessage
           · obtain ⟨send, hsend, hentry⟩ := hmessage
@@ -136,11 +136,11 @@ theorem monotoneFrom_weaken {earlier later : Time}
       simp only [monotoneFrom, Bool.and_eq_true, decide_eq_true_eq] at hm ⊢
       exact ⟨Nat.le_trans h hm.1, hm.2⟩
 
-theorem legal_boundary_times (config : Config) (world : World AModel)
-    (execution : Execution AModel)
-    (h : Legal AModel config world execution) :
-    monotoneFrom world.now (Abstract.boundaryTrace execution) = true := by
-  induction execution generalizing world with
+theorem legal_boundary_times (config : Config) (system : System AModel)
+    (trace : Trace AModel)
+    (h : Legal AModel config system trace) :
+    monotoneFrom system.now (Abstract.boundaryTrace trace) = true := by
+  induction trace generalizing system with
   | nil => rfl
   | cons entry rest ih =>
       obtain ⟨label, next⟩ := entry
@@ -149,48 +149,48 @@ theorem legal_boundary_times (config : Config) (world : World AModel)
       cases hstep with
       | inject htime hprocess hinjectable =>
           obtain ⟨call, rfl⟩ := hinjectable
-          simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+          simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
             Abstract.boundaryEvent, Message.observeInput, monotoneFrom,
-            eventTime, World.inject] using And.intro htime htail
+            eventTime, System.inject] using And.intro htime htail
       | process htime hprocess hevent hresult =>
           apply monotoneFrom_weaken htime
-          simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
-            World.land] using htail
+          simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
+            System.land] using htail
       | outside htime hmessage =>
           rename_i sender time message
           cases message with
           | request call =>
               apply monotoneFrom_weaken htime
-              simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+              simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                 Abstract.boundaryEvent, Message.observeOutput,
-                World.observeOutside] using htail
+                System.observeOutside] using htail
           | output output =>
               cases output with
               | response client id response =>
-                  simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+                  simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                     Abstract.boundaryEvent, Message.observeOutput,
-                    monotoneFrom, eventTime, World.observeOutside] using
+                    monotoneFrom, eventTime, System.observeOutside] using
                       And.intro htime htail
               | message entry =>
-                  simpa [Abstract.boundaryTrace, Rover.trace, Label.observe,
+                  simpa [Abstract.boundaryTrace, Rover.observe, Label.observe,
                     Abstract.boundaryEvent, Message.observeOutput,
-                    monotoneFrom, eventTime, World.observeOutside] using
+                    monotoneFrom, eventTime, System.observeOutside] using
                       And.intro htime htail
 
 theorem valid_boundary_times {config : Config}
     {events : List BoundaryEvent}
     (h : observation.Valid config events) :
     monotoneTimes events = true := by
-  obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := h
+  obtain ⟨trace, ⟨process, hinit, hlegal⟩, htrace⟩ := h
   rw [← htrace]
-  exact legal_boundary_times config (World.initial process) execution hlegal
+  exact legal_boundary_times config (System.initial process) trace hlegal
 
 theorem legal_step_before_expected {config : Config}
-    {world : World AModel} {expected : BoundaryEvent}
+    {system : System AModel} {expected : BoundaryEvent}
     {remaining : List BoundaryEvent} {label : Label AModel}
-    {next : World AModel} {rest : Execution AModel}
-    (hreachable : Reachable AModel config world)
-    (hstep : Step AModel config world label next)
+    {next : System AModel} {rest : Trace AModel}
+    (hreachable : Reachable AModel config system)
+    (hstep : Step AModel config system label next)
     (hrest : Legal AModel config next rest)
     (htrace :
       observation.executionTrace ((label, next) :: rest) =
@@ -212,13 +212,13 @@ theorem legal_step_before_expected {config : Config}
       have htailObservation :
           observation.executionTrace rest = expected :: remaining := htrace
       have hmono := legal_boundary_times config
-        (world.land _ _ _) rest hrest
+        (system.land _ _ _) rest hrest
       have htail : Abstract.boundaryTrace rest =
           expected :: remaining := by
         simpa [Rover.Check.Observation.executionTrace, observation,
           Abstract.boundaryTrace] using htailObservation
       rw [htail] at hmono
-      simp only [World.land, monotoneFrom, Bool.and_eq_true,
+      simp only [System.land, monotoneFrom, Bool.and_eq_true,
         decide_eq_true_eq] at hmono
       simpa [Rover.Check.labelTime, eventTime] using hmono.1
   | outside htime hmessage =>
@@ -236,28 +236,28 @@ theorem legal_step_before_expected {config : Config}
         rw [← htrace.1]
         exact Nat.le_refl _
 
-def processActions (config : Config) (world : World AModel)
+def processActions (config : Config) (system : System AModel)
     (horizon : Time) : List Action :=
   (List.range (horizon + 1)).flatMap fun time =>
     let receives :=
-      (List.range world.network.length).flatMap fun networkIndex =>
-        match world.network[networkIndex]? with
+      (List.range system.network.length).flatMap fun networkIndex =>
+        match system.network[networkIndex]? with
         | some (sender, Abstract.Pid.service, message) =>
             (List.range ((AModel.step config .service
-                (world.process .service) time
+                (system.process .service) time
                 (.receive sender message)).val.length)).map fun outcome =>
               .process .service time (.receive networkIndex) outcome
         | _ => []
     let timeouts :=
       (List.range ((AModel.step config .service
-        (world.process .service) time .timeout).val.length)).map fun outcome =>
+        (system.process .service) time .timeout).val.length)).map fun outcome =>
           .process .service time .timeout outcome
     receives ++ timeouts
 
-def observeActions (world : World AModel) (time : Time)
+def observeActions (system : System AModel) (time : Time)
     (event : BoundaryEvent) : List Action :=
-  (List.range world.network.length).flatMap fun networkIndex =>
-    match world.network[networkIndex]? with
+  (List.range system.network.length).flatMap fun networkIndex =>
+    match system.network[networkIndex]? with
     | some (Abstract.Pid.service, Abstract.Pid.outside,
         Message.output output) =>
         if outputEvent time output = event then [.outside networkIndex time]
@@ -268,26 +268,26 @@ def injectActions : BoundaryEvent → List Action
   | .request time call => [.inject .service time (.request call)]
   | _ => []
 
-def actions (config : Config) (world : World AModel)
+def actions (config : Config) (system : System AModel)
     (event : BoundaryEvent) : List Action :=
   let time := eventTime event
   injectActions event ++
-    observeActions world time event ++
-    processActions config world time
+    observeActions system time event ++
+    processActions config system time
 
-theorem process_receive_mem {config : Config} {world : World AModel}
+theorem process_receive_mem {config : Config} {system : System AModel}
     {horizon now : Time} {networkIndex outcome : Nat}
     {sender : Abstract.Pid} {message : Message}
     (htime : now ≤ horizon)
     (hnetwork :
-      world.network[networkIndex]? =
+      system.network[networkIndex]? =
         some (sender, Abstract.Pid.service, message))
     (houtcome :
-      (AModel.step config .service (world.process .service) now
+      (AModel.step config .service (system.process .service) now
         (.receive sender message)).val[outcome]? = some result) :
     Rover.Check.Action.process (model := AModel) Abstract.Pid.service now
         (.receive networkIndex) outcome ∈
-      processActions config world horizon := by
+      processActions config system horizon := by
   simp only [processActions, List.mem_flatMap]
   refine ⟨now, List.mem_range.mpr (Nat.lt_succ_of_le htime), ?_⟩
   apply List.mem_append_left
@@ -299,15 +299,15 @@ theorem process_receive_mem {config : Config} {world : World AModel}
   exact ⟨outcome, List.mem_range.mpr
     (List.getElem?_eq_some_iff.mp houtcome).1, rfl⟩
 
-theorem process_timeout_mem {config : Config} {world : World AModel}
+theorem process_timeout_mem {config : Config} {system : System AModel}
     {horizon now : Time} {outcome : Nat}
     (htime : now ≤ horizon)
     (houtcome :
-      (AModel.step config .service (world.process .service) now
+      (AModel.step config .service (system.process .service) now
         .timeout).val[outcome]? = some result) :
     Rover.Check.Action.process (model := AModel) Abstract.Pid.service now
         .timeout outcome ∈
-      processActions config world horizon := by
+      processActions config system horizon := by
   simp only [processActions, List.mem_flatMap]
   refine ⟨now, List.mem_range.mpr (Nat.lt_succ_of_le htime), ?_⟩
   apply List.mem_append_right
@@ -315,31 +315,31 @@ theorem process_timeout_mem {config : Config} {world : World AModel}
   exact ⟨outcome, List.mem_range.mpr
     (List.getElem?_eq_some_iff.mp houtcome).1, rfl⟩
 
-theorem observe_mem {world : World AModel} {time : Time}
+theorem observe_mem {system : System AModel} {time : Time}
     {expected : BoundaryEvent} {networkIndex : Nat} {output : Output}
     (hnetwork :
-      world.network[networkIndex]? =
+      system.network[networkIndex]? =
         some (.service, .outside, .output output))
     (houtput : outputEvent time output = expected) :
     Rover.Check.Action.outside networkIndex time ∈
-      observeActions world time expected := by
+      observeActions system time expected := by
   simp only [observeActions, List.mem_flatMap]
   refine ⟨networkIndex, List.mem_range.mpr
     (List.getElem?_eq_some_iff.mp hnetwork).1, ?_⟩
   rw [hnetwork]
   simp [houtput]
 
-theorem actions_complete {config : Config} {world : World AModel}
+theorem actions_complete {config : Config} {system : System AModel}
     {expected : BoundaryEvent} {label : Label AModel}
-    {next : World AModel}
-    (hreachable : Reachable AModel config world)
-    (hstep : Step AModel config world label next)
+    {next : System AModel}
+    (hreachable : Reachable AModel config system)
+    (hstep : Step AModel config system label next)
     (hprojection :
       observation.labelTrace label = [] ∨
         observation.labelTrace label = [expected])
     (hupper : Rover.Check.labelTime label ≤ eventTime expected) :
-    ∃ action ∈ actions config world expected,
-      Rover.Check.actionStep AModel config world action =
+    ∃ action ∈ actions config system expected,
+      Rover.Check.actionStep AModel config system action =
         some (label, next) := by
   cases hstep with
   | inject htime hprocess hinjectable =>
@@ -428,7 +428,7 @@ def adapter : Rover.Check.Adapter AModel where
   complete := true
   horizon := eventTime
   horizon_sound := by
-    intro hcomplete config world expected remaining label next rest
+    intro hcomplete config system expected remaining label next rest
       hreachable hstep hrest htrace
     exact legal_step_before_expected hreachable hstep hrest htrace
   actions_complete := by
@@ -452,7 +452,7 @@ def exhaustionLaw : Rover.Check.ExhaustionLaw adapter where
       (adapter := adapter) rfl hsearch
 
 def replay (config : Config) (events : List BoundaryEvent)
-    (certificate : Certificate) : Option (Execution AModel) :=
+    (certificate : Certificate) : Option (Trace AModel) :=
   Rover.Check.replay observation config Abstract.initialProcess
     events certificate
 
@@ -485,20 +485,20 @@ theorem check_nonmonotone {config : Config}
 theorem valid_iff_exists_bound {config : Config}
     {events : List BoundaryEvent} :
     Abstract.ValidBoundaryTrace config events ↔
-      ∃ bound certificate execution,
-        search bound config events = .valid certificate execution := by
+      ∃ bound certificate trace,
+        search bound config events = .valid certificate trace := by
   rw [← observation_valid_iff]
   have h := Rover.Check.valid_iff_exists_bound
     (adapter := adapter) (config := config) (events := events) rfl
   change observation.Valid config events ↔
-    (∃ bound certificate execution,
+    (∃ bound certificate trace,
       Rover.Check.boundedSearch adapter bound config events =
-        .valid certificate execution) at h
+        .valid certificate trace) at h
   simpa [search] using h
 
 theorem replay_valid {config : Config} {events : List BoundaryEvent}
-    {certificate : Certificate} {execution : Execution AModel}
-    (h : replay config events certificate = some execution) :
+    {certificate : Certificate} {trace : Trace AModel}
+    (h : replay config events certificate = some trace) :
     Abstract.ValidBoundaryTrace config events := by
   have hvalid := Rover.Check.replay_valid
     (observation := observation)
@@ -507,9 +507,9 @@ theorem replay_valid {config : Config} {events : List BoundaryEvent}
 
 theorem checkWithBound_valid_sound {bound : Nat} {config : Config}
     {events : List BoundaryEvent} {certificate : Certificate}
-    {execution : Execution AModel}
+    {trace : Trace AModel}
     (h : checkWithBound bound config events =
-      .valid certificate execution) :
+      .valid certificate trace) :
     Abstract.ValidBoundaryTrace config events := by
   have hvalid := Rover.Check.checkWithBound_valid_sound
     (adapter := adapter) (law := exhaustionLaw) h
@@ -517,8 +517,8 @@ theorem checkWithBound_valid_sound {bound : Nat} {config : Config}
   exact observation_valid_iff.mp hvalid
 
 theorem check_valid_sound {config : Config} {events : List BoundaryEvent}
-    {certificate : Certificate} {execution : Execution AModel}
-    (h : check config events = .valid certificate execution) :
+    {certificate : Certificate} {trace : Trace AModel}
+    (h : check config events = .valid certificate trace) :
     Abstract.ValidBoundaryTrace config events :=
   checkWithBound_valid_sound h
 

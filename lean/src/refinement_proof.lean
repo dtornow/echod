@@ -8,7 +8,7 @@ import refinement_handlers
 The wire protocol remains untrusted and proof-free. Semantic provenance is
 reconstructed here as a ghost predicate over node-local flights and reachable
 network messages. The final simulation is factored into a one-step obligation
-and an execution fold, so delayed/reordered outside observations do not need a
+and an trace fold, so delayed/reordered outside observations do not need a
 special trace argument.
 -/
 
@@ -2626,10 +2626,10 @@ theorem node_step_serial
 
 def NodesSerial
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧ NodeSerial node
+      system.process (.node address) = .node node ∧ NodeSerial node
 
 theorem nodesSerial_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -2637,17 +2637,17 @@ theorem nodesSerial_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesSerial (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, by simp [NodeSerial]⟩
 
 theorem nodesSerial_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : NodesSerial world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : NodesSerial system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesSerial next := by
   cases hstep with
   | inject => exact hinvariant
@@ -2659,24 +2659,24 @@ theorem nodesSerial_step
       · subst pid
         obtain ⟨after, hstate, hafter⟩ :=
           node_step_serial hserial (hnode ▸ hresult)
-        exact ⟨after, by simp [World.land, hstate], hafter⟩
-      · exact ⟨node, by simp [World.land, Ne.symm hp, hnode], hserial⟩
+        exact ⟨after, by simp [System.land, hstate], hafter⟩
+      · exact ⟨node, by simp [System.land, Ne.symm hp, hnode], hserial⟩
 
 theorem reachable_nodes_serial
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesSerial world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesSerial system := by
   induction hreachable with
   | init hinit => exact nodesSerial_initial hinit
   | step _ hstep ih => exact nodesSerial_step ih hstep
 
 set_option maxHeartbeats 800000 in
 def NodesValid {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
-    ∃ node, world.process (.node address) = .node node ∧
+    ∃ node, system.process (.node address) = .node node ∧
       NodeValid appConfig node
 
 theorem nodesValid_initial
@@ -2685,25 +2685,25 @@ theorem nodesValid_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesValid (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, NodeValid.empty appConfig⟩
 
 theorem nodesValid_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : NodesValid world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : NodesValid system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesValid next := by
   cases hstep with
   | inject htime _ _ =>
       intro address haddress
-      simpa [World.inject] using hinvariant address haddress
+      simpa [System.inject] using hinvariant address haddress
   | outside =>
       intro address haddress
-      simpa [World.observeOutside] using hinvariant address haddress
+      simpa [System.observeOutside] using hinvariant address haddress
   | process htime hprocess hvalid hresult =>
       intro address haddress
       rename_i process now event result
@@ -2713,17 +2713,17 @@ theorem nodesValid_step
         have hvalidNext := node_step_valid hnode (hlocal ▸ hresult)
         obtain ⟨nodeNext, hstate, hnodeNext⟩ := hvalidNext
         refine ⟨nodeNext, ?_, hnodeNext⟩
-        simp [World.land, hstate]
+        simp [System.land, hstate]
       · obtain ⟨node, hlocal, hnode⟩ := hinvariant address haddress
         refine ⟨node, ?_, hnode⟩
-        simp [World.land, heq, hlocal]
+        simp [System.land, heq, hlocal]
 
 theorem reachable_nodes_valid
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesValid world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesValid system := by
   induction hreachable with
   | init hinit => exact nodesValid_initial hinit
   | step _ hstep ih => exact nodesValid_step ih hstep
@@ -2791,11 +2791,11 @@ theorem node_step_sweeps_valid
 
 def NodesSweepsValid
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧
-      NodeSweepsValid world.now node
+      system.process (.node address) = .node node ∧
+      NodeSweepsValid system.now node
 
 theorem nodesSweepsValid_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -2803,7 +2803,7 @@ theorem nodesSweepsValid_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesSweepsValid (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, by
     simp [NodeSweepsValid]⟩
@@ -2811,27 +2811,27 @@ theorem nodesSweepsValid_initial
 theorem nodesSweepsValid_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
     (hvalidNodes :
       ∀ address, address ∈ nodes → ∀ node,
-        world.process (.node address) = .node node →
+        system.process (.node address) = .node node →
         NodeValid appConfig node)
-    (hinvariant : NodesSweepsValid world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : NodesSweepsValid system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesSweepsValid next := by
   cases hstep with
   | inject htime _ _ =>
       intro address haddress
       obtain ⟨node, hnode, hsweeps⟩ := hinvariant address haddress
-      refine ⟨node, by simpa [World.inject] using hnode, ?_⟩
+      refine ⟨node, by simpa [System.inject] using hnode, ?_⟩
       intro op flight hflight timer instant rest htransaction
       exact Nat.le_trans
         (hsweeps op flight hflight timer instant rest htransaction) htime
   | outside htime _ =>
       intro address haddress
       obtain ⟨node, hnode, hsweeps⟩ := hinvariant address haddress
-      refine ⟨node, by simpa [World.observeOutside] using hnode, ?_⟩
+      refine ⟨node, by simpa [System.observeOutside] using hnode, ?_⟩
       intro op flight hflight timer instant rest htransaction
       exact Nat.le_trans
         (hsweeps op flight hflight timer instant rest htransaction) htime
@@ -2845,8 +2845,8 @@ theorem nodesSweepsValid_step
           node_step_valid hnodeValid (hnode ▸ hresult)
         have hafter :=
           node_step_sweeps_valid htime hsweeps (hnode ▸ hresult) hstate
-        exact ⟨after, by simp [World.land, hstate], hafter⟩
-      · refine ⟨node, by simp [World.land, Ne.symm hp, hnode], ?_⟩
+        exact ⟨after, by simp [System.land, hstate], hafter⟩
+      · refine ⟨node, by simp [System.land, Ne.symm hp, hnode], ?_⟩
         intro op flight hflight timer instant rest htransaction
         exact Nat.le_trans
           (hsweeps op flight hflight timer instant rest htransaction) htime
@@ -2854,9 +2854,9 @@ theorem nodesSweepsValid_step
 theorem reachable_nodes_sweeps_valid
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesSweepsValid world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesSweepsValid system := by
   induction hreachable with
   | init hinit => exact nodesSweepsValid_initial hinit
   | step hreachable hstep ih =>
@@ -2870,36 +2870,36 @@ theorem reachable_nodes_sweeps_valid
 
 def StoreRequestsFresh
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address node rpc},
     address ∈ nodes →
-    world.process (.node address) = .node node →
+    system.process (.node address) = .node node →
     (Concrete.Pid.node address, .store, .storeRequest rpc) ∈
-      world.network →
+      system.network →
     rpc.op < node.nextOp
 
 def StoreRequestsUnique
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address op payload₁ payload₂},
     (Concrete.Pid.node address, .store,
-      .storeRequest { op, payload := payload₁ }) ∈ world.network →
+      .storeRequest { op, payload := payload₁ }) ∈ system.network →
     (Concrete.Pid.node address, .store,
-      .storeRequest { op, payload := payload₂ }) ∈ world.network →
+      .storeRequest { op, payload := payload₂ }) ∈ system.network →
     payload₁ = payload₂
 
 structure RpcIds
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop where
-  fresh : StoreRequestsFresh world
-  unique : StoreRequestsUnique world
+    (system : System (CModel nodes appConfig)) : Prop where
+  fresh : StoreRequestsFresh system
+  unique : StoreRequestsUnique system
 
 theorem rpcIds_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
     (process : Concrete.Pid → Concrete.Local) :
     RpcIds
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   constructor
   · intro address node rpc haddress hnode hmem
     contradiction
@@ -2909,23 +2909,23 @@ theorem rpcIds_initial
 theorem rpcIds_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    (hinvariant : RpcIds world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hreachable : Reachable (CModel nodes appConfig) config system)
+    (hinvariant : RpcIds system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     RpcIds next := by
   cases hstep with
   | inject htime _ _ =>
       constructor
       · intro address node rpc haddress hnode hmem
-        simp only [World.inject, List.mem_append,
+        simp only [System.inject, List.mem_append,
           List.mem_singleton] at hmem
         rcases hmem with hold | hnew
         · exact hinvariant.fresh haddress hnode hold
         · simp at hnew
       · intro address op payload₁ payload₂ hone htwo
-        simp only [World.inject, List.mem_append,
+        simp only [System.inject, List.mem_append,
           List.mem_singleton] at hone htwo
         rcases hone with hone | hone <;>
           rcases htwo with htwo | htwo
@@ -2940,7 +2940,7 @@ theorem rpcIds_step
   | @process pid now event result htime hprocess hvalid hresult =>
       constructor
       · intro address node rpc haddress hnode hmem
-        simp only [World.land, List.mem_append] at hmem
+        simp only [System.land, List.mem_append] at hmem
         by_cases hp : pid = .node address
         · subst pid
           obtain ⟨before, hbefore, _⟩ :=
@@ -2949,7 +2949,7 @@ theorem rpcIds_step
             node_step_ids (hbefore ▸ hresult)
           have hafter : after = node := by
             have : result.state = .node node := by
-              simpa [World.land] using hnode
+              simpa [System.land] using hnode
             rw [hstate] at this
             exact Concrete.Local.node.inj this
           subst after
@@ -2964,8 +2964,8 @@ theorem rpcIds_step
             rw [hop, hnext]
             exact Nat.lt_succ_self _
         · have hbefore :
-              world.process (.node address) = .node node := by
-            simpa [World.land, Ne.symm hp] using hnode
+              system.process (.node address) = .node node := by
+            simpa [System.land, Ne.symm hp] using hnode
           rcases hmem with hold | hnew
           · exact hinvariant.fresh haddress hbefore hold
           · obtain ⟨sent, hsend, heq⟩ := List.mem_map.mp hnew
@@ -2973,7 +2973,7 @@ theorem rpcIds_step
             simp only [Prod.mk.injEq] at heq
             exact (hp heq.1).elim
       · intro address op payload₁ payload₂ hone htwo
-        simp only [World.land, List.mem_append] at hone htwo
+        simp only [System.land, List.mem_append] at hone htwo
         rcases hone with hone | hone <;>
           rcases htwo with htwo | htwo
         · exact hinvariant.unique hone htwo
@@ -3028,9 +3028,9 @@ theorem rpcIds_step
 theorem reachable_rpc_ids
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    RpcIds world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    RpcIds system := by
   induction hreachable with
   | init hinit => exact rpcIds_initial _
   | step hreachable hstep ih =>
@@ -3038,7 +3038,7 @@ theorem reachable_rpc_ids
 
 def NodeWritingPuts
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig))
+    (system : System (CModel nodes appConfig))
     (address : Addr) (node : Concrete.Node) : Prop :=
   ∀ {op flight},
     (op, flight) ∈ node.flights →
@@ -3050,11 +3050,11 @@ def NodeWritingPuts
           op
           payload := .put flight.key document
             (flight.loaded.map (·.2))
-        }) ∈ world.network
+        }) ∈ system.network
 
 def NodeLoadingGets
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig))
+    (system : System (CModel nodes appConfig))
     (address : Addr) (node : Concrete.Node) : Prop :=
   ∀ {op flight},
     (op, flight) ∈ node.flights →
@@ -3063,47 +3063,47 @@ def NodeLoadingGets
       .storeRequest {
         op
         payload := .get flight.key
-      }) ∈ world.network
+      }) ∈ system.network
 
 theorem NodeLoadingGets.mono
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeLoadingGets world address node)
-    (hnetwork : ∀ message ∈ world.network, message ∈ next.network) :
+    (h : NodeLoadingGets system address node)
+    (hnetwork : ∀ message ∈ system.network, message ∈ next.network) :
     NodeLoadingGets next address node := by
   intro op flight hmem hphase
   exact hnetwork _ (h hmem hphase)
 
 theorem NodeLoadingGets.takeFlight
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node remaining : Concrete.Node}
     {op : Concrete.OpId} {taken : Option Concrete.Flight}
-    (h : NodeLoadingGets world address node)
+    (h : NodeLoadingGets system address node)
     (htake : node.takeFlight op = (taken, remaining)) :
-    NodeLoadingGets world address remaining := by
+    NodeLoadingGets system address remaining := by
   intro currentOp flight hmem hphase
   exact h (takeFlight_remaining_mem htake hmem) hphase
 
 theorem NodeLoadingGets.cachePut
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeLoadingGets world address node)
+    (h : NodeLoadingGets system address node)
     (key : DocumentKey) (value : Concrete.Versioned key) :
-    NodeLoadingGets world address (node.cachePut key value) := by
+    NodeLoadingGets system address (node.cachePut key value) := by
   intro op flight hmem hphase
   exact h (by
     simpa [Concrete.Node.cachePut] using hmem) hphase
 
 theorem NodeLoadingGets.cacheInvalidate
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeLoadingGets world address node)
+    (h : NodeLoadingGets system address node)
     (key : DocumentKey) :
-    NodeLoadingGets world address (node.cacheInvalidate key) := by
+    NodeLoadingGets system address (node.cacheInvalidate key) := by
   intro op flight hmem hphase
   exact h (by
     simpa [Concrete.Node.cacheInvalidate] using hmem) hphase
@@ -3111,10 +3111,10 @@ theorem NodeLoadingGets.cacheInvalidate
 set_option maxHeartbeats 800000 in
 theorem NodeWritingPuts.mono
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeWritingPuts world address node)
-    (hnetwork : ∀ message ∈ world.network, message ∈ next.network) :
+    (h : NodeWritingPuts system address node)
+    (hnetwork : ∀ message ∈ system.network, message ∈ next.network) :
     NodeWritingPuts next address node := by
   intro op flight hmem hphase
   obtain ⟨document, hdocument, hput⟩ := h hmem hphase
@@ -3122,32 +3122,32 @@ theorem NodeWritingPuts.mono
 
 theorem NodeWritingPuts.takeFlight
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node remaining : Concrete.Node}
     {op : Concrete.OpId} {taken : Option Concrete.Flight}
-    (h : NodeWritingPuts world address node)
+    (h : NodeWritingPuts system address node)
     (htake : node.takeFlight op = (taken, remaining)) :
-    NodeWritingPuts world address remaining := by
+    NodeWritingPuts system address remaining := by
   intro currentOp flight hmem hphase
   exact h (takeFlight_remaining_mem htake hmem) hphase
 
 theorem NodeWritingPuts.cachePut
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeWritingPuts world address node)
+    (h : NodeWritingPuts system address node)
     (key : DocumentKey) (value : Concrete.Versioned key) :
-    NodeWritingPuts world address (node.cachePut key value) := by
+    NodeWritingPuts system address (node.cachePut key value) := by
   intro op flight hmem hphase
   exact h (by simpa [Concrete.Node.cachePut] using hmem) hphase
 
 theorem NodeWritingPuts.cacheInvalidate
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (h : NodeWritingPuts world address node)
+    (h : NodeWritingPuts system address node)
     (key : DocumentKey) :
-    NodeWritingPuts world address (node.cacheInvalidate key) := by
+    NodeWritingPuts system address (node.cacheInvalidate key) := by
   intro op flight hmem hphase
   exact h (by simpa [Concrete.Node.cacheInvalidate] using hmem) hphase
 
@@ -3155,9 +3155,9 @@ set_option maxHeartbeats 800000 in
 theorem node_step_writing_puts
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node : Concrete.Node}
-    (hinvariant : NodeWritingPuts world address node)
+    (hinvariant : NodeWritingPuts system address node)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult :
@@ -3166,7 +3166,7 @@ theorem node_step_writing_puts
           now event).val) :
     ∃ next,
       result.state = .node next ∧
-      NodeWritingPuts (world.land (.node address) now result)
+      NodeWritingPuts (system.land (.node address) now result)
         address next := by
   cases event with
   | timeout =>
@@ -3177,7 +3177,7 @@ theorem node_step_writing_puts
           Concrete.writeCandidate, Concrete.beginMembershipRefresh,
           Concrete.beginTimerList,
           Concrete.Node.await, Concrete.Node.awaitControl, Concrete.continueCleanup,
-          World.land, Outcomes.one]
+          System.land, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
         try simp_all [NodeWritingPuts]
@@ -3195,7 +3195,7 @@ theorem node_step_writing_puts
           Concrete.continueCleanup,
           Concrete.Node.cachePut,
           Concrete.Node.cacheInvalidate, Concrete.sendOutputs,
-          World.land, Outcomes.one]
+          System.land, Outcomes.one]
       all_goals repeat' first | split at hresult
       all_goals
         try simp_all [NodeWritingPuts]
@@ -3203,11 +3203,11 @@ theorem node_step_writing_puts
 
 def WritingPuts
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧
-      NodeWritingPuts world address node
+      system.process (.node address) = .node node ∧
+      NodeWritingPuts system address node
 
 theorem writingPuts_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -3215,7 +3215,7 @@ theorem writingPuts_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     WritingPuts (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   refine ⟨{}, hinit.2.2 address haddress, ?_⟩
   intro op flight hmem
@@ -3224,10 +3224,10 @@ theorem writingPuts_initial
 theorem writingPuts_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : WritingPuts world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : WritingPuts system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     WritingPuts next := by
   cases hstep with
   | inject =>
@@ -3244,17 +3244,17 @@ theorem writingPuts_step
       · subst pid
         obtain ⟨after, hstate, hafter⟩ :=
           node_step_writing_puts hputs (hnode ▸ hresult)
-        exact ⟨after, by simp [World.land, hstate], hafter⟩
-      · exact ⟨node, by simp [World.land, Ne.symm hp, hnode],
+        exact ⟨after, by simp [System.land, hstate], hafter⟩
+      · exact ⟨node, by simp [System.land, Ne.symm hp, hnode],
           hputs.mono fun message hmessage =>
             List.mem_append_left _ hmessage⟩
 
 theorem reachable_writing_puts
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    WritingPuts world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    WritingPuts system := by
   induction hreachable with
   | init hinit => exact writingPuts_initial hinit
   | step _ hstep ih => exact writingPuts_step ih hstep
@@ -3262,11 +3262,11 @@ theorem reachable_writing_puts
 theorem reachable_writing_flight_provenance
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {address : Addr} {node : Concrete.Node}
     (haddress : address ∈ nodes)
-    (hnode : world.process (.node address) = .node node)
+    (hnode : system.process (.node address) = .node node)
     {op : Concrete.OpId} {flight : Concrete.Flight}
     (hflight : (op, flight) ∈ node.flights)
     (hphase : flight.phase = .writing) :
@@ -3284,7 +3284,7 @@ theorem reachable_writing_flight_provenance
             op
             payload := .put flight.key document
               (flight.loaded.map (·.2))
-          }) ∈ world.network := by
+          }) ∈ system.network := by
   obtain ⟨actual, hactual, hvalid⟩ :=
     reachable_nodes_valid hreachable address haddress
   rw [hnode] at hactual
@@ -3822,26 +3822,26 @@ theorem node_step_sent_put_valid
                 Outcomes.one]
 
 def RawPutsValid {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address op key document expectedVersion},
     (Concrete.Pid.node address, .store,
       .storeRequest {
         op
         payload := .put key document expectedVersion
-      }) ∈ world.network →
+      }) ∈ system.network →
     ValidPut appConfig key document expectedVersion
 
 theorem step_sent_put_valid
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {pid : Concrete.Pid} {now : Time}
     {event : Event Concrete.Pid Concrete.Msg}
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hprocess : (CModel nodes appConfig).isProcess pid)
     (hresult : result ∈
-      (Concrete.step appConfig config pid (world.process pid)
+      (Concrete.step appConfig config pid (system.process pid)
         now event).val)
     {recipient : Concrete.Pid} {op : Concrete.OpId}
     {key : DocumentKey} {document : Document key}
@@ -3859,7 +3859,7 @@ theorem step_sent_put_valid
         reachable_nodes_valid hreachable address hprocess
       exact node_step_sent_put_valid hnode (hlocal ▸ hresult) hsend
   | store =>
-      cases hlocal : world.process .store <;>
+      cases hlocal : system.process .store <;>
         cases event with
         | timeout =>
             simp [Concrete.step, Concrete.storeStep, Outcomes.one, hlocal] at hresult
@@ -3913,30 +3913,30 @@ theorem rawPutsValid_initial
     (process : Concrete.Pid → Concrete.Local) :
     RawPutsValid
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address op key document expectedVersion h
   contradiction
 
 theorem rawPutsValid_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    (hinvariant : RawPutsValid world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hreachable : Reachable (CModel nodes appConfig) config system)
+    (hinvariant : RawPutsValid system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     RawPutsValid next := by
   cases hstep with
   | inject htime hprocess hinject =>
       intro address op key document expectedVersion hmem
-      simp only [World.inject, List.mem_append,
+      simp only [System.inject, List.mem_append,
         List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · exact hinvariant hold
       · simp at hnew
   | process htime hprocess hvalid hresult =>
       intro address op key document expectedVersion hmem
-      simp only [World.land, List.mem_append] at hmem
+      simp only [System.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · exact hinvariant hold
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -3950,17 +3950,17 @@ theorem rawPutsValid_step
 theorem reachable_raw_put_valid
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    RawPutsValid world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    RawPutsValid system := by
   induction hreachable with
   | init hinit => exact rawPutsValid_initial _
   | step hreach hstep ih =>
       exact rawPutsValid_step hreach ih hstep
 
 def StoreExists {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
-  ∃ store, world.process .store = .store store
+    (system : System (CModel nodes appConfig)) : Prop :=
+  ∃ store, system.process .store = .store store
 
 theorem storeExists_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -3968,7 +3968,7 @@ theorem storeExists_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     StoreExists (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) :=
+      (System.initial process) :=
   ⟨{}, hinit.2.1⟩
 
 theorem store_step_effect
@@ -4057,10 +4057,10 @@ theorem store_step_effect
 theorem storeExists_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : StoreExists world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : StoreExists system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     StoreExists next := by
   obtain ⟨store, hstore⟩ := hinvariant
   cases hstep with
@@ -4073,25 +4073,25 @@ theorem storeExists_step
       · subst pid
         rw [hstore] at hresult
         obtain ⟨nextStore, hstate, _⟩ := store_step_effect hresult
-        exact ⟨nextStore, by simp [World.land, hstate]⟩
-      · exact ⟨store, by simp [World.land, Ne.symm hp, hstore]⟩
+        exact ⟨nextStore, by simp [System.land, hstate]⟩
+      · exact ⟨store, by simp [System.land, Ne.symm hp, hstore]⟩
 
 theorem reachable_store_exists
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    StoreExists world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    StoreExists system := by
   induction hreachable with
   | init hinit => exact storeExists_initial hinit
   | step _ hstep ih => exact storeExists_step ih hstep
 
 def GotSnapshots {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {store address op key loaded},
-    world.process .store = .store store →
+    system.process .store = .store store →
     (Concrete.Pid.store, .node address,
-      .storeReply { op, payload := .got key loaded }) ∈ world.network →
+      .storeReply { op, payload := .got key loaded }) ∈ system.network →
     Snapshot store key loaded
 
 theorem gotSnapshots_initial
@@ -4099,9 +4099,9 @@ theorem gotSnapshots_initial
     (process : Concrete.Pid → Concrete.Local) :
     GotSnapshots
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro store address op key loaded hstore hmem
-  simp [World.initial] at hmem
+  simp [System.initial] at hmem
 
 set_option maxHeartbeats 800000 in
 theorem node_step_no_store_reply
@@ -4262,16 +4262,16 @@ theorem sent_got_origin
 theorem gotSnapshots_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hstoreExists : StoreExists world)
-    (hinvariant : GotSnapshots world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hstoreExists : StoreExists system)
+    (hinvariant : GotSnapshots system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     GotSnapshots next := by
   cases hstep with
   | inject =>
       intro store address op key loaded hstore hmem
-      simp only [World.inject, List.mem_append, List.mem_singleton] at hmem
+      simp only [System.inject, List.mem_append, List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · exact hinvariant hstore hold
       · simp at hnew
@@ -4293,7 +4293,7 @@ theorem gotSnapshots_step
           obtain ⟨effectStore, hstate, heffect⟩ :=
             store_step_effect hresult'
           have heq : effectStore = nextStore := by
-            simpa [World.land, hstate] using hnextStore
+            simpa [System.land, hstate] using hnextStore
           subst effectStore
           rcases heffect with rfl | heffect
           · exact .inl rfl
@@ -4303,12 +4303,12 @@ theorem gotSnapshots_step
             · exact .inr ⟨.origin "", emptyDocument (.origin ""),
                 .inr hsame⟩
         · have heq : store = nextStore := by
-            have hx : world.process .store = .store nextStore := by
-              simpa [World.land, Ne.symm hp] using hnextStore
+            have hx : system.process .store = .store nextStore := by
+              simpa [System.land, Ne.symm hp] using hnextStore
             rw [hstore] at hx
             exact Concrete.Local.store.inj hx
           exact .inl heq.symm
-      simp only [World.land, List.mem_append] at hmem
+      simp only [System.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · have hsnapshot := hinvariant hstore hold
         rcases heffect with rfl | heffect
@@ -4330,7 +4330,7 @@ theorem gotSnapshots_step
         cases hevent
         have hsame : nextStore = store := by
           have hx : store = nextStore := by
-            simpa [World.land, hstate] using hnextStore
+            simpa [System.land, hstate] using hnextStore
           exact hx.symm
         subst nextStore
         exact Snapshot.of_read hread
@@ -4338,9 +4338,9 @@ theorem gotSnapshots_step
 theorem reachable_got_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    GotSnapshots world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    GotSnapshots system := by
   induction hreachable with
   | init hinit => exact gotSnapshots_initial _
   | step hreachable hstep hinvariant =>
@@ -4349,23 +4349,23 @@ theorem reachable_got_snapshots
 
 def TransactionOrigin
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) (address : Addr) :
+    (system : System (CModel nodes appConfig)) (address : Addr) :
     Concrete.Transaction → Prop
   | .external call =>
-      (Concrete.Pid.outside, .node address, .request call) ∈ world.network
+      (Concrete.Pid.outside, .node address, .request call) ∈ system.network
   | .work item instant _ =>
       ∃ request, item = .occurrence request instant
-  | .sweep _ instant _ => instant ≤ world.now
+  | .sweep _ instant _ => instant ≤ system.now
 
 def FlightRequestOrigins
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address node op flight call},
     address ∈ nodes →
-    world.process (.node address) = .node node →
+    system.process (.node address) = .node node →
     (op, flight) ∈ node.flights →
     flight.transaction = .external call →
-    (Concrete.Pid.outside, .node address, .request call) ∈ world.network
+    (Concrete.Pid.outside, .node address, .request call) ∈ system.network
 
 def NodeCacheSnapshots (store : Concrete.Store)
     (node : Concrete.Node) : Prop :=
@@ -4596,23 +4596,23 @@ theorem start_cache_snapshots
 
 def CacheSnapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes → ∀ {store node},
-    world.process .store = .store store →
-    world.process (.node address) = .node node →
+    system.process .store = .store store →
+    system.process (.node address) = .node node →
     NodeCacheSnapshots store node
 
 set_option maxHeartbeats 800000 in
 theorem node_step_cache_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {store : Concrete.Store} {address : Addr} {node : Concrete.Node}
-    (hstore : world.process .store = .store store)
+    (hstore : system.process .store = .store store)
     (hcache : NodeCacheSnapshots store node)
-    (hgots : GotSnapshots world)
+    (hgots : GotSnapshots system)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (hvalid : event.Valid world (.node address))
+    (hvalid : event.Valid system (.node address))
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult :
       result ∈
@@ -4831,9 +4831,9 @@ theorem cacheSnapshots_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     CacheSnapshots (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress store node hstore hnode
-  simp only [World.initial] at hstore hnode
+  simp only [System.initial] at hstore hnode
   have hs := hinit.2.1
   rw [hs] at hstore
   cases Concrete.Local.store.inj hstore
@@ -4846,13 +4846,13 @@ theorem cacheSnapshots_initial
 theorem cacheSnapshots_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hstoreExists : StoreExists world)
-    (hnodes : NodesValid world)
-    (hgots : GotSnapshots world)
-    (hinvariant : CacheSnapshots world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hstoreExists : StoreExists system)
+    (hnodes : NodesValid system)
+    (hgots : GotSnapshots system)
+    (hinvariant : CacheSnapshots system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     CacheSnapshots next := by
   cases hstep with
   | inject =>
@@ -4867,8 +4867,8 @@ theorem cacheSnapshots_step
       by_cases hpStore : pid = Concrete.Pid.store
       · subst pid
         have hnodeOld :
-            world.process (.node address) = .node node := by
-          simpa [World.land] using hnodeNext
+            system.process (.node address) = .node node := by
+          simpa [System.land] using hnodeNext
         have hcache :=
           hinvariant address haddress hbeforeStore hnodeOld
         have hresult' := hresult
@@ -4876,7 +4876,7 @@ theorem cacheSnapshots_step
         obtain ⟨afterStore, hstate, heffect⟩ :=
           store_step_effect hresult'
         have heq : afterStore = store := by
-          simpa [World.land, hstate] using hstoreNext
+          simpa [System.land, hstate] using hstoreNext
         subst afterStore
         rcases heffect with hsame |
           ⟨key, document, hcommit⟩ | ⟨hkeys, hvalues⟩
@@ -4889,8 +4889,8 @@ theorem cacheSnapshots_step
           exact Snapshot.sameDocuments hvalues
             (hcache key value hread)
       · have hstoreOld :
-            world.process .store = .store store := by
-          simpa [World.land, Ne.symm hpStore] using hstoreNext
+            system.process .store = .store store := by
+          simpa [System.land, Ne.symm hpStore] using hstoreNext
         by_cases hpNode : pid = .node address
         · subst pid
           obtain ⟨before, hbefore, _⟩ :=
@@ -4902,22 +4902,22 @@ theorem cacheSnapshots_step
               (hbefore ▸ hresult)
           have heq : after = node := by
             have hx : result.state = .node node := by
-              simpa [World.land] using hnodeNext
+              simpa [System.land] using hnodeNext
             rw [hstate] at hx
             exact Concrete.Local.node.inj hx
           subst after
           exact hafter
         · have hnodeOld :
-              world.process (.node address) = .node node := by
-            simpa [World.land, Ne.symm hpNode] using hnodeNext
+              system.process (.node address) = .node node := by
+            simpa [System.land, Ne.symm hpNode] using hnodeNext
           exact hinvariant address haddress hstoreOld hnodeOld
 
 theorem reachable_cache_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    CacheSnapshots world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    CacheSnapshots system := by
   induction hreachable with
   | init hinit => exact cacheSnapshots_initial hinit
   | step hreachable hstep ih =>
@@ -4936,10 +4936,10 @@ def NodeArmingSnapshots (store : Concrete.Store)
 
 def ArmingSnapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes → ∀ {store node},
-    world.process .store = .store store →
-    world.process (.node address) = .node node →
+    system.process .store = .store store →
+    system.process (.node address) = .node node →
     NodeArmingSnapshots store node
 
 theorem NodeArmingSnapshots.takeFlight
@@ -5050,14 +5050,14 @@ set_option maxHeartbeats 800000 in
 theorem node_step_arming_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {store : Concrete.Store} {address : Addr} {node : Concrete.Node}
-    (hstore : world.process .store = .store store)
+    (hstore : system.process .store = .store store)
     (hnode : NodeArmingSnapshots store node)
     (hcache : NodeCacheSnapshots store node)
-    (hgots : GotSnapshots world)
+    (hgots : GotSnapshots system)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (hvalid : event.Valid world (.node address))
+    (hvalid : event.Valid system (.node address))
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult :
       result ∈
@@ -5185,9 +5185,9 @@ theorem armingSnapshots_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     ArmingSnapshots (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress store node hstore hnodeState
-  simp only [World.initial] at hstore hnodeState
+  simp only [System.initial] at hstore hnodeState
   have hs := hinit.2.1
   rw [hs] at hstore
   cases Concrete.Local.store.inj hstore
@@ -5199,14 +5199,14 @@ theorem armingSnapshots_initial
 theorem armingSnapshots_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hstoreExists : StoreExists world)
-    (hnodes : NodesValid world)
-    (hcaches : CacheSnapshots world)
-    (hgots : GotSnapshots world)
-    (hinvariant : ArmingSnapshots world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hstoreExists : StoreExists system)
+    (hnodes : NodesValid system)
+    (hcaches : CacheSnapshots system)
+    (hgots : GotSnapshots system)
+    (hinvariant : ArmingSnapshots system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     ArmingSnapshots next := by
   cases hstep with
   | inject =>
@@ -5221,8 +5221,8 @@ theorem armingSnapshots_step
       by_cases hpStore : pid = Concrete.Pid.store
       · subst pid
         have hnodeOld :
-            world.process (.node address) = .node node := by
-          simpa [World.land] using hnodeNext
+            system.process (.node address) = .node node := by
+          simpa [System.land] using hnodeNext
         have harming : NodeArmingSnapshots beforeStore node :=
           hinvariant address haddress hbeforeStore hnodeOld
         have hresult' := hresult
@@ -5230,7 +5230,7 @@ theorem armingSnapshots_step
         obtain ⟨afterStore, hstate, heffect⟩ :=
           store_step_effect hresult'
         have heq : afterStore = store := by
-          simpa [World.land, hstate] using hstoreNext
+          simpa [System.land, hstate] using hstoreNext
         subst afterStore
         rcases heffect with rfl |
           ⟨writtenKey, written, rfl⟩ | ⟨hkeys, hvalues⟩
@@ -5240,8 +5240,8 @@ theorem armingSnapshots_step
         · intro hmem hphase
           exact Snapshot.sameDocuments hvalues (harming hmem hphase)
       · have hstoreOld :
-            world.process .store = .store store := by
-          simpa [World.land, Ne.symm hpStore] using hstoreNext
+            system.process .store = .store store := by
+          simpa [System.land, Ne.symm hpStore] using hstoreNext
         by_cases hpNode : pid = .node address
         · subst pid
           obtain ⟨before, hbefore, _⟩ :=
@@ -5255,22 +5255,22 @@ theorem armingSnapshots_step
               hgots hvalid (hbefore ▸ hresult)
           have heq : after = node := by
             have hx : result.state = .node node := by
-              simpa [World.land] using hnodeNext
+              simpa [System.land] using hnodeNext
             rw [hstate] at hx
             exact Concrete.Local.node.inj hx
           subst after
           exact hafter
         · have hnodeOld :
-              world.process (.node address) = .node node := by
-            simpa [World.land, Ne.symm hpNode] using hnodeNext
+              system.process (.node address) = .node node := by
+            simpa [System.land, Ne.symm hpNode] using hnodeNext
           exact hinvariant address haddress hstoreOld hnodeOld
 
 theorem reachable_arming_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    ArmingSnapshots world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    ArmingSnapshots system := by
   induction hreachable with
   | init hinit => exact armingSnapshots_initial hinit
   | step hreachable hstep ih =>
@@ -5368,15 +5368,15 @@ theorem put_not_in_singleton_of_payload_ne
 theorem node_step_sent_put_snapshot
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {store : Concrete.Store} {address : Addr} {node : Concrete.Node}
-    (hstore : world.process .store = .store store)
+    (hstore : system.process .store = .store store)
     (hnode : NodeValid appConfig node)
     (hcache : NodeCacheSnapshots store node)
     (harming : NodeArmingSnapshots store node)
-    (hgots : GotSnapshots world)
+    (hgots : GotSnapshots system)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (hvalid : event.Valid world (.node address))
+    (hvalid : event.Valid system (.node address))
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult : result ∈
       (Concrete.step appConfig config (.node address) (.node node)
@@ -5614,14 +5614,14 @@ theorem node_step_sent_put_snapshot
 
 def OwnedPutSnapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {store address op key document expectedVersion},
-    world.process .store = .store store →
+    system.process .store = .store store →
     (Concrete.Pid.node address, .store,
       .storeRequest {
         op
         payload := .put key document expectedVersion
-      }) ∈ world.network →
+      }) ∈ system.network →
     ∃ provenance :
         PutProvenance appConfig key document expectedVersion,
       Snapshot store key provenance.loaded
@@ -5631,27 +5631,27 @@ theorem ownedPutSnapshots_initial
     (process : Concrete.Pid → Concrete.Local) :
     OwnedPutSnapshots
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro store address op key document expectedVersion hstore hmem
-  simp [World.initial] at hmem
+  simp [System.initial] at hmem
 
 theorem ownedPutSnapshots_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hstoreExists : StoreExists world)
-    (hnodes : NodesValid world)
-    (hcaches : CacheSnapshots world)
-    (harmings : ArmingSnapshots world)
-    (hgots : GotSnapshots world)
-    (hinvariant : OwnedPutSnapshots world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hstoreExists : StoreExists system)
+    (hnodes : NodesValid system)
+    (hcaches : CacheSnapshots system)
+    (harmings : ArmingSnapshots system)
+    (hgots : GotSnapshots system)
+    (hinvariant : OwnedPutSnapshots system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     OwnedPutSnapshots next := by
   cases hstep with
   | inject =>
       intro store address op key document expectedVersion hstore hmem
-      simp only [World.inject, List.mem_append, List.mem_singleton] at hmem
+      simp only [System.inject, List.mem_append, List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · exact hinvariant hstore hold
       · simp at hnew
@@ -5673,7 +5673,7 @@ theorem ownedPutSnapshots_step
           obtain ⟨effectStore, hstate, heffect⟩ :=
             store_step_effect hresult'
           have heq : effectStore = nextStore := by
-            simpa [World.land, hstate] using hnextStore
+            simpa [System.land, hstate] using hnextStore
           subst effectStore
           rcases heffect with rfl |
             ⟨writtenKey, written, rfl⟩ | ⟨hkeys, hvalues⟩
@@ -5681,12 +5681,12 @@ theorem ownedPutSnapshots_step
           · exact .inr (.inl ⟨writtenKey, written, rfl⟩)
           · exact .inr (.inr hvalues)
         · have heq : store = nextStore := by
-            have hx : world.process .store = .store nextStore := by
-              simpa [World.land, Ne.symm hp] using hnextStore
+            have hx : system.process .store = .store nextStore := by
+              simpa [System.land, Ne.symm hp] using hnextStore
             rw [hstore] at hx
             exact Concrete.Local.store.inj hx
           exact .inl heq.symm
-      simp only [World.land, List.mem_append] at hmem
+      simp only [System.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · obtain ⟨provenance, hsnapshot⟩ :=
           hinvariant hstore hold
@@ -5712,7 +5712,7 @@ theorem ownedPutSnapshots_step
             hresult' hsent
         have hsame : nextStore = store := by
           have hx : store = nextStore := by
-            simpa [World.land, hstore] using hnextStore
+            simpa [System.land, hstore] using hnextStore
           exact hx.symm
         subst nextStore
         exact ⟨provenance, hsnapshot⟩
@@ -5720,9 +5720,9 @@ theorem ownedPutSnapshots_step
 theorem reachable_owned_put_snapshots
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    OwnedPutSnapshots world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    OwnedPutSnapshots system := by
   induction hreachable with
   | init hinit => exact ownedPutSnapshots_initial _
   | step hreachable hstep hinvariant =>
@@ -5736,25 +5736,25 @@ theorem reachable_owned_put_snapshots
 
 def PutRepliesHaveRequest
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address op reply},
     (reply = StoreReply.written ∨
       reply = .conflict ∨ reply = .failed) →
     (Concrete.Pid.store, .node address,
-      .storeReply { op, payload := reply }) ∈ world.network →
+      .storeReply { op, payload := reply }) ∈ system.network →
     (∃ key document expectedVersion,
         (Concrete.Pid.node address, .store,
           .storeRequest {
             op
             payload := .put key document expectedVersion
-          }) ∈ world.network) ∨
+          }) ∈ system.network) ∨
       (reply = .conflict ∧
         ∃ expected membership,
           (Concrete.Pid.node address, .store,
             .storeRequest {
               op
               payload := .putMembership expected membership
-            }) ∈ world.network)
+            }) ∈ system.network)
 
 theorem sent_put_reply_origin
     {appConfig : Resonate.Config} {config : Concrete.Config}
@@ -5861,22 +5861,22 @@ theorem putRepliesHaveRequest_initial
     (process : Concrete.Pid → Concrete.Local) :
     PutRepliesHaveRequest
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address op reply hreply hmem
-  simp [World.initial] at hmem
+  simp [System.initial] at hmem
 
 theorem putRepliesHaveRequest_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : PutRepliesHaveRequest world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : PutRepliesHaveRequest system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     PutRepliesHaveRequest next := by
   cases hstep with
   | inject =>
       intro address op reply hreply hmem
-      simp only [World.inject, List.mem_append, List.mem_singleton] at hmem
+      simp only [System.inject, List.mem_append, List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · rcases hinvariant hreply hold with hput | hcontrol
         · obtain ⟨key, document, expected, hput⟩ := hput
@@ -5890,7 +5890,7 @@ theorem putRepliesHaveRequest_step
       exact hinvariant
   | @process pid now event result htime hprocess hvalid hresult =>
       intro address op reply hreply hmem
-      simp only [World.land, List.mem_append] at hmem
+      simp only [System.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · rcases hinvariant hreply hold with hput | hcontrol
         · obtain ⟨key, document, expected, hput⟩ := hput
@@ -5917,43 +5917,43 @@ theorem putRepliesHaveRequest_step
 theorem reachable_put_replies_have_request
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    PutRepliesHaveRequest world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    PutRepliesHaveRequest system := by
   induction hreachable with
   | init hinit => exact putRepliesHaveRequest_initial _
   | step _ hstep ih => exact putRepliesHaveRequest_step ih hstep
 
 def GotRepliesHaveRequest
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {address op key loaded},
     (Concrete.Pid.store, .node address,
-      .storeReply { op, payload := .got key loaded }) ∈ world.network →
+      .storeReply { op, payload := .got key loaded }) ∈ system.network →
     (Concrete.Pid.node address, .store,
-      .storeRequest { op, payload := .get key }) ∈ world.network
+      .storeRequest { op, payload := .get key }) ∈ system.network
 
 theorem gotRepliesHaveRequest_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
     (process : Concrete.Pid → Concrete.Local) :
     GotRepliesHaveRequest
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address op key loaded h
   contradiction
 
 theorem gotRepliesHaveRequest_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hinvariant : GotRepliesHaveRequest world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hinvariant : GotRepliesHaveRequest system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     GotRepliesHaveRequest next := by
   cases hstep with
   | inject =>
       intro address op key loaded hmem
-      simp only [World.inject, List.mem_append, List.mem_singleton] at hmem ⊢
+      simp only [System.inject, List.mem_append, List.mem_singleton] at hmem ⊢
       rcases hmem with hold | hnew
       · exact .inl (hinvariant hold)
       · simp at hnew
@@ -5961,7 +5961,7 @@ theorem gotRepliesHaveRequest_step
       exact hinvariant
   | @process pid now event result htime hprocess hvalid hresult =>
       intro address op key loaded hmem
-      simp only [World.land, List.mem_append] at hmem ⊢
+      simp only [System.land, List.mem_append] at hmem ⊢
       rcases hmem with hold | hnew
       · exact .inl (hinvariant hold)
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -5976,9 +5976,9 @@ theorem gotRepliesHaveRequest_step
 theorem reachable_got_replies_have_request
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    GotRepliesHaveRequest world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    GotRepliesHaveRequest system := by
   induction hreachable with
   | init hinit => exact gotRepliesHaveRequest_initial _
   | step _ hstep ih => exact gotRepliesHaveRequest_step ih hstep
@@ -5996,7 +5996,7 @@ theorem flightRequestOrigins_initial
     (hinit : (CModel nodes appConfig).init config process) :
     FlightRequestOrigins
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address node op flight call haddress hnode hflight
   have : Concrete.Local.node node = .node {} := hnode.symm.trans
     (hinit.2.2 address haddress)
@@ -6084,13 +6084,13 @@ theorem start_external_flight_provenance
 theorem node_step_flight_request_origins
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {address : Addr} {node next : Concrete.Node}
     (haddress : address ∈ nodes)
-    (hnodeLocal : world.process (.node address) = .node node)
-    (hinvariant : FlightRequestOrigins world)
+    (hnodeLocal : system.process (.node address) = .node node)
+    (hinvariant : FlightRequestOrigins system)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (hvalid : event.Valid world (.node address))
+    (hvalid : event.Valid system (.node address))
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult :
       result ∈
@@ -6101,12 +6101,12 @@ theorem node_step_flight_request_origins
       (op, flight) ∈ next.flights →
       flight.transaction = .external call →
       (Concrete.Pid.outside, .node address, .request call) ∈
-        (world.land (.node address) now result).network := by
+        (system.land (.node address) now result).network := by
   have hold {op flight call}
       (hmem : (op, flight) ∈ node.flights)
       (htransaction : flight.transaction = .external call) :
       (Concrete.Pid.outside, .node address, .request call) ∈
-        (world.land (.node address) now result).network :=
+        (system.land (.node address) now result).network :=
     List.mem_append_left _
       (hinvariant haddress hnodeLocal hmem htransaction)
   intro currentOp current call hmem htransaction
@@ -6533,11 +6533,11 @@ theorem node_step_flight_request_origins
 theorem flightRequestOrigins_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    (hinvariant : FlightRequestOrigins world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hreachable : Reachable (CModel nodes appConfig) config system)
+    (hinvariant : FlightRequestOrigins system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     FlightRequestOrigins next := by
   cases hstep with
   | inject =>
@@ -6553,21 +6553,21 @@ theorem flightRequestOrigins_step
         obtain ⟨before, hbefore, _⟩ :=
           reachable_nodes_valid hreachable address haddress
         have hstate : result.state = .node node := by
-          simpa [World.land] using hnode
+          simpa [System.land] using hnode
         exact node_step_flight_request_origins haddress hbefore hinvariant
           hvalid (hbefore ▸ hresult) hstate hmem htransaction
       · have hlocal :
-            world.process (.node address) = .node node := by
-          simpa [World.land, Ne.symm hp] using hnode
+            system.process (.node address) = .node node := by
+          simpa [System.land, Ne.symm hp] using hnode
         exact List.mem_append_left _
           (hinvariant haddress hlocal hmem htransaction)
 
 theorem reachable_flight_request_origins
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    FlightRequestOrigins world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    FlightRequestOrigins system := by
   induction hreachable with
   | init hinit => exact flightRequestOrigins_initial hinit
   | step hreachable hstep ih =>
@@ -6575,11 +6575,11 @@ theorem reachable_flight_request_origins
 
 theorem TransactionOrigin.mono
     {nodes : List Addr} {appConfig : Resonate.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {address : Addr} {transaction : Concrete.Transaction}
-    (horigin : TransactionOrigin world address transaction)
-    (htime : world.now ≤ next.now)
-    (hnetwork : ∀ message ∈ world.network, message ∈ next.network) :
+    (horigin : TransactionOrigin system address transaction)
+    (htime : system.now ≤ next.now)
+    (hnetwork : ∀ message ∈ system.network, message ∈ next.network) :
     TransactionOrigin next address transaction := by
   cases transaction with
   | external call => exact hnetwork _ horigin
@@ -6593,20 +6593,20 @@ same witness is what permits the store step itself to stage the abstract
 transaction before the node later consumes the reply. -/
 def StageablePuts
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ {store address op key document expectedVersion},
-    world.process .store = .store store →
+    system.process .store = .store store →
     (Concrete.Pid.node address, .store,
       .storeRequest {
         op
         payload := .put key document expectedVersion
-      }) ∈ world.network →
+      }) ∈ system.network →
     ∃ provenance :
         PutProvenance appConfig key document expectedVersion,
       Snapshot store key provenance.loaded ∧
-        TransactionOrigin world address provenance.transaction ∧
+        TransactionOrigin system address provenance.transaction ∧
         (∀ node flight,
-          world.process (.node address) = .node node →
+          system.process (.node address) = .node node →
           (op, flight) ∈ node.flights →
           flight.phase = .writing →
           ∃ hkey : key = flight.key,
@@ -6616,18 +6616,18 @@ def StageablePuts
             provenance.continuations = flight.continuations) ∧
         (expectedVersion = store.version key →
           ∃ node flight,
-            world.process (.node address) = .node node ∧
+            system.process (.node address) = .node node ∧
             (op, flight) ∈ node.flights ∧
             flight.phase = .writing ∧
             ∀ reply,
               (reply = StoreReply.written ∨
                 reply = .conflict ∨ reply = .failed) →
               (Concrete.Pid.store, .node address,
-                .storeReply { op, payload := reply }) ∉ world.network)
+                .storeReply { op, payload := reply }) ∉ system.network)
 
 theorem start_put_stageable
     {nodes : List Addr} (appConfig : Resonate.Config)
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {store : Concrete.Store} (address : Addr) (now : Time)
     (node : Concrete.Node) (transaction : Concrete.Transaction)
     (transactionKey : DocumentKey)
@@ -6642,7 +6642,7 @@ theorem start_put_stageable
     (hcache : NodeCacheSnapshots store node)
     (horigin :
       TransactionOrigin
-        (world.land (.node address) now
+        (system.land (.node address) now
           (Concrete.start appConfig node transaction transactionKey
             flightAddress fired))
         address transaction)
@@ -6660,7 +6660,7 @@ theorem start_put_stageable
         PutProvenance appConfig key document expectedVersion,
       Snapshot store key provenance.loaded ∧
         TransactionOrigin
-          (world.land (.node address) now
+          (system.land (.node address) now
             (Concrete.start appConfig node transaction transactionKey
               flightAddress fired))
           address provenance.transaction ∧
@@ -6726,7 +6726,7 @@ theorem start_put_stageable
                 ?_, ?_⟩
               · have horigin' :
                     TransactionOrigin
-                      (world.land (.node address) now
+                      (system.land (.node address) now
                         (Concrete.decide appConfig node {
                           key := transactionKey
                           transaction
@@ -6764,21 +6764,21 @@ theorem start_put_stageable
 theorem node_step_sent_put_stageable
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
+    {system : System (CModel nodes appConfig)}
     {store : Concrete.Store} {address : Addr} {node : Concrete.Node}
     (haddress : address ∈ nodes)
-    (hnodeLocal : world.process (.node address) = .node node)
-    (hstore : world.process .store = .store store)
+    (hnodeLocal : system.process (.node address) = .node node)
+    (hstore : system.process .store = .store store)
     (hnode : NodeValid appConfig node)
-    (hsweeps : NodeSweepsValid world.now node)
+    (hsweeps : NodeSweepsValid system.now node)
     (hserial : NodeSerial node)
     (hcache : NodeCacheSnapshots store node)
     (harming : NodeArmingSnapshots store node)
-    (hgots : GotSnapshots world)
-    (horigins : FlightRequestOrigins world)
+    (hgots : GotSnapshots system)
+    (horigins : FlightRequestOrigins system)
     {now : Time} {event : Event Concrete.Pid Concrete.Msg}
-    (hvalid : event.Valid world (.node address))
-    (htime : world.now ≤ now)
+    (hvalid : event.Valid system (.node address))
+    (htime : system.now ≤ now)
     {result : Result Concrete.Pid Concrete.Local Concrete.Msg}
     (hresult : result ∈
       (Concrete.step appConfig config (.node address) (.node node)
@@ -6794,7 +6794,7 @@ theorem node_step_sent_put_stageable
     ∃ provenance :
         PutProvenance appConfig key document expectedVersion,
       Snapshot store key provenance.loaded ∧
-        TransactionOrigin (world.land (.node address) now result)
+        TransactionOrigin (system.land (.node address) now result)
           address provenance.transaction ∧
         (∀ next flight,
           result.state = .node next →
@@ -6859,7 +6859,7 @@ theorem node_step_sent_put_stageable
                         intro cacheKey value hread
                         change node.cacheRead cacheKey = some value at hread
                         exact hcache cacheKey value hread)
-                      (by simp [TransactionOrigin, World.land])
+                      (by simp [TransactionOrigin, System.land])
                       (by simpa using hempty) hsend
                   · simp [Outcomes.one] at hresult
                     subst result
@@ -7113,7 +7113,7 @@ theorem node_step_sent_put_stageable
                         }
                         have horigin :
                             TransactionOrigin
-                              (world.land (.node address) now {
+                              (system.land (.node address) now {
                                 state := .node
                                   (remaining.await
                                     { flight with phase := .writing }
@@ -7207,23 +7207,23 @@ theorem stageablePuts_initial
     (process : Concrete.Pid → Concrete.Local) :
     StageablePuts
       (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro store address op key document expectedVersion hstore hmem
   contradiction
 
 theorem stageablePuts_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
-    (hinvariant : StageablePuts world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hreachable : Reachable (CModel nodes appConfig) config system)
+    (hinvariant : StageablePuts system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     StageablePuts next := by
   cases hstep with
   | inject htime _ _ =>
       intro store address op key document expectedVersion hstore hmem
-      simp only [World.inject, List.mem_append,
+      simp only [System.inject, List.mem_append,
         List.mem_singleton] at hmem
       rcases hmem with hold | hnew
       · obtain ⟨provenance, hsnapshot, horigin, hagreement,
@@ -7234,14 +7234,14 @@ theorem stageablePuts_step
             List.mem_append_left _ hmessage, ?_, ?_⟩
         · intro node flight hnode hflight hphase
           exact hagreement node flight
-            (by simpa [World.inject] using hnode) hflight hphase
+            (by simpa [System.inject] using hnode) hflight hphase
         · intro hmatch
           obtain ⟨node, flight, hnode, hflight, hphase, hnoreply⟩ :=
             heligible hmatch
-          refine ⟨node, flight, by simpa [World.inject] using hnode,
+          refine ⟨node, flight, by simpa [System.inject] using hnode,
             hflight, hphase, ?_⟩
           intro reply hreply hmem
-          simp only [World.inject, List.mem_append,
+          simp only [System.inject, List.mem_append,
             List.mem_singleton] at hmem
           rcases hmem with hold | hnew
           · exact hnoreply reply hreply hold
@@ -7250,23 +7250,23 @@ theorem stageablePuts_step
   | outside htime _ =>
       intro store address op key document expectedVersion hstore hmem
       obtain ⟨provenance, hsnapshot, horigin, hagreement, heligible⟩ :=
-        hinvariant (by simpa [World.observeOutside] using hstore)
-          (by simpa [World.observeOutside] using hmem)
+        hinvariant (by simpa [System.observeOutside] using hstore)
+          (by simpa [System.observeOutside] using hmem)
       refine ⟨provenance, hsnapshot, horigin.mono htime (by
         intro message hmessage
-        simpa [World.observeOutside] using hmessage), ?_, ?_⟩
+        simpa [System.observeOutside] using hmessage), ?_, ?_⟩
       · intro node flight hnode hflight hphase
         exact hagreement node flight
-          (by simpa [World.observeOutside] using hnode) hflight hphase
+          (by simpa [System.observeOutside] using hnode) hflight hphase
       · intro hmatch
         obtain ⟨node, flight, hnode, hflight, hphase, hnoreply⟩ :=
           heligible hmatch
         refine ⟨node, flight,
-          by simpa [World.observeOutside] using hnode,
+          by simpa [System.observeOutside] using hnode,
           hflight, hphase, ?_⟩
         intro reply hreply hreplyMem
         exact hnoreply reply hreply
-          (by simpa [World.observeOutside] using hreplyMem)
+          (by simpa [System.observeOutside] using hreplyMem)
   | @process pid now event result htime hprocess hvalid hresult =>
       intro nextStore address op key document expectedVersion
         hnextStore hmem
@@ -7283,7 +7283,7 @@ theorem stageablePuts_step
           obtain ⟨effectStore, hstate, heffect⟩ :=
             store_step_effect hresult'
           have heq : effectStore = nextStore := by
-            simpa [World.land, hstate] using hnextStore
+            simpa [System.land, hstate] using hnextStore
           subst effectStore
           rcases heffect with rfl |
             ⟨writtenKey, written, rfl⟩ | ⟨hkeys, hvalues⟩
@@ -7291,12 +7291,12 @@ theorem stageablePuts_step
           · exact .inr (.inl ⟨writtenKey, written, rfl⟩)
           · exact .inr (.inr hvalues)
         · have heq : store = nextStore := by
-            have hx : world.process .store = .store nextStore := by
-              simpa [World.land, Ne.symm hp] using hnextStore
+            have hx : system.process .store = .store nextStore := by
+              simpa [System.land, Ne.symm hp] using hnextStore
             rw [hstore] at hx
             exact Concrete.Local.store.inj hx
           exact .inl heq.symm
-      simp only [World.land, List.mem_append] at hmem
+      simp only [System.land, List.mem_append] at hmem
       rcases hmem with hold | hnew
       · obtain ⟨provenance, hsnapshot, horigin, hagreement,
           heligible⟩ :=
@@ -7315,14 +7315,14 @@ theorem stageablePuts_step
             obtain ⟨before, hbefore, _⟩ :=
               reachable_nodes_valid hreachable address hprocess
             have hstate : result.state = .node node := by
-              simpa [World.land] using hnode
+              simpa [System.land] using hnode
             have hop :=
               (reachable_rpc_ids hreachable).fresh hprocess hbefore hold
             exact hagreement before flight hbefore
               (node_step_old_flight (hbefore ▸ hresult) hstate hop hflight)
               hphase
           · exact hagreement node flight
-              (by simpa [World.land, Ne.symm hp] using hnode)
+              (by simpa [System.land, Ne.symm hp] using hnode)
               hflight hphase
         · intro hmatch
           have hmatchOld :
@@ -7355,9 +7355,9 @@ theorem stageablePuts_step
                   reply = .conflict ∨ reply = .failed) →
                 (Concrete.Pid.store, .node address,
                   .storeReply { op, payload := reply }) ∉
-                    (world.land pid now result).network := by
+                    (system.land pid now result).network := by
             intro reply hreply hreplyMem
-            simp only [World.land, List.mem_append] at hreplyMem
+            simp only [System.land, List.mem_append] at hreplyMem
             rcases hreplyMem with holdReply | newReply
             · exact hnoreply reply hreply holdReply
             · obtain ⟨sent, hsentReply, heq⟩ :=
@@ -7388,7 +7388,7 @@ theorem stageablePuts_step
                           op
                           payload :=
                             .putMembership controlExpected membership
-                        }) ∈ world.network := hvalid
+                        }) ∈ system.network := hvalid
                   have hpayload :=
                     (reachable_rpc_ids hreachable).unique hold hrequest
                   cases hpayload
@@ -7400,7 +7400,7 @@ theorem stageablePuts_step
                     .storeRequest {
                       op
                       payload := .put replyKey replyDocument replyExpected
-                    }) ∈ world.network := hvalid
+                    }) ∈ system.network := hvalid
               have hpayload :=
                 (reachable_rpc_ids hreachable).unique hold hrequest
               cases hpayload
@@ -7411,7 +7411,7 @@ theorem stageablePuts_step
               · simp [Outcomes.one] at hresult'
                 subst result
                 have hsame : store = nextStore := by
-                  simpa [World.land] using hnextStore
+                  simpa [System.land] using hnextStore
                 subst nextStore
                 rename_i hmismatch
                 simp only [bne_iff_ne] at hmismatch
@@ -7422,21 +7422,21 @@ theorem stageablePuts_step
                   · subst result
                     have hsame :
                         store.commit key document = nextStore := by
-                      simpa [World.land] using hnextStore
+                      simpa [System.land] using hnextStore
                     subst nextStore
                     exact (Snapshot.expected_ne_commit_version hsnapshot
                       (provenance.expected_eq.trans hmatch)).elim
                   · subst result
                     have hsame :
                         store.commit key document = nextStore := by
-                      simpa [World.land] using hnextStore
+                      simpa [System.land] using hnextStore
                     subst nextStore
                     exact (Snapshot.expected_ne_commit_version hsnapshot
                       (provenance.expected_eq.trans hmatch)).elim
                   · subst result
                     have hsame :
                         store.fence key = nextStore := by
-                      simpa [World.land] using hnextStore
+                      simpa [System.land] using hnextStore
                     subst nextStore
                     exact (Snapshot.expected_ne_commit_version
                       (document := store.documentAt key) hsnapshot
@@ -7445,7 +7445,7 @@ theorem stageablePuts_step
                   subst result
                   have hsame :
                       store.commit key document = nextStore := by
-                    simpa [World.land] using hnextStore
+                    simpa [System.land] using hnextStore
                   subst nextStore
                   exact (Snapshot.expected_ne_commit_version hsnapshot
                     (provenance.expected_eq.trans hmatch)).elim
@@ -7478,10 +7478,10 @@ theorem stageablePuts_step
                 hnotWritten hnotConflict hnotFailed
                 (hbefore ▸ hresult)
             refine ⟨after, active,
-              by simp [World.land, hafterState],
+              by simp [System.land, hafterState],
               hafterFlight, hphase, hnoRepliesNext⟩
           · refine ⟨before, active,
-              by simp [World.land, Ne.symm hp, hbefore],
+              by simp [System.land, Ne.symm hp, hbefore],
               hactive, hphase, hnoRepliesNext⟩
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
         obtain ⟨target, message⟩ := sent
@@ -7510,27 +7510,27 @@ theorem stageablePuts_step
             hvalid htime (hnodeState ▸ hresult) hsent
         have hsame : nextStore = store := by
           have hx : store = nextStore := by
-            simpa [World.land, hstore] using hnextStore
+            simpa [System.land, hstore] using hnextStore
           exact hx.symm
         subst nextStore
         refine ⟨provenance, hsnapshot, horigin, ?_, ?_⟩
         intro nextNode flight hnodeNext hflight hphase
         have hstate : result.state = .node nextNode := by
-          simpa [World.land] using hnodeNext
+          simpa [System.land] using hnodeNext
         exact hagreement nextNode flight hstate hflight hphase
         · intro hmatch
           obtain ⟨nextNode, flight, hstate, hflight, hphase⟩ :=
             hactiveNew
           refine ⟨nextNode, flight,
-            by simpa [World.land] using hstate,
+            by simpa [System.land] using hstate,
             hflight, hphase, ?_⟩
           intro reply hreply hmem
-          simp only [World.land, List.mem_append] at hmem
+          simp only [System.land, List.mem_append] at hmem
           rcases hmem with hold | hnew
           · obtain ⟨payload, hrequest⟩ :
                 ∃ payload,
                   (Concrete.Pid.node address, .store,
-                    .storeRequest { op, payload }) ∈ world.network := by
+                    .storeRequest { op, payload }) ∈ system.network := by
               rcases reachable_put_replies_have_request hreachable hreply hold
                 with hput | hcontrol
               · obtain ⟨key, document, expected, hput⟩ := hput
@@ -7555,9 +7555,9 @@ theorem stageablePuts_step
 theorem reachable_stageable_puts
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    StageablePuts world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    StageablePuts system := by
   induction hreachable with
   | init hinit => exact stageablePuts_initial _
   | step hreachable hstep ih =>
@@ -7566,8 +7566,8 @@ theorem reachable_stageable_puts
 theorem reachable_nodes_nodup
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
     nodes.Nodup := by
   induction hreachable with
   | init hinit => exact hinit.1
@@ -7576,12 +7576,12 @@ theorem reachable_nodes_nodup
 theorem reachable_writing_snapshot
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {store : Concrete.Store} {address : Addr} {node : Concrete.Node}
-    (hstore : world.process .store = .store store)
+    (hstore : system.process .store = .store store)
     (haddress : address ∈ nodes)
-    (hnode : world.process (.node address) = .node node)
+    (hnode : system.process (.node address) = .node node)
     {op : Concrete.OpId} {flight : Concrete.Flight}
     (hflight : (op, flight) ∈ node.flights)
     (hphase : flight.phase = .writing) :
@@ -7606,19 +7606,19 @@ theorem pending_work_choice_of_mem
       List.Perm state.workflow.pending (entry :: rest) :=
   runTimeout_mem_pending appConfig state now hmem
 
-def Covered (abstract : World AModel) (outputs : List Output) : Prop :=
+def Covered (abstract : System AModel) (outputs : List Output) : Prop :=
   ∀ output ∈ outputs,
     (Abstract.Pid.service, .outside, Message.output output) ∈
       abstract.network
 
-theorem Covered.mono {abstract next : World AModel}
+theorem Covered.mono {abstract next : System AModel}
     {outputs : List Output} (hcovered : Covered abstract outputs)
     (hnetwork : ∀ message ∈ abstract.network, message ∈ next.network) :
     Covered next outputs := by
   intro output houtput
   exact hnetwork _ (hcovered output houtput)
 
-theorem Covered.land {abstract : World AModel} {outputs : List Output}
+theorem Covered.land {abstract : System AModel} {outputs : List Output}
     (hcovered : Covered abstract outputs) {now : Time}
     (result : Result Abstract.Pid State Message) :
     Covered (abstract.land .service now result) outputs :=
@@ -7626,7 +7626,7 @@ theorem Covered.land {abstract : World AModel} {outputs : List Output}
     List.mem_append_left _ hmessage
 
 theorem covered_sent
-    (abstract : World AModel) (now : Time) (state : State)
+    (abstract : System AModel) (now : Time) (state : State)
     (outputs : List Output) :
     Covered
       (abstract.land .service now {
@@ -7634,7 +7634,7 @@ theorem covered_sent
         send := Abstract.sends outputs
       }) outputs := by
   intro output houtput
-  simp only [World.land, Abstract.sends, List.mem_append, List.mem_map]
+  simp only [System.land, Abstract.sends, List.mem_append, List.mem_map]
   right
   exact ⟨(.outside, Message.output output),
     ⟨output, houtput, rfl⟩, rfl⟩
@@ -7856,8 +7856,8 @@ theorem NodeWorkflowPart.restore
 def WorkflowAligned
     {nodes : List Addr} {appConfig : Resonate.Config}
     (_config : Concrete.Config)
-    (concrete : World (CModel nodes appConfig))
-    (abstract : World AModel) : Prop :=
+    (concrete : System (CModel nodes appConfig))
+    (abstract : System AModel) : Prop :=
   ∃ store parts slack,
     concrete.process .store = .store store ∧
     List.Perm (abstract.process .service).workflow.pending
@@ -7924,8 +7924,8 @@ theorem pendingEmbedded_flatMap_part
 theorem WorkflowAligned.current
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (haligned : WorkflowAligned config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {node : Concrete.Node}
     {op : Concrete.OpId} {flight : Concrete.Flight}
@@ -7974,8 +7974,8 @@ boundary output that may be observed later or repeatedly from Rover's
 append-only network. -/
 structure Related (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config)
-    (concrete : World (CModel nodes appConfig))
-    (abstract : World AModel) : Prop where
+    (concrete : System (CModel nodes appConfig))
+    (abstract : System AModel) : Prop where
   time : abstract.now ≤ concrete.now
   store :
     ∃ physical : Concrete.Store,
@@ -8085,8 +8085,8 @@ structure Related (nodes : List Addr) (appConfig : Resonate.Config)
 theorem Related.cleanupCovered_transport
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete concreteNext : World (CModel nodes appConfig)}
-    {abstract abstractNext : World AModel}
+    {concrete concreteNext : System (CModel nodes appConfig)}
+    {abstract abstractNext : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     (hprocess :
       ∀ address, concreteNext.process (.node address) =
@@ -8107,8 +8107,8 @@ theorem Related.cleanupCovered_transport
 theorem workflowAligned_store_commit
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract nextAbstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract nextAbstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (haligned : WorkflowAligned config concrete abstract)
     {physical : Concrete.Store}
@@ -8136,13 +8136,13 @@ theorem workflowAligned_store_commit
   rw [hphysical] at hworkflowStore
   cases Concrete.Local.store.inj hworkflowStore
   refine ⟨physical.commit key document, parts, slack,
-    by simp [World.land, hstate], ?_, ?_, ?_⟩
+    by simp [System.land, hstate], ?_, ?_, ?_⟩
   · rw [hpending]
     exact hperm
   · intro address haddress node hnodeNext
     have hnode :
         concrete.process (.node address) = .node node := by
-      simpa [World.land] using hnodeNext
+      simpa [System.land] using hnodeNext
     have hold := hparts address haddress node hnode
     refine ⟨hold.1, ?_⟩
     intro op flight hflight
@@ -8189,8 +8189,8 @@ theorem workflowAligned_store_commit
   · intro address haddress node op flight hnodeNext hflight hphase hreply
     have hnode :
         concrete.process (.node address) = .node node := by
-      simpa [World.land] using hnodeNext
-    simp only [World.land, List.mem_append] at hreply
+      simpa [System.land] using hnodeNext
+    simp only [System.land, List.mem_append] at hreply
     rcases hreply with hold | hnew
     · exact hcommitted address haddress node op flight hnode hflight hphase hold
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -8204,13 +8204,13 @@ theorem workflowAligned_store_commit
 theorem NodeWorkflowPart.commitStore
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {physical : Concrete.Store}
-    (hphysical : world.process .store = .store physical)
+    (hphysical : system.process .store = .store physical)
     {address : Addr} (haddress : address ∈ nodes)
     {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node)
+    (hnode : system.process (.node address) = .node node)
     {part : List WorkflowEntry}
     (hpart : NodeWorkflowPart physical node part)
     {key : DocumentKey} (document : Document key) :
@@ -8261,8 +8261,8 @@ theorem NodeWorkflowPart.commitStore
 theorem workflowAligned_work_commit
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract nextAbstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract nextAbstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (haligned : WorkflowAligned config concrete abstract)
     {physical : Concrete.Store}
@@ -8359,13 +8359,13 @@ theorem workflowAligned_work_commit
     apply List.Perm.cons_inv
     exact hpendingPerm.symm.trans (hperm.trans hglobal)
   refine ⟨physical.commit flight.key document, nextParts, slack,
-    by simp [World.land, hstate], ?_, ?_, ?_⟩
+    by simp [System.land, hstate], ?_, ?_, ?_⟩
   · rw [hpending]
     exact hnextGlobal
   · intro currentAddress hcurrentAddress currentNode hcurrentNodeNext
     have hcurrentNode :
         concrete.process (.node currentAddress) = .node currentNode := by
-      simpa [World.land] using hcurrentNodeNext
+      simpa [System.land] using hcurrentNodeNext
     by_cases heq : currentAddress = address
     · subst currentAddress
       rw [hnode] at hcurrentNode
@@ -8400,8 +8400,8 @@ theorem workflowAligned_work_commit
       hcurrentNodeNext hcurrentFlight hcurrentPhase hreply
     have hcurrentNode :
         concrete.process (.node currentAddress) = .node currentNode := by
-      simpa [World.land] using hcurrentNodeNext
-    simp only [World.land, List.mem_append] at hreply
+      simpa [System.land] using hcurrentNodeNext
+    simp only [System.land, List.mem_append] at hreply
     rcases hreply with hold | hnew
     · rcases hcommitted currentAddress hcurrentAddress currentNode currentOp
           currentFlight hcurrentNode hcurrentFlight hcurrentPhase hold with
@@ -8440,8 +8440,8 @@ theorem workflowAligned_work_commit
 theorem workflowAligned_document_commit
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract nextAbstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract nextAbstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (haligned : WorkflowAligned config concrete abstract)
     {physical : Concrete.Store}
@@ -8533,13 +8533,13 @@ theorem workflowAligned_document_commit
         hswap.append_left (before.flatMap parts ++
           Concrete.pendingWorkflow rest)
   refine ⟨physical.commit flight.key document, nextParts, slack,
-    by simp [World.land, hstate], ?_, ?_, ?_⟩
+    by simp [System.land, hstate], ?_, ?_, ?_⟩
   · rw [hpending]
     exact (hperm.append_right added).trans hglobal
   · intro currentAddress hcurrentAddress currentNode hcurrentNodeNext
     have hcurrentNode :
         concrete.process (.node currentAddress) = .node currentNode := by
-      simpa [World.land] using hcurrentNodeNext
+      simpa [System.land] using hcurrentNodeNext
     by_cases heq : currentAddress = address
     · subst currentAddress
       rw [hnode] at hcurrentNode
@@ -8572,8 +8572,8 @@ theorem workflowAligned_document_commit
       hcurrentNodeNext hcurrentFlight hcurrentPhase hreply
     have hcurrentNode :
         concrete.process (.node currentAddress) = .node currentNode := by
-      simpa [World.land] using hcurrentNodeNext
-    simp only [World.land, List.mem_append] at hreply
+      simpa [System.land] using hcurrentNodeNext
+    simp only [System.land, List.mem_append] at hreply
     rcases hreply with hold | hnew
     · rcases hcommitted currentAddress hcurrentAddress currentNode currentOp
           currentFlight hcurrentNode hcurrentFlight hcurrentPhase hold with
@@ -8612,8 +8612,8 @@ theorem workflowAligned_document_commit
 theorem workflowAligned_node_land
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (haligned : WorkflowAligned config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
     {node nextNode : Concrete.Node}
@@ -8651,34 +8651,34 @@ theorem workflowAligned_node_land
       (concrete.land (.node address) now result) abstract := by
   obtain ⟨store, parts, slack, hstore, hpending, hparts, hcommitted⟩ :=
     haligned
-  refine ⟨store, parts, slack, by simpa [World.land] using hstore,
+  refine ⟨store, parts, slack, by simpa [System.land] using hstore,
     hpending, ?_, ?_⟩
   · intro current hcurrent currentNode hcurrentNode
     by_cases heq : current = address
     · subst current
       rw [show
         (concrete.land (.node address) now result).process (.node address) =
-          result.state by simp [World.land],
+          result.state by simp [System.land],
         hstate] at hcurrentNode
       cases Concrete.Local.node.inj hcurrentNode
       exact hpreserve store (parts address)
         (hparts address haddress node hnode)
     · exact hparts current hcurrent currentNode
-        (by simpa [World.land, heq] using hcurrentNode)
+        (by simpa [System.land, heq] using hcurrentNode)
   · intro current hcurrent currentNode op flight hcurrentNode hflight hphase
       hreply
-    simp only [World.land, List.mem_append] at hreply
+    simp only [System.land, List.mem_append] at hreply
     rcases hreply with hold | hnew
     · by_cases heq : current = address
       · subst current
         rw [show
           (concrete.land (.node address) now result).process (.node address) =
-            result.state by simp [World.land],
+            result.state by simp [System.land],
           hstate] at hcurrentNode
         cases Concrete.Local.node.inj hcurrentNode
         exact hcommittedNext parts hcommitted op flight hflight hphase hold
       · exact hcommitted current hcurrent currentNode op flight
-          (by simpa [World.land, heq] using hcurrentNode)
+          (by simpa [System.land, heq] using hcurrentNode)
           hflight hphase hold
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
       obtain ⟨target, message⟩ := sent
@@ -9772,8 +9772,8 @@ theorem node_step_flight_origin
 theorem related_after_inject
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     {address : Addr} (haddress : address ∈ nodes)
@@ -9808,9 +9808,9 @@ theorem related_after_inject
     putReplies := ?_
     cleanupCovered := ?_
   }
-  · simpa [cnext, anext, World.inject] using related.store
+  · simpa [cnext, anext, System.inject] using related.store
   · intro target knownCall hmem
-    simp only [World.inject, List.mem_append,
+    simp only [System.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _ (related.requests target knownCall hold)
@@ -9820,49 +9820,49 @@ theorem related_after_inject
       exact List.mem_append_right _ (by
         simp)
   · intro target output hmem
-    simp only [World.inject, List.mem_append,
+    simp only [System.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _ (related.outputs target output hold)
     · simp at hnew
-  · simpa [WorkflowAligned, cnext, anext, World.inject] using related.workflow
+  · simpa [WorkflowAligned, cnext, anext, System.inject] using related.workflow
   · intro physical target node op flight pending htarget hstore hnode
       hmem hphase hversion hpending
     exact related.currentWorkflow physical target node op flight pending
-      htarget (by simpa [cnext, World.inject] using hstore)
-      (by simpa [cnext, World.inject] using hnode) hmem hphase hversion
+      htarget (by simpa [cnext, System.inject] using hstore)
+      (by simpa [cnext, System.inject] using hnode) hmem hphase hversion
       hpending
   · intro target op hmem
     obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.acknowledged target op
-        (by simpa [cnext, World.inject] using hmem)
+        (by simpa [cnext, System.inject] using hmem)
     exact ⟨key, document, expected, provenance,
-      by simpa [cnext, World.inject] using hput,
+      by simpa [cnext, System.inject] using hput,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro target op hmem
     obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.failedCovered target op
-        (by simpa [cnext, World.inject] using hmem)
+        (by simpa [cnext, System.inject] using hmem)
     exact ⟨key, document, expected, provenance,
-      by simpa [cnext, World.inject] using hput,
+      by simpa [cnext, System.inject] using hput,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro target node op flight htarget hnode hflight
     have hnodeOld :
         concrete.process (.node target) = .node node := by
-      simpa [cnext, World.inject] using hnode
+      simpa [cnext, System.inject] using hnode
     obtain ⟨hwritten, hfailed⟩ :=
       related.activeReplies target node op flight htarget hnodeOld hflight
     constructor
     · intro hreply
       obtain ⟨hcover, hworkflow⟩ := hwritten
-        (by simpa [cnext, World.inject] using hreply)
+        (by simpa [cnext, System.inject] using hreply)
       exact ⟨hcover.mono fun message hmessage =>
           List.mem_append_left _ hmessage,
-        by simpa [anext, World.inject] using hworkflow⟩
+        by simpa [anext, System.inject] using hworkflow⟩
     · intro hreply
-      exact (hfailed (by simpa [cnext, World.inject] using hreply)).mono
+      exact (hfailed (by simpa [cnext, System.inject] using hreply)).mono
         fun message hmessage => List.mem_append_left _ hmessage
   · intro target node op flight htarget hnode hmem
     obtain ⟨actual, hactual, hvalid⟩ :=
@@ -9874,14 +9874,14 @@ theorem related_after_inject
     exact ⟨op, rfl, reachable_got_replies_have_request hreach hmem⟩
   · exact reachable_put_replies_have_request hreach
   · exact related.cleanupCovered_transport
-      (fun address => by simp [World.inject])
+      (fun address => by simp [System.inject])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem related_after_store_inject
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (call : Call) {now : Time} (htime : concrete.now ≤ now) :
@@ -9896,7 +9896,7 @@ theorem related_after_store_inject
   have hreach := Reachable.step hreachable hstep
   refine {
     time := Nat.le_refl now
-    store := by simpa [cnext, anext, World.inject] using related.store
+    store := by simpa [cnext, anext, System.inject] using related.store
     requests := ?_
     outputs := ?_
     puts := by
@@ -9916,59 +9916,59 @@ theorem related_after_store_inject
     cleanupCovered := ?_
   }
   · intro address knownCall hmem
-    simp only [World.inject, List.mem_append,
+    simp only [System.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _
         (related.requests address knownCall hold)
     · simp at hnew
   · intro address output hmem
-    simp only [World.inject, List.mem_append,
+    simp only [System.inject, List.mem_append,
       List.mem_singleton] at hmem
     rcases hmem with hold | hnew
     · exact List.mem_append_left _
         (related.outputs address output hold)
     · simp at hnew
-  · simpa [WorkflowAligned, cnext, anext, World.inject] using
+  · simpa [WorkflowAligned, cnext, anext, System.inject] using
       related.workflow
   · intro physical address node op flight pending haddress hstore hnode
       hmem hphase hversion hpending
     exact related.currentWorkflow physical address node op flight pending
-      haddress (by simpa [cnext, World.inject] using hstore)
-      (by simpa [cnext, World.inject] using hnode) hmem hphase hversion
+      haddress (by simpa [cnext, System.inject] using hstore)
+      (by simpa [cnext, System.inject] using hnode) hmem hphase hversion
       hpending
   · intro address op hmem
     obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.acknowledged address op
-        (by simpa [cnext, World.inject] using hmem)
+        (by simpa [cnext, System.inject] using hmem)
     exact ⟨key, document, expected, provenance,
-      by simpa [cnext, World.inject] using hput,
+      by simpa [cnext, System.inject] using hput,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro address op hmem
     obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
       related.failedCovered address op
-        (by simpa [cnext, World.inject] using hmem)
+        (by simpa [cnext, System.inject] using hmem)
     exact ⟨key, document, expected, provenance,
-      by simpa [cnext, World.inject] using hput,
+      by simpa [cnext, System.inject] using hput,
       hcover.mono fun message hmessage =>
         List.mem_append_left _ hmessage⟩
   · intro address node op flight haddress hnode hflight
     have hnodeOld :
         concrete.process (.node address) = .node node := by
-      simpa [cnext, World.inject] using hnode
+      simpa [cnext, System.inject] using hnode
     obtain ⟨hwritten, hfailed⟩ :=
       related.activeReplies address node op flight haddress hnodeOld hflight
     constructor
     · intro hreply
       obtain ⟨hcover, hworkflow⟩ := hwritten
-        (by simpa [cnext, World.inject] using hreply)
+        (by simpa [cnext, System.inject] using hreply)
       exact ⟨hcover.mono fun message hmessage =>
           List.mem_append_left _ hmessage,
-        by simpa [anext, World.inject] using hworkflow⟩
+        by simpa [anext, System.inject] using hworkflow⟩
     · intro hreply
       exact (hfailed
-        (by simpa [cnext, World.inject] using hreply)).mono
+        (by simpa [cnext, System.inject] using hreply)).mono
           fun message hmessage => List.mem_append_left _ hmessage
   · intro address node op flight haddress hnode hmem
     obtain ⟨actual, hactual, hvalid⟩ :=
@@ -9980,14 +9980,14 @@ theorem related_after_store_inject
     exact ⟨op, rfl, reachable_got_replies_have_request hreach hmem⟩
   · exact reachable_put_replies_have_request hreach
   · exact related.cleanupCovered_transport
-      (fun address => by simp [World.inject])
+      (fun address => by simp [System.inject])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem related_after_observe
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     {now : Time} :
     Related nodes appConfig config
@@ -10002,7 +10002,7 @@ theorem related_after_observe
     ownedPutSnapshots := related.ownedPutSnapshots
     putReplyOrigins := related.putReplyOrigins
     workflow := by
-      simpa [WorkflowAligned, World.observeOutside] using related.workflow
+      simpa [WorkflowAligned, System.observeOutside] using related.workflow
     currentWorkflow := related.currentWorkflow
     acknowledged := related.acknowledged
     failedCovered := related.failedCovered
@@ -10016,8 +10016,8 @@ theorem related_after_observe
 theorem related_after_concrete_observe
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     {now : Time} (htime : concrete.now ≤ now) :
     Related nodes appConfig config
@@ -10032,7 +10032,7 @@ theorem related_after_concrete_observe
     ownedPutSnapshots := related.ownedPutSnapshots
     putReplyOrigins := related.putReplyOrigins
     workflow := by
-      simpa [WorkflowAligned, World.observeOutside] using related.workflow
+      simpa [WorkflowAligned, System.observeOutside] using related.workflow
     currentWorkflow := related.currentWorkflow
     acknowledged := related.acknowledged
     failedCovered := related.failedCovered
@@ -10046,12 +10046,12 @@ theorem related_after_concrete_observe
 theorem reachable_output_sender
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {sender : Concrete.Pid} {output : Output}
     (houtput :
       (sender, Concrete.Pid.outside, Concrete.Msg.output output) ∈
-        world.network) :
+        system.network) :
     ∃ address, sender = .node address := by
   induction hreachable with
   | init hinit => contradiction
@@ -10059,7 +10059,7 @@ theorem reachable_output_sender
       cases hstep with
       | inject htime hprocess hinject =>
           obtain ⟨call, rfl⟩ := hinject
-          simp only [World.inject, List.mem_append,
+          simp only [System.inject, List.mem_append,
             List.mem_singleton] at houtput
           rcases houtput with hold | hnew
           · exact ih hold
@@ -10067,7 +10067,7 @@ theorem reachable_output_sender
       | outside =>
           exact ih houtput
       | @process pid now event result htime hprocess hvalid hresult =>
-          simp only [World.land, List.mem_append] at houtput
+          simp only [System.land, List.mem_append] at houtput
           rcases houtput with hold | hnew
           · exact ih hold
           · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10136,18 +10136,18 @@ theorem reachable_output_sender
 theorem reachable_node_sender
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {address : Addr} {recipient : Concrete.Pid} {message : Concrete.Msg}
     (hmessage : (Concrete.Pid.node address, recipient, message) ∈
-      world.network) :
+      system.network) :
     address ∈ nodes := by
   induction hreachable with
   | init hinit => contradiction
   | @step previous label next hprevious hstep ih =>
       cases hstep with
       | inject =>
-          simp only [World.inject, List.mem_append,
+          simp only [System.inject, List.mem_append,
             List.mem_singleton] at hmessage
           rcases hmessage with hold | hnew
           · exact ih hold
@@ -10155,7 +10155,7 @@ theorem reachable_node_sender
       | outside =>
           exact ih hmessage
       | @process pid now event result htime hprocess hvalid hresult =>
-          simp only [World.land, List.mem_append] at hmessage
+          simp only [System.land, List.mem_append] at hmessage
           rcases hmessage with hold | hnew
           · exact ih hold
           · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10168,12 +10168,12 @@ theorem reachable_node_sender
 theorem reachable_store_request_sender
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {sender : Concrete.Pid} {rpc : Concrete.RpcRequest}
     (hmessage :
       (sender, Concrete.Pid.store, Concrete.Msg.storeRequest rpc) ∈
-        world.network) :
+        system.network) :
     ∃ address, sender = .node address := by
   induction hreachable with
   | init hinit => contradiction
@@ -10181,7 +10181,7 @@ theorem reachable_store_request_sender
       cases hstep with
       | inject htime hprocess hinject =>
           obtain ⟨call, rfl⟩ := hinject
-          simp only [World.inject, List.mem_append,
+          simp only [System.inject, List.mem_append,
             List.mem_singleton] at hmessage
           rcases hmessage with hold | hnew
           · exact ih hold
@@ -10189,7 +10189,7 @@ theorem reachable_store_request_sender
       | outside =>
           exact ih hmessage
       | @process pid now event result htime hprocess hvalid hresult =>
-          simp only [World.land, List.mem_append] at hmessage
+          simp only [System.land, List.mem_append] at hmessage
           rcases hmessage with hold | hnew
           · exact ih hold
           · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10254,8 +10254,8 @@ theorem reachable_store_request_sender
 theorem related_after_land
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract abstractNext : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract abstractNext : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     {pid : Concrete.Pid} {now : Time}
@@ -10365,7 +10365,7 @@ theorem related_after_land
     cleanupCovered := hcleanup
   }
   · intro address call hmem
-    simp only [World.land, List.mem_append] at hmem
+    simp only [System.land, List.mem_append] at hmem
     rcases hmem with hold | hnew
     · exact hnetwork _ (related.requests address call hold)
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10374,7 +10374,7 @@ theorem related_after_land
       obtain ⟨rfl, rfl, rfl⟩ := heq
       exact hnewRequest hsent
   · intro address output hmem
-    simp only [World.land, List.mem_append] at hmem
+    simp only [System.land, List.mem_append] at hmem
     rcases hmem with hold | hnew
     · exact hnetwork _ (related.outputs address output hold)
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10383,7 +10383,7 @@ theorem related_after_land
       obtain ⟨rfl, rfl, rfl⟩ := heq
       exact hnewOutput hsent
   · intro address op hmem
-    simp only [World.land, List.mem_append] at hmem
+    simp only [System.land, List.mem_append] at hmem
     rcases hmem with hold | hnew
     · obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
         related.acknowledged address op hold
@@ -10395,7 +10395,7 @@ theorem related_after_land
       obtain ⟨rfl, rfl, rfl⟩ := heq
       exact hnewAck hsent
   · intro address op hmem
-    simp only [World.land, List.mem_append] at hmem
+    simp only [System.land, List.mem_append] at hmem
     rcases hmem with hold | hnew
     · obtain ⟨key, document, expected, provenance, hput, hcover⟩ :=
         related.failedCovered address op hold
@@ -10419,20 +10419,20 @@ theorem related_after_land
 theorem simulate_inject
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
     {now : Time} (htime : concrete.now ≤ now) (call : Call) :
     let concreteNext :=
       concrete.inject (.node address) (.request call) now
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config concreteNext
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution =
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace =
         concreteObservation (nodes := nodes) (appConfig := appConfig)
           (.input (.node address) now (.request call)) := by
   let abstractNext :=
@@ -10448,19 +10448,19 @@ theorem simulate_inject
 theorem simulate_outside
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {sender : Concrete.Pid} {now : Time} {message : Concrete.Msg}
     (htime : concrete.now ≤ now)
     (hmessage : (sender, .outside, message) ∈ concrete.network) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config (concrete.observeOutside now)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution =
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace =
         concreteObservation (nodes := nodes) (appConfig := appConfig)
           (.outside sender now message) := by
   cases message with
@@ -10489,8 +10489,8 @@ theorem simulate_outside
 theorem related_after_inert_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {now : Time}
@@ -10531,7 +10531,7 @@ theorem related_after_inert_store
   · obtain ⟨relatedPhysical, hrelatedPhysical, hrep⟩ := related.store
     rw [hphysical] at hrelatedPhysical
     cases Concrete.Local.store.inj hrelatedPhysical
-    refine ⟨nextPhysical, by simp [World.land, hstate], ?_⟩
+    refine ⟨nextPhysical, by simp [System.land, hstate], ?_⟩
     have hread :
         ∀ key, nextPhysical.toAbstract.read key = physical.toAbstract.read key := by
       intro key
@@ -10547,18 +10547,18 @@ theorem related_after_inert_store
         hparts, hcommitted⟩ := related.workflow
     rw [hphysical] at hworkflowStore
     cases Concrete.Local.store.inj hworkflowStore
-    refine ⟨nextPhysical, parts, slack, by simp [World.land, hstate],
+    refine ⟨nextPhysical, parts, slack, by simp [System.land, hstate],
       hpending, ?_, ?_⟩
     · intro workflowAddress hworkflowAddress workflowState hworkflowState
       have hold := hparts workflowAddress hworkflowAddress workflowState
-        (by simpa [World.land] using hworkflowState)
+        (by simpa [System.land] using hworkflowState)
       simpa [NodeWorkflowPart, FlightWorkflowPart, Concrete.Store.version,
         hvalues] using hold
     · intro address haddress node op flight hnodeNext hflight hphase hreply
       have hnode :
           concrete.process (.node address) = .node node := by
-        simpa [World.land] using hnodeNext
-      simp only [World.land, List.mem_append] at hreply
+        simpa [System.land] using hnodeNext
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact hcommitted address haddress node op flight hnode hflight
           hphase hold
@@ -10583,12 +10583,12 @@ theorem related_after_inert_store
   · intro address node op flight haddress hnode hflight
     have hnodeOld :
         concrete.process (.node address) = .node node := by
-      simpa [World.land] using hnode
+      simpa [System.land] using hnode
     obtain ⟨hwritten, hfailed⟩ :=
       related.activeReplies address node op flight haddress hnodeOld hflight
     constructor
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact hwritten hold
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10599,7 +10599,7 @@ theorem related_after_inert_store
         cases hmessage
         exact (hnoWritten address op hsent).elim
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact hfailed hold
       · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -10610,14 +10610,14 @@ theorem related_after_inert_store
         cases hmessage
         exact (hnoFailed address op hsent).elim
   · exact related.cleanupCovered_transport
-      (fun address => by simp [World.land])
+      (fun address => by simp [System.land])
       (fun message hmessage => hmessage)
 
 theorem simulate_external_written_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -10656,13 +10656,13 @@ theorem simulate_external_written_store
       send := [(.node address,
         .storeReply { op, payload := .written })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let served :=
     Abstract.run appConfig call
@@ -10740,16 +10740,16 @@ theorem simulate_external_written_store
   change Related nodes appConfig config
     (concrete.land .store now concreteResult) abstractNext
   apply related_after_land related hreachable (by simp) hconcreteStep
-  · simp [abstractNext, World.land]
+  · simp [abstractNext, System.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
   · exact ⟨physical.commit key document,
-      by simp [World.land, concreteResult],
-      by simpa [abstractNext, World.land, abstractResult, served] using
+      by simp [System.land, concreteResult],
+      by simpa [abstractNext, System.land, abstractResult, served] using
         htransport.1⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
       document concreteResult rfl
-    · simp [abstractNext, World.land, abstractResult, served,
+    · simp [abstractNext, System.land, abstractResult, served,
         htransport.2.2]
     · intro activeAddress activeNode activeOp activeFlight hactiveAddress
         hactiveNode hactiveFlight hactivePhase hsend
@@ -10784,13 +10784,13 @@ theorem simulate_external_written_store
       hactiveNode hactiveFlight
     have hactiveNodeOld :
         concrete.process (.node activeAddress) = .node activeNode := by
-      simpa [World.land] using hactiveNode
+      simpa [System.land] using hactiveNode
     obtain ⟨holdWritten, holdFailed⟩ :=
       related.activeReplies activeAddress activeNode activeOp activeFlight
         hactiveAddress hactiveNodeOld hactiveFlight
     constructor
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
         exact ⟨hcovered.land abstractResult,
@@ -10798,7 +10798,7 @@ theorem simulate_external_written_store
             rcases hworkflow with hnone | hpending
             · exact .inl hnone
             · exact .inr (by
-                simpa [abstractNext, World.land, abstractResult, served,
+                simpa [abstractNext, System.land, abstractResult, served,
                   htransport.2.2] using hpending)⟩
       · simp [concreteResult] at hnew
         obtain ⟨rfl, rfl⟩ := hnew
@@ -10821,19 +10821,19 @@ theorem simulate_external_written_store
           rw [← hflightTransaction, htransaction]
           rfl
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact (holdFailed hold).land abstractResult
       · simp [concreteResult] at hnew
   · exact related.cleanupCovered_transport
-      (fun _ => by simp [World.land])
+      (fun _ => by simp [System.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem simulate_external_landed_failed_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -10871,13 +10871,13 @@ theorem simulate_external_landed_failed_store
       send := [(.node address,
         .storeReply { op, payload := .failed })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let lost :=
     Abstract.runLose appConfig call
@@ -10946,16 +10946,16 @@ theorem simulate_external_landed_failed_store
   change Related nodes appConfig config
     (concrete.land .store now concreteResult) abstractNext
   apply related_after_land related hreachable (by simp) hconcreteStep
-  · simp [abstractNext, World.land]
+  · simp [abstractNext, System.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
   · exact ⟨physical.commit key document,
-      by simp [World.land, concreteResult],
-      by simpa [abstractNext, World.land, abstractResult, lost] using
+      by simp [System.land, concreteResult],
+      by simpa [abstractNext, System.land, abstractResult, lost] using
         htransport.1⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
       document concreteResult rfl
-    · simp [abstractNext, World.land, abstractResult, lost,
+    · simp [abstractNext, System.land, abstractResult, lost,
         htransport.2.2]
     · intro activeAddress activeNode activeOp activeFlight hactiveAddress
         hactiveNode hactiveFlight hactivePhase hsend
@@ -10982,13 +10982,13 @@ theorem simulate_external_landed_failed_store
       hactiveNode hactiveFlight
     have hactiveNodeOld :
         concrete.process (.node activeAddress) = .node activeNode := by
-      simpa [World.land] using hactiveNode
+      simpa [System.land] using hactiveNode
     obtain ⟨holdWritten, holdFailed⟩ :=
       related.activeReplies activeAddress activeNode activeOp activeFlight
         hactiveAddress hactiveNodeOld hactiveFlight
     constructor
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
         exact ⟨
@@ -10997,11 +10997,11 @@ theorem simulate_external_landed_failed_store
             rcases hworkflow with hnone | hpending
             · exact .inl hnone
             · exact .inr (by
-                simpa [abstractNext, World.land, abstractResult, lost,
+                simpa [abstractNext, System.land, abstractResult, lost,
                   htransport.2.2] using hpending)⟩
       · simp [concreteResult] at hnew
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact (holdFailed hold).land abstractResult
       · simp [concreteResult] at hnew
@@ -11023,14 +11023,14 @@ theorem simulate_external_landed_failed_store
         subst output
         exact hcovered _ (by simp [lost, Abstract.runLose])
   · exact related.cleanupCovered_transport
-      (fun _ => by simp [World.land])
+      (fun _ => by simp [System.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem simulate_external_not_landed_failed_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -11065,13 +11065,13 @@ theorem simulate_external_not_landed_failed_store
       send := [(.node address,
         .storeReply { op, payload := .failed })]
     }
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now concreteResult)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   dsimp
   let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
@@ -11130,20 +11130,20 @@ theorem simulate_external_not_landed_failed_store
   change Related nodes appConfig config
     (concrete.land .store now concreteResult) abstractNext
   apply related_after_land related hreachable (by simp) hconcreteStep
-  · simp [abstractNext, World.land]
+  · simp [abstractNext, System.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
   · obtain ⟨represented, hrepresented, hrep⟩ := related.store
     rw [hphysical] at hrepresented
     cases Concrete.Local.store.inj hrepresented
     exact ⟨physical.fence key,
-      by simp [World.land, concreteResult],
-      by simpa [abstractNext, World.land, abstractResult, shed,
+      by simp [System.land, concreteResult],
+      by simpa [abstractNext, System.land, abstractResult, shed,
         Abstract.runShed] using StoreRep.fence hrep key⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
       (physical.documentAt key) concreteResult
       (by simp [concreteResult, Concrete.Store.fence])
-    · simp [abstractNext, World.land, abstractResult, shed,
+    · simp [abstractNext, System.land, abstractResult, shed,
         Abstract.runShed]
     · intro activeAddress activeNode activeOp activeFlight hactiveAddress
         hactiveNode hactiveFlight hactivePhase hsend
@@ -11170,13 +11170,13 @@ theorem simulate_external_not_landed_failed_store
       hactiveNode hactiveFlight
     have hactiveNodeOld :
         concrete.process (.node activeAddress) = .node activeNode := by
-      simpa [World.land] using hactiveNode
+      simpa [System.land] using hactiveNode
     obtain ⟨holdWritten, holdFailed⟩ :=
       related.activeReplies activeAddress activeNode activeOp activeFlight
         hactiveAddress hactiveNodeOld hactiveFlight
     constructor
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
         exact ⟨
@@ -11185,11 +11185,11 @@ theorem simulate_external_not_landed_failed_store
             rcases hworkflow with hnone | hpending
             · exact .inl hnone
             · exact .inr (by
-                simpa [abstractNext, World.land, abstractResult, shed,
+                simpa [abstractNext, System.land, abstractResult, shed,
                   Abstract.runShed] using hpending)⟩
       · simp [concreteResult] at hnew
     · intro hreply
-      simp only [World.land, List.mem_append] at hreply
+      simp only [System.land, List.mem_append] at hreply
       rcases hreply with hold | hnew
       · exact (holdFailed hold).land abstractResult
       · simp [concreteResult] at hnew
@@ -11211,14 +11211,14 @@ theorem simulate_external_not_landed_failed_store
         subst output
         exact hcovered _ (by simp [shed, Abstract.runShed])
   · exact related.cleanupCovered_transport
-      (fun _ => by simp [World.land])
+      (fun _ => by simp [System.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem simulate_internal_committed_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -11275,17 +11275,17 @@ theorem simulate_internal_committed_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now {
           state := .store (physical.commit key document)
           send := [(.node address,
             .storeReply { op, payload := reply })]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let abstractResult : Result Abstract.Pid State Message := {
     state := lifted.1
     send := Abstract.sends lifted.2
@@ -11325,12 +11325,12 @@ theorem simulate_internal_committed_store
   change Related nodes appConfig config
     (concrete.land .store now concreteResult) abstractNext
   apply related_after_land related hreachable (by simp) hconcreteStep
-  · simp [abstractNext, World.land]
+  · simp [abstractNext, System.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
   · exact ⟨physical.commit key document,
-      by simp [World.land, concreteResult],
-      by simpa [abstractNext, World.land, abstractResult] using
+      by simp [System.land, concreteResult],
+      by simpa [abstractNext, System.land, abstractResult] using
         htransport.1⟩
   · simpa [abstractNext, concreteResult, abstractResult] using hworkflowNext
   · trivial
@@ -11360,13 +11360,13 @@ theorem simulate_internal_committed_store
       hactiveNode hactiveFlight
     have hactiveNodeOld :
         concrete.process (.node activeAddress) = .node activeNode := by
-      simpa [World.land] using hactiveNode
+      simpa [System.land] using hactiveNode
     obtain ⟨holdWritten, holdFailed⟩ :=
       related.activeReplies activeAddress activeNode activeOp activeFlight
         hactiveAddress hactiveNodeOld hactiveFlight
     constructor
     · intro hreplyMem
-      simp only [World.land, List.mem_append] at hreplyMem
+      simp only [System.land, List.mem_append] at hreplyMem
       rcases hreplyMem with hold | hnew
       · obtain ⟨hcovered, hworkflow⟩ := holdWritten hold
         exact ⟨
@@ -11400,7 +11400,7 @@ theorem simulate_internal_committed_store
             trivial
         · simp [concreteResult] at hnew
     · intro hreplyMem
-      simp only [World.land, List.mem_append] at hreplyMem
+      simp only [System.land, List.mem_append] at hreplyMem
       rcases hreplyMem with hold | hnew
       · exact (holdFailed hold).land abstractResult
       · rcases hreply with rfl | rfl
@@ -11421,14 +11421,14 @@ theorem simulate_internal_committed_store
           rw [hactiveEq, ← hflightTransaction, hfailure]
           simp [Covered]
   · exact related.cleanupCovered_transport
-      (fun _ => by simp [World.land])
+      (fun _ => by simp [System.land])
       (fun message hmessage => List.mem_append_left _ hmessage)
 
 theorem simulate_internal_not_landed_failed_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -11463,17 +11463,17 @@ theorem simulate_internal_not_landed_failed_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land .store now {
           state := .store (physical.fence key)
           send := [(.node address,
             .storeReply { op, payload := .failed })]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let concreteResult :
       Result Concrete.Pid Concrete.Local Concrete.Msg := {
     state := .store (physical.fence key)
@@ -11501,7 +11501,7 @@ theorem simulate_internal_not_landed_failed_store
     rw [hphysical] at hrepresented
     cases Concrete.Local.store.inj hrepresented
     exact ⟨physical.fence key,
-      by simp [World.land, concreteResult],
+      by simp [System.land, concreteResult],
       StoreRep.fence hrep key⟩
   · apply workflowAligned_store_commit hreachable related.workflow hphysical
       (physical.documentAt key) concreteResult
@@ -11528,18 +11528,18 @@ theorem simulate_internal_not_landed_failed_store
       hactiveNode hactiveFlight
     have hactiveNodeOld :
         concrete.process (.node activeAddress) = .node activeNode := by
-      simpa [World.land] using hactiveNode
+      simpa [System.land] using hactiveNode
     obtain ⟨holdWritten, holdFailed⟩ :=
       related.activeReplies activeAddress activeNode activeOp activeFlight
         hactiveAddress hactiveNodeOld hactiveFlight
     constructor
     · intro hreplyMem
-      simp only [World.land, List.mem_append] at hreplyMem
+      simp only [System.land, List.mem_append] at hreplyMem
       rcases hreplyMem with hold | hnew
       · exact holdWritten hold
       · simp [concreteResult] at hnew
     · intro hreplyMem
-      simp only [World.land, List.mem_append] at hreplyMem
+      simp only [System.land, List.mem_append] at hreplyMem
       rcases hreplyMem with hold | hnew
       · exact holdFailed hold
       · simp [concreteResult] at hnew
@@ -11557,14 +11557,14 @@ theorem simulate_internal_not_landed_failed_store
         rw [← hflightTransaction, hfailure]
         simp [Covered]
   · exact related.cleanupCovered_transport
-      (fun _ => by simp [World.land])
+      (fun _ => by simp [System.land])
       (fun message hmessage => hmessage)
 
 theorem simulate_matching_put_store
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store} {address : Addr} {op : Concrete.OpId}
@@ -11589,12 +11589,12 @@ theorem simulate_matching_put_store
               op
               payload := .put key document expectedVersion
             }))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
-        (concrete.land .store now result) (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (concrete.land .store now result) (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   obtain ⟨provenance, hsnapshot, horigin, hagreement, heligible⟩ :=
     reachable_stageable_puts hreachable hphysical hrequest
   obtain ⟨node, flight, hnode, hflight, hphase, hnoreply⟩ :=
@@ -11631,17 +11631,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.commit key document)
             send := [(.node address,
               .storeReply { op, payload := reply })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] := by
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] := by
     cases hinstant
     let item : WorkItem := .occurrence request semanticTime
     have hitemKey : item.key = key := by
@@ -11732,7 +11732,7 @@ theorem simulate_matching_put_store
           intro replyAddress replyOp hsend
           simp at hsend
           exact ⟨hsend.1, hsend.2.1⟩) hpendingPerm
-      simp [World.land, lifted, item, Abstract.runWork]
+      simp [System.land, lifted, item, Abstract.runWork]
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance
       (hfailure := by simp [htransaction, Concrete.failureOutputs])
@@ -11758,17 +11758,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.commit key document)
             send := [(.node address,
               .storeReply { op, payload := reply })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] := by
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] := by
     have htarget : timer.target.key = key := by
       have hvalid :=
         related.flights address node op flight haddress hnode hflight
@@ -11844,7 +11844,7 @@ theorem simulate_matching_put_store
           intro replyAddress replyOp hsend
           simp at hsend
           exact ⟨hsend.1, hsend.2.1⟩)
-      simp [World.land, habstractPending]
+      simp [System.land, habstractPending]
     exact simulate_internal_committed_store hreachable related hphysical
       hrequest provenance
       (hfailure := by simp [htransaction, Concrete.failureOutputs])
@@ -11867,17 +11867,17 @@ theorem simulate_matching_put_store
                 op
                 payload := .put key document expectedVersion
               }))).val) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land .store now {
             state := .store (physical.fence key)
             send := [(.node address,
               .storeReply { op, payload := .failed })]
           })
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     simulate_internal_not_landed_failed_store hreachable related hphysical
       hrequest provenance hfailure haddress hnode hflight hkey
       hflightTransaction htime hconcreteResult
@@ -11963,8 +11963,8 @@ theorem simulate_matching_put_store
 theorem simulate_store_process
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {physical : Concrete.Store}
@@ -11977,12 +11977,12 @@ theorem simulate_store_process
       result ∈
         (Concrete.step appConfig config .store (.store physical)
           now event).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
-        (concrete.land .store now result) (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (concrete.land .store now result) (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   have hinert
       {inert : Result Concrete.Pid Concrete.Local Concrete.Msg}
       {nextPhysical : Concrete.Store}
@@ -12006,12 +12006,12 @@ theorem simulate_store_process
           (.node address,
             Concrete.Msg.storeReply { op, payload := .failed }) ∉
               inert.send) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.land .store now inert) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (concrete.land .store now inert) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     ⟨[], trivial,
       related_after_inert_store hreachable related hphysical htime hvalid
         hmember hstate hkeys hvalues hreplies hnoWritten hnoFailed,
@@ -12102,8 +12102,8 @@ theorem simulate_store_process
 theorem related_after_node_land
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract abstractNext : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract abstractNext : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -12185,10 +12185,10 @@ def NodeNoDeleting (node : Concrete.Node) : Prop :=
 
 def NodesNoDeleting
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧ NodeNoDeleting node
+      system.process (.node address) = .node node ∧ NodeNoDeleting node
 
 set_option maxHeartbeats 2000000 in
 theorem node_step_no_deleting
@@ -12256,18 +12256,18 @@ theorem nodesNoDeleting_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesNoDeleting (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, by simp [NodeNoDeleting]⟩
 
 theorem nodesNoDeleting_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) world)
-    (hinvariant : NodesNoDeleting world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) system)
+    (hinvariant : NodesNoDeleting system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesNoDeleting next := by
   cases hstep with
   | inject => exact hinvariant
@@ -12283,16 +12283,16 @@ theorem nodesNoDeleting_step
         cases Concrete.Local.node.inj hvalidNode
         obtain ⟨after, hstate, _⟩ :=
           node_step_valid hnodeValid (hnode ▸ hresult)
-        exact ⟨after, by simp [World.land, hstate],
+        exact ⟨after, by simp [System.land, hstate],
           node_step_no_deleting hphases (hnode ▸ hresult) hstate⟩
-      · exact ⟨node, by simp [World.land, Ne.symm hp, hnode], hphases⟩
+      · exact ⟨node, by simp [System.land, Ne.symm hp, hnode], hphases⟩
 
 theorem reachable_nodes_no_deleting
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesNoDeleting world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesNoDeleting system := by
   induction hreachable with
   | init hinit => exact nodesNoDeleting_initial hinit
   | step hreachable hstep ih =>
@@ -12301,11 +12301,11 @@ theorem reachable_nodes_no_deleting
 theorem reachable_node_no_deleting
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {address : Addr} (haddress : address ∈ nodes)
     {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node) :
+    (hnode : system.process (.node address) = .node node) :
     NodeNoDeleting node := by
   obtain ⟨node', hnode', hphases⟩ :=
     reachable_nodes_no_deleting hreachable address haddress
@@ -12322,10 +12322,10 @@ def NodeLoadingQuiet (node : Concrete.Node) : Prop :=
 
 def NodesLoadingQuiet
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧ NodeLoadingQuiet node
+      system.process (.node address) = .node node ∧ NodeLoadingQuiet node
 
 set_option maxHeartbeats 2000000 in
 theorem node_step_loading_quiet
@@ -12401,18 +12401,18 @@ theorem nodesLoadingQuiet_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesLoadingQuiet (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, by simp [NodeLoadingQuiet]⟩
 
 theorem nodesLoadingQuiet_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) world)
-    (hinvariant : NodesLoadingQuiet world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) system)
+    (hinvariant : NodesLoadingQuiet system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesLoadingQuiet next := by
   cases hstep with
   | inject => exact hinvariant
@@ -12428,16 +12428,16 @@ theorem nodesLoadingQuiet_step
         cases Concrete.Local.node.inj hvalidNode
         obtain ⟨after, hstate, _⟩ :=
           node_step_valid hnodeValid (hnode ▸ hresult)
-        exact ⟨after, by simp [World.land, hstate],
+        exact ⟨after, by simp [System.land, hstate],
           node_step_loading_quiet hquiet (hnode ▸ hresult) hstate⟩
-      · exact ⟨node, by simp [World.land, Ne.symm hp, hnode], hquiet⟩
+      · exact ⟨node, by simp [System.land, Ne.symm hp, hnode], hquiet⟩
 
 theorem reachable_nodes_loading_quiet
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesLoadingQuiet world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesLoadingQuiet system := by
   induction hreachable with
   | init hinit => exact nodesLoadingQuiet_initial hinit
   | step hreachable hstep ih =>
@@ -12446,11 +12446,11 @@ theorem reachable_nodes_loading_quiet
 theorem reachable_node_loading_quiet
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {address : Addr} (haddress : address ∈ nodes)
     {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node) :
+    (hnode : system.process (.node address) = .node node) :
     NodeLoadingQuiet node := by
   obtain ⟨node', hnode', hquiet⟩ :=
     reachable_nodes_loading_quiet hreachable address haddress
@@ -12927,8 +12927,8 @@ theorem step_cleanup_source
 theorem cleanup_mem_covered
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract abstractNext : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract abstractNext : System AModel}
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
     {node next : Concrete.Node}
@@ -13034,10 +13034,10 @@ theorem node_step_attempts
 
 def NodesAttempts
     {nodes : List Addr} {appConfig : Resonate.Config}
-    (world : World (CModel nodes appConfig)) : Prop :=
+    (system : System (CModel nodes appConfig)) : Prop :=
   ∀ address, address ∈ nodes →
     ∃ node,
-      world.process (.node address) = .node node ∧ NodeAttempts node
+      system.process (.node address) = .node node ∧ NodeAttempts node
 
 theorem nodesAttempts_initial
     {nodes : List Addr} {appConfig : Resonate.Config}
@@ -13045,18 +13045,18 @@ theorem nodesAttempts_initial
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
     NodesAttempts (nodes := nodes) (appConfig := appConfig)
-      (World.initial process) := by
+      (System.initial process) := by
   intro address haddress
   exact ⟨{}, hinit.2.2 address haddress, by simp [NodeAttempts]⟩
 
 theorem nodesAttempts_step
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world next : World (CModel nodes appConfig)}
+    {system next : System (CModel nodes appConfig)}
     {label : Label (CModel nodes appConfig)}
-    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) world)
-    (hinvariant : NodesAttempts world)
-    (hstep : Step (CModel nodes appConfig) config world label next) :
+    (hvalid : NodesValid (nodes := nodes) (appConfig := appConfig) system)
+    (hinvariant : NodesAttempts system)
+    (hstep : Step (CModel nodes appConfig) config system label next) :
     NodesAttempts next := by
   cases hstep with
   | inject => exact hinvariant
@@ -13072,16 +13072,16 @@ theorem nodesAttempts_step
         cases Concrete.Local.node.inj hvalidNode
         obtain ⟨after, hstate, _⟩ :=
           node_step_valid hnodeValid (hnode ▸ hresult)
-        exact ⟨after, by simp [World.land, hstate],
+        exact ⟨after, by simp [System.land, hstate],
           node_step_attempts hattempts (hnode ▸ hresult) hstate⟩
-      · exact ⟨node, by simp [World.land, Ne.symm hp, hnode], hattempts⟩
+      · exact ⟨node, by simp [System.land, Ne.symm hp, hnode], hattempts⟩
 
 theorem reachable_nodes_attempts
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world) :
-    NodesAttempts world := by
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system) :
+    NodesAttempts system := by
   induction hreachable with
   | init hinit => exact nodesAttempts_initial hinit
   | step hreachable hstep ih =>
@@ -13090,11 +13090,11 @@ theorem reachable_nodes_attempts
 theorem reachable_node_attempts
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {world : World (CModel nodes appConfig)}
-    (hreachable : Reachable (CModel nodes appConfig) config world)
+    {system : System (CModel nodes appConfig)}
+    (hreachable : Reachable (CModel nodes appConfig) config system)
     {address : Addr} (haddress : address ∈ nodes)
     {node : Concrete.Node}
-    (hnode : world.process (.node address) = .node node) :
+    (hnode : system.process (.node address) = .node node) :
     NodeAttempts node := by
   obtain ⟨node', hnode', hattempts⟩ :=
     reachable_nodes_attempts hreachable address haddress
@@ -13143,8 +13143,8 @@ theorem perm_release_flatMap
 theorem related_after_stuttering_node_to
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract abstractNext : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract abstractNext : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -13184,7 +13184,7 @@ theorem related_after_stuttering_node_to
             (concrete.land (.node address) now result).network) :
       (Concrete.Pid.store, .node currentAddress,
         .storeReply { op, payload }) ∈ concrete.network := by
-    simp only [World.land, List.mem_append] at hreply
+    simp only [System.land, List.mem_append] at hreply
     rcases hreply with hold | hnew
     · exact hold
     · obtain ⟨sent, hsent, heq⟩ := List.mem_map.mp hnew
@@ -13218,7 +13218,7 @@ theorem related_after_stuttering_node_to
   apply related_after_node_land hreachable related haddress hnode htime
       hvalid hresult habstractTime hnetwork
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
-    exact ⟨physical, by simpa [World.land] using hphysical,
+    exact ⟨physical, by simpa [System.land] using hphysical,
       by simpa [hservice] using hrep⟩
   · have hstepPart :=
       nodeWorkflowPart_step (event := event) hnodeValid hserial
@@ -13234,7 +13234,7 @@ theorem related_after_stuttering_node_to
     let parts' : Addr → List WorkflowEntry := fun current =>
       if current = address then part' else parts current
     refine ⟨workflowStore, parts', released ++ slack,
-        by simpa [World.land] using hworkflowStore, ?_, ?_, ?_⟩
+        by simpa [System.land] using hworkflowStore, ?_, ?_, ?_⟩
     · simpa [hservice] using
         hpending.trans (perm_release_flatMap
           (reachable_nodes_nodup hreachable) haddress hsplit)
@@ -13243,20 +13243,20 @@ theorem related_after_stuttering_node_to
       · subst current
         rw [show
           (concrete.land (.node address) now result).process (.node address) =
-            result.state by simp [World.land],
+            result.state by simp [System.land],
           hstate] at hcurrentNode
         cases Concrete.Local.node.inj hcurrentNode
         simpa [parts'] using hpart'
       · simpa [parts', heq] using
           hparts current hcurrent currentNode
-            (by simpa [World.land, heq] using hcurrentNode)
+            (by simpa [System.land, heq] using hcurrentNode)
     · intro current hcurrent currentNode op flight hcurrentNode hflight hphase
         hreply
       by_cases heq : current = address
       · subst current
         rw [show
           (concrete.land (.node address) now result).process (.node address) =
-            result.state by simp [World.land],
+            result.state by simp [System.land],
           hstate] at hcurrentNode
         cases Concrete.Local.node.inj hcurrentNode
         rcases node_step_flight_origin hresult hstate hflight with
@@ -13270,7 +13270,7 @@ theorem related_after_stuttering_node_to
           exact (noFreshWritten (replyOld hreply)).elim
       · simpa [parts', heq] using
           hcommitted current hcurrent currentNode op flight
-            (by simpa [World.land, heq] using hcurrentNode) hflight hphase
+            (by simpa [System.land, heq] using hcurrentNode) hflight hphase
             (replyOld hreply)
   · trivial
   · intro target call hsend
@@ -13283,7 +13283,7 @@ theorem related_after_stuttering_node_to
     · subst currentAddress
       rw [show
         (concrete.land (.node address) now result).process (.node address) =
-          result.state by simp [World.land],
+          result.state by simp [System.land],
         hstate] at hcurrentNode
       cases Concrete.Local.node.inj hcurrentNode
       rcases node_step_flight_origin hresult hstate hflight with
@@ -13305,7 +13305,7 @@ theorem related_after_stuttering_node_to
           exact (noFreshFailed (replyOld hreply)).elim
     · have hcurrentNodeOld :
           concrete.process (.node currentAddress) = .node currentNode := by
-        simpa [World.land, heq] using hcurrentNode
+        simpa [System.land, heq] using hcurrentNode
       obtain ⟨hwritten, hfailed⟩ :=
         related.activeReplies currentAddress currentNode op flight
           hcurrentAddress hcurrentNodeOld hflight
@@ -13320,7 +13320,7 @@ theorem related_after_stuttering_node_to
     · subst currentAddress
       rw [show
         (concrete.land (.node address) now result).process (.node address) =
-          result.state by simp [World.land],
+          result.state by simp [System.land],
         hstate] at hnodeNext
       cases Concrete.Local.node.inj hnodeNext
       exact cleanup_mem_covered related haddress hnode
@@ -13328,13 +13328,13 @@ theorem related_after_stuttering_node_to
         (reachable_node_loading_quiet hreachable haddress hnode)
         hmem (hcover outputs) hvalid hresult hstate
     · exact hcover _ (related.cleanupCovered currentAddress currentNode op
-        outputs haddress' (by simpa [World.land, heq] using hnodeNext) hmem)
+        outputs haddress' (by simpa [System.land, heq] using hnodeNext) hmem)
 
 theorem related_after_stuttering_node
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -13366,8 +13366,8 @@ theorem related_after_stuttering_node
 theorem simulate_rejected_external_node
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -13387,16 +13387,16 @@ theorem simulate_rejected_external_node
       } : Result Concrete.Pid Concrete.Local Concrete.Msg) ∈
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now {
           state := .node node
           send := Concrete.sendOutputs [Resonate.unavailable call]
         })
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let shed := Abstract.runShed call (abstract.process .service)
   let abstractResult : Result Abstract.Pid State Message := {
     state := shed.1
@@ -13418,13 +13418,13 @@ theorem simulate_rejected_external_node
       (related.requests address call hrequest) habstractResult
   have hstate :
       (abstractNext.process .service) = abstract.process .service := by
-    simp [abstractNext, World.land, abstractResult, shed, Abstract.runShed]
+    simp [abstractNext, System.land, abstractResult, shed, Abstract.runShed]
   have hrelated :=
     related_after_stuttering_node_to
       (event := .receive .outside (.request call))
       hreachable related haddress hnode
       hvalidNode hserial htime hrequest hresult rfl
-      (by simp [abstractNext, World.land]) hstate
+      (by simp [abstractNext, System.land]) hstate
       (fun _ hmem => List.mem_append_left _ hmem)
       (fun _ hcovered => hcovered.land abstractResult) (by
         intro output houtput
@@ -13439,8 +13439,8 @@ theorem simulate_rejected_external_node
 theorem simulate_pure_external_node
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -13456,14 +13456,14 @@ theorem simulate_pure_external_node
       (Concrete.pureExternal appConfig node call) ∈
         (Concrete.step appConfig config (.node address) (.node node) now
           (.receive .outside (.request call))).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now
           (Concrete.pureExternal appConfig node call))
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   let served :=
     Abstract.run appConfig call
       (abstract.process .service)
@@ -13498,7 +13498,7 @@ theorem simulate_pure_external_node
   have hworkflowEq :
       (abstractNext.process .service).workflow =
         (abstract.process .service).workflow := by
-    simpa [abstractNext, World.land, abstractResult, served] using
+    simpa [abstractNext, System.land, abstractResult, served] using
       hpure.2.1
   have hprocessEq :
       (concrete.land (.node address) now
@@ -13507,21 +13507,21 @@ theorem simulate_pure_external_node
     funext pid
     by_cases hp : pid = .node address
     · subst pid
-      simp [World.land, Concrete.pureExternal, hnode]
-    · simp [World.land, hp]
+      simp [System.land, Concrete.pureExternal, hnode]
+    · simp [System.land, hp]
   change Related nodes appConfig config
     (concrete.land (.node address) now
       (Concrete.pureExternal appConfig node call)) abstractNext
   apply related_after_node_land hreachable related haddress hnode
       (event := .receive .outside (.request call)) htime hrequest hresult
-  · simp [abstractNext, World.land]
+  · simp [abstractNext, System.land]
   · intro message hmessage
     exact List.mem_append_left _ hmessage
   · obtain ⟨physical, hphysical, hrep⟩ := related.store
     refine ⟨physical, hphysical, ?_⟩
     have hstoreEq :
         (abstractNext.process .service).store = (abstract.process .service).store := by
-      simpa [abstractNext, World.land, abstractResult, served] using hpure.1
+      simpa [abstractNext, System.land, abstractResult, served] using hpure.1
     constructor
     · rw [hstoreEq]
       exact hrep.documents
@@ -13567,7 +13567,7 @@ theorem simulate_pure_external_node
     constructor
     · intro hreply
       obtain ⟨hcovered, hworkflow⟩ :=
-        hwritten (by simpa [World.land] using hreply)
+        hwritten (by simpa [System.land] using hreply)
       exact ⟨hcovered.land abstractResult,
         by
           rcases hworkflow with hnone | hpending
@@ -13575,7 +13575,7 @@ theorem simulate_pure_external_node
           · exact .inr (by
               simpa only [hworkflowEq] using hpending)⟩
     · intro hreply
-      exact (hfailed (by simpa [World.land] using hreply)).land
+      exact (hfailed (by simpa [System.land] using hreply)).land
         abstractResult
   · intro currentAddress currentNode op outputs haddress' hnodeNext hmem
     exact (related.cleanupCovered currentAddress currentNode op outputs
@@ -13585,8 +13585,8 @@ theorem simulate_pure_external_node
 theorem simulate_node_process
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
-    {concrete : World (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
     {address : Addr} (haddress : address ∈ nodes)
@@ -13600,13 +13600,13 @@ theorem simulate_node_process
       result ∈
         (Concrete.step appConfig config (.node address) (.node node)
           now event).val) :
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
+        abstract trace ∧
       Related nodes appConfig config
         (concrete.land (.node address) now result)
-        (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = [] := by
+        (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = [] := by
   obtain ⟨validNode, hvalidNodeState, hnodeValid⟩ :=
     reachable_nodes_valid hreachable address haddress
   rw [hnode] at hvalidNodeState
@@ -13623,13 +13623,13 @@ theorem simulate_node_process
           (.outside, Concrete.Msg.output output) ∈ result.send →
           (Abstract.Pid.service, .outside, Message.output output) ∈
             abstract.network) :
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
           (concrete.land (.node address) now result)
-          (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = [] :=
+          (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = [] :=
     ⟨[], trivial,
       related_after_stuttering_node hreachable related haddress hnode
         hnodeValid hserial htime hvalid hresult hstate houtputs,
@@ -13947,22 +13947,22 @@ theorem simulate_node_process
 preserving representation and the exact boundary observation. -/
 def StepSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
-  ∀ {concrete next : World (CModel nodes appConfig)}
+  ∀ {concrete next : System (CModel nodes appConfig)}
       {label : Label (CModel nodes appConfig)}
-      {abstract : World AModel},
+      {abstract : System AModel},
     Reachable (CModel nodes appConfig) config concrete →
     Related nodes appConfig config concrete abstract →
     Step (CModel nodes appConfig) config concrete label next →
-    ∃ execution,
+    ∃ trace,
       Legal AModel appConfig
-        abstract execution ∧
-      Related nodes appConfig config next (endOf abstract execution) ∧
-      Abstract.boundaryTrace execution = concreteObservation label
+        abstract trace ∧
+      Related nodes appConfig config next (endOf abstract trace) ∧
+      Abstract.boundaryTrace trace = concreteObservation label
 
 def ProcessSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
-  ∀ {concrete : World (CModel nodes appConfig)}
-      {abstract : World AModel},
+  ∀ {concrete : System (CModel nodes appConfig)}
+      {abstract : System AModel},
     Reachable (CModel nodes appConfig) config concrete →
     Related nodes appConfig config concrete abstract →
     ∀ {pid now event result},
@@ -13972,29 +13972,29 @@ def ProcessSimulation (nodes : List Addr) (appConfig : Resonate.Config)
       result ∈
         ((CModel nodes appConfig).step config pid
           (concrete.process pid) now event).val →
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.land pid now result) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution = []
+          (concrete.land pid now result) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace = []
 
 def InjectSimulation (nodes : List Addr) (appConfig : Resonate.Config)
     (config : Concrete.Config) : Prop :=
-  ∀ {concrete : World (CModel nodes appConfig)}
-      {abstract : World AModel},
+  ∀ {concrete : System (CModel nodes appConfig)}
+      {abstract : System AModel},
     Reachable (CModel nodes appConfig) config concrete →
     Related nodes appConfig config concrete abstract →
     ∀ {to now message},
       concrete.now ≤ now →
       (CModel nodes appConfig).isProcess to →
       (CModel nodes appConfig).injectable config message →
-      ∃ execution,
+      ∃ trace,
         Legal AModel appConfig
-          abstract execution ∧
+          abstract trace ∧
         Related nodes appConfig config
-          (concrete.inject to message now) (endOf abstract execution) ∧
-        Abstract.boundaryTrace execution =
+          (concrete.inject to message now) (endOf abstract trace) ∧
+        Abstract.boundaryTrace trace =
           concreteObservation (nodes := nodes) (appConfig := appConfig)
             (.input to now message)
 
@@ -14056,9 +14056,9 @@ theorem stepSimulation_of_processSimulation
       simpa using
         simulate_outside hreachable related htime hmessage
   | @process pid now event result htime hreal hvalid hresult =>
-      obtain ⟨execution, hlegal, hrelated, htrace⟩ :=
+      obtain ⟨trace, hlegal, hrelated, htrace⟩ :=
         hprocess hreachable related htime hreal hvalid hresult
-      exact ⟨execution, hlegal, hrelated, by
+      exact ⟨trace, hlegal, hrelated, by
         simpa only [concreteObservation, Label.observe,
           List.filterMap_nil] using htrace⟩
 
@@ -14069,66 +14069,66 @@ theorem stepSimulation
   stepSimulation_of_processSimulation injectSimulation processSimulation
 
 theorem legal_append {model : Model} {config : model.Config}
-    {world : World model} {first second : Execution model}
-    (hfirst : Legal model config world first)
-    (hsecond : Legal model config (endOf world first) second) :
-    Legal model config world (first ++ second) := by
-  induction first generalizing world with
+    {system : System model} {first second : Trace model}
+    (hfirst : Legal model config system first)
+    (hsecond : Legal model config (endOf system first) second) :
+    Legal model config system (first ++ second) := by
+  induction first generalizing system with
   | nil => exact hsecond
   | cons entry rest ih =>
       exact ⟨hfirst.1, ih hfirst.2 hsecond⟩
 
-theorem endOf_append {model : Model} (world : World model)
-    (first second : Execution model) :
-    endOf world (first ++ second) =
-      endOf (endOf world first) second := by
-  induction first generalizing world with
+theorem endOf_append {model : Model} (system : System model)
+    (first second : Trace model) :
+    endOf system (first ++ second) =
+      endOf (endOf system first) second := by
+  induction first generalizing system with
   | nil => rfl
   | cons entry rest ih => exact ih entry.2
 
 theorem abstract_boundaryTrace_append
-    (first second : Execution AModel) :
+    (first second : Trace AModel) :
     Abstract.boundaryTrace (first ++ second) =
       Abstract.boundaryTrace first ++ Abstract.boundaryTrace second := by
   simp only [Abstract.boundaryTrace]
-  rw [show Rover.trace (first ++ second) =
-      Rover.trace first ++ Rover.trace second by
+  rw [show Rover.observe (first ++ second) =
+      Rover.observe first ++ Rover.observe second by
     induction first with
     | nil => rfl
     | cons entry rest ih =>
-        simp [Rover.trace, ih, List.append_assoc]]
+        simp [Rover.observe, ih, List.append_assoc]]
   exact List.filterMap_append
 
 theorem concrete_boundaryTrace_cons
     {nodes : List Addr} {appConfig : Resonate.Config}
     (label : Label (CModel nodes appConfig))
-    (next : World (CModel nodes appConfig))
-    (rest : Execution (CModel nodes appConfig)) :
+    (next : System (CModel nodes appConfig))
+    (rest : Trace (CModel nodes appConfig)) :
     Concrete.boundaryTrace ((label, next) :: rest) =
       concreteObservation label ++ Concrete.boundaryTrace rest := by
-  simp [Concrete.boundaryTrace, concreteObservation, Rover.trace,
+  simp [Concrete.boundaryTrace, concreteObservation, Rover.observe,
     List.filterMap_append]
 
-/-- Generic execution folding from one-step simulation to finite execution
+/-- Generic trace folding from one-step simulation to finite trace
 simulation without any additional trace assumption. -/
 theorem simulate_execution
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
     (hsim : StepSimulation nodes appConfig config)
-    {concrete : World (CModel nodes appConfig)}
-    {execution : Execution (CModel nodes appConfig)}
-    {abstract : World AModel}
+    {concrete : System (CModel nodes appConfig)}
+    {trace : Trace (CModel nodes appConfig)}
+    {abstract : System AModel}
     (hreachable : Reachable (CModel nodes appConfig) config concrete)
     (related : Related nodes appConfig config concrete abstract)
-    (legal : Legal (CModel nodes appConfig) config concrete execution) :
+    (legal : Legal (CModel nodes appConfig) config concrete trace) :
     ∃ abstractExecution,
       Legal AModel appConfig
         abstract abstractExecution ∧
-      Related nodes appConfig config (endOf concrete execution)
+      Related nodes appConfig config (endOf concrete trace)
         (endOf abstract abstractExecution) ∧
       Abstract.boundaryTrace abstractExecution =
-        Concrete.boundaryTrace execution := by
-  induction execution generalizing concrete abstract with
+        Concrete.boundaryTrace trace := by
+  induction trace generalizing concrete abstract with
   | nil => exact ⟨[], trivial, related, rfl⟩
   | cons entry rest ih =>
       obtain ⟨label, next⟩ := entry
@@ -14146,8 +14146,8 @@ theorem initial_related
     {config : Concrete.Config}
     {process : Concrete.Pid → Concrete.Local}
     (hinit : (CModel nodes appConfig).init config process) :
-    Related nodes appConfig config (World.initial process)
-      (World.initial Abstract.initialProcess) := by
+    Related nodes appConfig config (System.initial process)
+      (System.initial Abstract.initialProcess) := by
   refine {
     time := Nat.le_refl 0
     store := ⟨{}, hinit.2.1, by
@@ -14234,7 +14234,7 @@ def Refines (nodes : List Addr) (appConfig : Resonate.Config)
       appConfig events
 
 /-- End-to-end trace inclusion from a protocol-specific reachable one-step
-simulation, including all execution and delayed-observation plumbing. -/
+simulation, including all trace and delayed-observation plumbing. -/
 theorem boundary_refinement_of_stepSimulation
     {nodes : List Addr} {appConfig : Resonate.Config}
     {config : Concrete.Config}
@@ -14242,7 +14242,7 @@ theorem boundary_refinement_of_stepSimulation
     Refines nodes appConfig config := by
   unfold Refines
   intro events hvalid
-  obtain ⟨execution, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
+  obtain ⟨trace, ⟨process, hinit, hlegal⟩, htrace⟩ := hvalid
   obtain ⟨abstractExecution, abstractLegal, _, abstractTrace⟩ :=
     simulate_execution hsim (Reachable.init hinit)
       (initial_related hinit) hlegal

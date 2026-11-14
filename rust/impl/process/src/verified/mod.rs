@@ -3,11 +3,11 @@
 //! removes, and remembers. Each function ensures it computes its `spec_*`,
 //! as does every function of the crate around it, up to `State::on_event`.
 //!
-//! The document machine is `crate::concrete`: `handle`, `sweep`, `run_due`
-//! and `create_occurrence` are proved here to compute `spec_handle`,
+//! The document machine is `echod_concrete`: `handle`, `sweep`, `run_due`
+//! and `create_occurrence` are proved there to compute `spec_handle`,
 //! `spec_sweep`, `spec_run_due` and `spec_occurrence`, the steps of the
-//! concrete Rover model. `document.rs` states the shared partial codec; the
-//! handlers order the store calls around those steps.
+//! concrete Rover model. `doc.rs` turns a document's rows into its `Doc`
+//! and back; the handlers order the store calls around those steps.
 //!
 //! ```text
 //! node.rs            membership, cache versions, armed keys
@@ -30,19 +30,18 @@
 //!   their arguments; `text::*` is assumed to compute them. A key is some
 //!   function of prefix, origin, instant and token; which string it is
 //!   stays outside the proof.
-//! - The bytes of a document, `document.rs`: partial boundaries and metadata,
-//!   `spec_encode_body`, `spec_encode_delta`, `spec_decode_workflow`,
-//!   `spec_decode_schedule`; `codec::*` (serde) is assumed to compute them.
-//!   Likewise an announcement's and a
+//! - The bytes of a document, `doc.rs`: `spec_encode`, `spec_encode_delta`,
+//!   `spec_decode_origin`, `spec_decode_schedule`; `codec::*` (serde) is
+//!   assumed to compute them. Likewise an announcement's and a
 //!   configuration's bytes, `state_node.rs`.
 //! - Strings as characters: `text::strip_prefix`, `text::starts_with`,
 //!   `text::u64_text`, `node::clone_string`, `node::str_eq`.
 //! - Hashing: `node::fnv1a` computes `node_spec::hash`, an uninterpreted
-//!   function of the string; `crate::concrete::content_etag` likewise.
-//! - Copies: `runtime::copy` returns its argument;
+//!   function of the string; `echod_concrete::content_etag` likewise.
+//! - Copies: `echod_abstract::trusted::copy` returns its argument;
 //!   `flight::copy_error` the same for a `StoreError`.
-//! - The store: `StoreRes` is what the store answered. Whether S3
-//!   answers as `echod_concrete_spec::store::spec_apply` says is the store's
+//! - The store: `StoreOutcome` is what the store answered. Whether S3
+//!   answers as `echod_concrete::store::spec_apply` says is the store's
 //!   fidelity, outside the proof; the simulator exercises it.
 //! - The runtime: the clock handed in on every event, the effects
 //!   performed in the order they leave, and each store answer returned
@@ -56,7 +55,6 @@
 pub mod commit;
 pub mod commit_spec;
 pub mod flight;
-pub mod runtime;
 #[cfg(verus_keep_ghost)]
 pub mod flight_spec;
 pub mod node;

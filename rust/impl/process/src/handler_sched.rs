@@ -9,13 +9,13 @@
 
 use vstd::prelude::*;
 
-use crate::verified::runtime::copy;
-use crate::concrete::DocumentBody;
+use echod_abstract::trusted::copy;
+use echod_concrete::{clone_doc, Doc};
 
 use crate::verified::flight::{self, Decided, Job};
 use crate::verified::text::{copy_string, text};
 
-use crate::document::{self, Loaded};
+use crate::doc::{self, Loaded};
 use crate::handler_docs::{copy_fired, FireCtx, Flight, Phase, Progress, Queued, Work, Working};
 use crate::keys::origin_of;
 use crate::state::State;
@@ -31,22 +31,22 @@ use crate::state::*;
 #[cfg(verus_keep_ghost)]
 use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
-use crate::concrete::document::{pend_v, spec_body_deadline, DocumentBodyV};
+use echod_concrete::node::{pend_v, spec_doc_deadline, DocV};
 
 verus! {
 
 /// The store answered a load of schedule `id`, read in full: not cached.
 #[verifier::opaque]
-pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreRes) -> (S, Result<WorkingSpec, Seq<char>>) {
+pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreOutcome) -> (S, Result<WorkingSpec, Seq<char>>) {
     let key = spec_sched_key(s.keys.prefix, id);
     let target = crate::target::spec_name(crate::target::TargetSpec::Schedule(id));
     match outcome {
-        StoreRes::Get { result: Ok(None) } => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
-        StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::spec_decode_schedule(bytes@) {
+        StoreOutcome::Got(None) => (s, Ok(spec_working(target, key, doc::spec_empty_schedule(), None))),
+        StoreOutcome::Got(Some((bytes, etag))) => match doc::spec_decode_schedule(bytes@) {
             Ok(loaded) => (s, Ok(spec_working(target, key, loaded, Some(etag.deep_view())))),
             Err(e) => (s, Err(e)),
         },
-        StoreRes::Get { result: Err(e) } => (s, Err(spec_error_text(e.deep_view()))),
+        StoreOutcome::Failed(e) => (s, Err(spec_error_text(e.deep_view()))),
         _ => (s, Err(spec_error_text(spec_unexpected()))),
     }
 }
@@ -63,9 +63,9 @@ pub open spec fn spec_run_schedule(s: S, f: FlightSpec, w: WorkingSpec) -> S {
 }
 
 /// The schedule's row, if the document holds one.
-pub open spec fn spec_schedule_row(doc: DocumentBodyV) -> Option<crate::verified::ScheduleSpec> {
+pub open spec fn spec_schedule_row(doc: DocV) -> Option<crate::verified::ScheduleSpec> {
     match doc {
-        DocumentBodyV::Schedule(Some(row)) => Some(row.deep_view()),
+        DocV::Schedule(Some(row)) => Some(row.deep_view()),
         _ => None,
     }
 }
@@ -78,10 +78,9 @@ pub open spec fn spec_schedule_row(doc: DocumentBodyV) -> Option<crate::verified
 pub open spec fn spec_fire_decide(s: S, f: FlightSpec, ws: WorkingSpec) -> S {
     match f.work {
         WorkSpec::Fire { fired, now, .. } => {
-            let t1 = document::spec_clamp_now(document::spec_loaded_committed_at(ws.loaded), now);
-            let body = document::spec_loaded_body(ws.loaded);
-            let (advanced, _response, born, _notes) = spec_step(AJob::Fire, body, t1, s.cfg.retry_timeout, 0);
-            let due = match (spec_schedule_row(body), born.len() > 0) {
+            let t1 = doc::spec_clamp_now(ws.loaded.stamp, now);
+            let (advanced, _response, born, _notes) = spec_step(AJob::Fire, ws.loaded.doc, t1, s.cfg.retry_timeout, 0);
+            let due = match (spec_schedule_row(ws.loaded.doc), born.len() > 0) {
                 (Some(row), true) => Some((row, born.last())),
                 _ => None,
             };
@@ -105,10 +104,9 @@ pub open spec fn spec_fire_decide(s: S, f: FlightSpec, ws: WorkingSpec) -> S {
 #[verifier::opaque]
 pub open spec fn spec_fire_idle(s: S, f: FlightSpec, ws: WorkingSpec, t1: u64, fired: Option<AFired>) -> S {
     let f = FlightSpec { idle: true, ..f };
-    let body = document::spec_loaded_body(ws.loaded);
-    let deadline = spec_body_deadline(body);
+    let deadline = spec_doc_deadline(ws.loaded.doc);
     let s = spec_note(s, NoteSpec::SweepBegin { flight: f.id, target: ws.target, now: t1 });
-    let (s, commit) = spec_commit_new(s, ws, body, deadline, t1, fired);
+    let (s, commit) = spec_commit_new(s, ws, ws.loaded.doc, deadline, t1, fired);
     let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
     match p {
         ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireIdle { commit }, ..f }),
@@ -148,9 +146,9 @@ pub open spec fn spec_fire_load_origin(s: S, f: FlightSpec, ctx: FireCtxSpec) ->
 /// document, committed first.
 #[verifier::opaque]
 pub open spec fn spec_fire_run(s: S, f: FlightSpec, ctx: FireCtxSpec, wo: WorkingSpec) -> S {
-    let t = document::spec_clamp_now(document::spec_loaded_committed_at(wo.loaded), ctx.t1);
-    let (after, _r, _b, _n) = spec_step(AJob::Occurrence(ctx.pending), document::spec_loaded_body(wo.loaded), t, s.cfg.retry_timeout, 0);
-    let deadline = spec_body_deadline(after);
+    let t = doc::spec_clamp_now(wo.loaded.stamp, ctx.t1);
+    let (after, _r, _b, _n) = spec_step(AJob::Occurrence(ctx.pending), wo.loaded.doc, t, s.cfg.retry_timeout, 0);
+    let deadline = spec_doc_deadline(after);
     let s = spec_note(s, NoteSpec::FireBegin { flight: f.id, origin: ctx.origin, now: t, row: ctx.row, at: ctx.pending.at, promise_id: ctx.pending.promise, next: ctx.next });
     let (s, commit) = spec_commit_new(s, wo, after, deadline, t, None);
     let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
@@ -177,7 +175,7 @@ pub open spec fn spec_fire_advance(s: S, f: FlightSpec, ctx: FireCtxSpec, t: u64
     match f.work {
         WorkSpec::Fire { schedule, fired, .. } => {
             let s = spec_note(s, NoteSpec::AdvanceBegin { flight: f.id, schedule, now: t, at: ctx.pending.at, next: ctx.next });
-            let deadline = spec_body_deadline(ctx.advanced);
+            let deadline = spec_doc_deadline(ctx.advanced);
             let (s, commit) = spec_commit_new(s, ctx.ws, ctx.advanced, deadline, t, fired);
             let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
             match p {
@@ -198,22 +196,22 @@ pub open spec fn spec_fire_advance(s: S, f: FlightSpec, ctx: FireCtxSpec, t: u64
 }
 
 /// The schedule's row, if the document holds one.
-pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>)
+pub fn schedule_row(doc: &Doc) -> (r: Option<crate::verified::Schedule>)
     ensures
         r.deep_view() == spec_schedule_row(doc@),
 {
     proof {
-        crate::concrete::lemma_doc_view(doc);
+        echod_concrete::lemma_doc_view(doc);
     }
     match doc {
-        DocumentBody::Schedule(Some(row)) => Some(copy(row)),
+        Doc::Schedule(Some(row)) => Some(copy(row)),
         _ => None,
     }
 }
 
 impl State {
     /// The store answered a load of schedule `id`, read in full: not cached.
-    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreRes) -> (r: Result<Working, String>)
+    pub fn loaded_schedule(&mut self, id: &str, outcome: StoreOutcome) -> (r: Result<Working, String>)
         ensures
             (final(self).deep_view(), r.deep_view()) == spec_loaded_schedule(old(self).deep_view(), id@, outcome),
     {
@@ -223,15 +221,12 @@ impl State {
         let key = self.keys.sched_key(id);
         let target = Target::Schedule(text(id)).name();
         match outcome {
-            StoreRes::Get { result: Ok(None) } => {
-                let loaded = Loaded::empty_schedule(text(id));
-                Ok(Working { target, key, loaded, etag: None })
-            },
-            StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::decode_schedule(bytes.as_slice()) {
+            StoreOutcome::Got(None) => Ok(Working { target, key, loaded: Loaded::empty_schedule(), etag: None }),
+            StoreOutcome::Got(Some((bytes, etag))) => match doc::decode_schedule(bytes.as_slice()) {
                 Ok(loaded) => Ok(Working { target, key, loaded, etag: Some(etag) }),
                 Err(e) => Err(e),
             },
-            StoreRes::Get { result: Err(e) } => Err(error_text(&e)),
+            StoreOutcome::Failed(e) => Err(error_text(&e)),
             _ => Err(error_text(&unexpected())),
         }
     }
@@ -273,13 +268,12 @@ impl State {
             Work::Fire { fired, now, .. } => (copy_fired(fired), *now),
             _ => return self.fail(f, text("not a fire")),
         };
-        let t1 = document::clamp_now(document::loaded_committed_at(&ws.loaded), now);
+        let t1 = doc::clamp_now(ws.loaded.stamp, now);
         // the decision is the model's: the occurrence due at the instant, or none
-        let body = document::loaded_body(&ws.loaded);
-        let Decided { doc: advanced, response: _, born, notes: _ } = flight::decide(Job::Fire, body, t1, self.cfg.retry_timeout, 0);
+        let Decided { doc: advanced, response: _, born, notes: _ } = flight::decide(Job::Fire, clone_doc(&ws.loaded.doc), t1, self.cfg.retry_timeout, 0);
         let mut born = born;
         let ghost born0 = born@;
-        let row = schedule_row(&document::loaded_body(&ws.loaded));
+        let row = schedule_row(&ws.loaded.doc);
         let last = born.pop();
         proof {
             assert(pend_v(born0).len() == born0.len());
@@ -295,7 +289,7 @@ impl State {
             None => self.fire_idle(f, ws, t1, fired),
             Some((row, pending)) => {
                 proof {
-                    crate::concrete::lemma_pending_view(&pending);
+                    echod_concrete::lemma_pending_view(&pending);
                 }
                 let next = match schedule_row(&advanced) {
                     Some(c) => c.next_run_at,
@@ -317,11 +311,10 @@ impl State {
         }
         let mut f = f;
         f.idle = true;
-        let body = document::loaded_body(&ws.loaded);
-        let deadline = document::deadline(&body);
+        let deadline = doc::deadline(&ws.loaded.doc);
         let flight = f.id;
         self.note(Note::SweepBegin { flight, target: copy_string(&ws.target), now: t1 });
-        let after = body;
+        let after = clone_doc(&ws.loaded.doc);
         let mut commit = self.commit_new(ws, after, deadline, t1, fired);
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
@@ -386,7 +379,7 @@ impl State {
     }
 
     /// Both documents loaded: the model's `create_occurrence` on the
-    /// workflow document, committed first.
+    /// origin's document, committed first.
     pub fn fire_run(&mut self, f: Flight, ctx: FireCtx, wo: Working)
         ensures
             final(self).deep_view() == spec_fire_run(old(self).deep_view(), f.deep_view(), ctx.deep_view(), wo.deep_view()),
@@ -394,12 +387,12 @@ impl State {
         proof {
             reveal(spec_fire_run);
         }
-        let t = document::clamp_now(document::loaded_committed_at(&wo.loaded), ctx.t1);
-        let Decided { doc: after, response: _, born: _, notes: _ } = flight::decide(Job::Occurrence(copy(&ctx.pending)), document::loaded_body(&wo.loaded), t, self.cfg.retry_timeout, 0);
-        let deadline = document::deadline(&after);
+        let t = doc::clamp_now(wo.loaded.stamp, ctx.t1);
+        let Decided { doc: after, response: _, born: _, notes: _ } = flight::decide(Job::Occurrence(copy(&ctx.pending)), clone_doc(&wo.loaded.doc), t, self.cfg.retry_timeout, 0);
+        let deadline = doc::deadline(&after);
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::FireBegin { flight, origin: copy_string(&ctx.origin), now: t, row: Box::new(copy(&ctx.row)), at: ctx.pending.at, promise_id: copy_string(&ctx.pending.promise), next: ctx.next });
         let mut commit = self.commit_new(wo, after, deadline, t, None);
@@ -437,11 +430,11 @@ impl State {
         };
         let flight = f.id;
         proof {
-            crate::concrete::lemma_pending_view(&ctx.pending);
+            echod_concrete::lemma_pending_view(&ctx.pending);
         }
         self.note(Note::AdvanceBegin { flight, schedule: id, now: t, at: ctx.pending.at, next: ctx.next });
         let FireCtx { ws, row: _, advanced, pending: _, t1: _, origin: _, next: _ } = ctx;
-        let deadline = document::deadline(&advanced);
+        let deadline = doc::deadline(&advanced);
         let mut commit = self.commit_new(ws, advanced, deadline, t, fired);
         match self.commit_advance(f.id, &mut commit, None) {
             Progress::Issued => {
