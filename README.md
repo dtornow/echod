@@ -41,7 +41,6 @@ lean/src/concrete     nodes and one store, for experiment
 examples/ts           the TypeScript SDK against the node
 scripts               the store and end-to-end tests against a real S3 API
 jeps                  Jepsen, from outside the process: a pass means the pipeline a client can see produced a correct result
-rust/impl/box         optional Docker/Nix development CLI (not a server dependency)
 rust/experiment/claude-quickjs  optional Messages API agent-loop experiment
 ```
 
@@ -99,50 +98,7 @@ and echod in debug mode and drives both over HTTP. The model driver is
 path. `cargo build` is the other compiler for the same sources: it sees the
 executable code alone.
 
-## Optional development tools
-
-Neither tool is started by the server or reads credentials during a normal
-server build/run. Workspace tests include their offline tests.
-
-The `box` binary opens the current directory at `/workspace` in an ephemeral
-Docker container. It first applies `~/.box/.box.nix`, when present, and then
-the current directory's `box.nix`, using nested `nix-shell` environments
-before opening Bash. The global `~/.box` directory is mounted read-only; the
-working directory is mounted read-write. Container deletion does not undo
-changes to the working directory. Run only trusted Nix expressions and images.
-
-```sh
-cargo install --path rust/impl/box --locked
-box
-box -- cargo test
-box --credential ANTHROPIC_API_KEY
-BOX_CREDENTIALS=ANTHROPIC_API_KEY,OPENAI_API_KEY box
-```
-
-Credential forwarding is opt-in. Values are inherited by Docker rather than
-placed in its command line, but are readable inside the container and by
-Docker administrators. Do not use this mode as secret isolation.
-
-`box.nix` is a normal Nix shell expression:
-
-```nix
-{ pkgs ? import <nixpkgs> {} }:
-pkgs.mkShell {
-  packages = with pkgs; [ git rustc cargo ];
-}
-```
-
-Docker and network access to pull `nixos/nix:latest` are required. Override
-the runtime or image with `--runtime` / `BOX_RUNTIME` and `--image` /
-`BOX_IMAGE`; for example, `BOX_RUNTIME=podman box`.
-
-The vendored Strands credential and egress-gateway libraries retain their
-licenses and upstream documentation under `rust/vendor/strands-box`.
-They are excluded from workspace membership and disabled in normal builds.
-`cargo check -p echod-box --features strands-proxy --locked` explicitly compiles
-them, but **does not start a proxy or provide proxy custody of credentials**.
-Their upstream guidance refers to the original Strands repository; those
-upstream consumers and policy components are not part of echod.
+## Optional QuickJS experiment
 
 The [QuickJS experiment](rust/experiment/claude-quickjs/README.md) runs a small
 Messages API loop, not an agent SDK. It requires an explicit model, prompt, and
@@ -150,6 +106,6 @@ API key to make paid calls. Its unit tests use synthetic responses with no
 external API calls:
 
 ```sh
-cargo test -p echod-box -p claude-quickjs --locked
+cargo test -p claude-quickjs --locked
 cargo run -p claude-quickjs -- --help
 ```
