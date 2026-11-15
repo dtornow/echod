@@ -35,7 +35,7 @@ use crate::verified::table::Table;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::spec_before;
+use echod_concrete_spec::handler::spec_before;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::state::StoreErrorSpec;
 

@@ -1,7 +1,7 @@
 //! Standalone mathematical Resonate model interpreted by Rover.
 //!
-//! `state.rs` contains state, request, and internal-work transitions;
-//! `rover.rs` contains process orchestration and the Rover adapter.
+//! `state.rs` contains state structures; `handler.rs` contains transitions.
+//! `rover.rs` contains initialization, observation and thin event delegation.
 //! Property claims and proofs remain separate.
 
 #![allow(
@@ -15,14 +15,18 @@
 )]
 
 pub mod state;
+#[cfg(verus_keep_ghost)]
+pub mod handler;
 pub mod rover;
+#[cfg(verus_keep_ghost)]
 pub mod property_claim;
 #[cfg(verus_keep_ghost)]
-mod property_proof;
+pub mod property_proof;
 pub mod axioms;
 
-pub use state::Config;
-pub use rover::{Proc, Spec};
+pub use rover::Config;
+pub use rover::Spec;
+pub use state::Proc;
 pub use echod_types as types;
 #[cfg(verus_keep_ghost)]
 pub use property_proof::property_proof;

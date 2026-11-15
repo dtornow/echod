@@ -20,7 +20,15 @@ use serde::{Deserialize, Serialize};
 
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::document::*;
+use echod_concrete_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_proof::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_claim::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::*;
 
 verus! {
 

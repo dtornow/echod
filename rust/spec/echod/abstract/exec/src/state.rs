@@ -1,6 +1,7 @@
 //! Executable state, outcomes, and shared state helpers.
 #![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
 use vstd::prelude::*;
+use echod_abstract_spec::rover::Config;
 use echod_types::{MAX_TIME, MAX_VERSION, deadline_bounded};
 #[cfg(verus_keep_ghost)]
 use echod_types::spec_deadline_bounded;
@@ -11,6 +12,14 @@ use crate::runtime::*;
 use crate::projection::{group_views as group_exec_views, outs_v, sends, works};
 use echod_types::Dispatch;
 use echod_abstract_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
 #[cfg(verus_keep_ghost)]
 use echod_types::common::{lemma_tags_ext, lemma_value_ext};
 
