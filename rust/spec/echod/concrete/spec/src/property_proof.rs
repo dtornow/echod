@@ -1,31 +1,61 @@
-//! Machine-checked proofs for the concrete integrity claims.
-//! Each helper discharges one structural operation used by the public theorem;
-//! no semantic step is assumed or skipped.
-
-#![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
-
+//! property_proof definitions for the concrete model.
+#![allow(unused_imports)]
 use vstd::prelude::*;
-
-use echod_types::Call;
-use rover_spec::rover::comm::{ProcessEvent, Time};
-use rover_spec::rover::RoverSpec::Proc as _;
-
-use crate::rover::{
-    spec_node, spec_nodes, spec_store, spec_world, Config, Message, Pid, Proc,
-};
-use crate::state::{
-    spec_begin, spec_cached, spec_commit, spec_decide, spec_earliest_from,
-    spec_earliest_key, spec_fail, spec_forget, spec_body_is_empty, spec_keep,
-    spec_min_key, spec_owns, spec_remember, spec_request, spec_sorted,
-    spec_store_reply, spec_timeout, CachedV, DocumentBodyV, FlightV, NodeV,
-};
-use crate::property_claim::*;
-use crate::state::{
-    spec_apply, spec_before, spec_bump, spec_find, spec_insert_at, spec_put,
-    spec_remove_at, EntryV, StoreReq, StoreRes, StoreV,
-};
+use vstd::contrib::make_spec_type;
+use echod_types::*;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::*;
+use rover_spec::rover::comm::{Sched, ProcessEvent};
+use rover_spec::rover::RoverSpec;
+use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
+use crate::state::{ChangeV, PartialV, FoldedV, DocumentBodyV, Message, Proc, NoteV, JobV, FlightV, CachedV, NodeV, Etag, StoreReq, StoreRes, EntryV, StoreV};
+#[cfg(verus_keep_ghost)]
+use crate::handler::{on_event, spec_apply_changes, spec_apply_document, spec_compose, spec_string, spec_bytes, spec_node, spec_store, spec_note_key, spec_note_relevant, spec_keyed_notes, spec_encode_body, spec_read, spec_owns, spec_cached, spec_body_is_empty, spec_keep, spec_remember, spec_forget, spec_request, spec_timeout, spec_store_reply, spec_flight, spec_begin, spec_decide, spec_commit, spec_origin_key, spec_empty_body, spec_key, spec_handle, spec_run_due, spec_occurrence, spec_min_key, least_key, spec_sorted, spec_earliest_key, spec_earliest_from, spec_earliest_in, spec_utf8_ok, spec_prefix, spec_etag, spec_find, spec_insert_at, spec_before, spec_put, spec_remove_at, spec_bump, spec_apply};
+use crate::rover::{Pid, Config, spec_nodes, spec_initial_node, spec_world};
+#[cfg(verus_keep_ghost)]
+use crate::property_claim::{keys_strictly_sorted, document_object_order, document_keys_unique, document_key_ownership, store_entries_ordered, store_entries_unique, store_versions_positive, process_layout, state_properties, transition_properties, step_properties, property_claim};
+use rover_spec::rover::comm::Time;
 
 verus! {
+#[cfg(verus_keep_ghost)]
+pub proof fn lemma_apply_changes_append<V>(
+    entries: Map<Seq<char>, V>,
+    first: Seq<ChangeV<V>>,
+    second: Seq<ChangeV<V>>,
+)
+    ensures
+        spec_apply_changes(entries, first + second)
+            == spec_apply_changes(spec_apply_changes(entries, first), second),
+    decreases second.len(),
+{
+    if second.len() == 0 {
+        assert(first + second =~= first);
+    } else {
+        let prefix = second.drop_last();
+        lemma_apply_changes_append(entries, first, prefix);
+        assert((first + second).drop_last() =~= first + prefix);
+        assert((first + second).last() == second.last());
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+pub proof fn lemma_compose_preserves_apply<V>(
+    document: FoldedV<V>,
+    first: PartialV<V>,
+    second: PartialV<V>,
+)
+    requires
+        first.document == document.document,
+        first.basever == document.version,
+        second.document == document.document,
+        second.basever == first.version,
+        document.committed_at <= first.committed_at <= second.committed_at,
+    ensures
+        spec_apply_document(spec_apply_document(document, first), second)
+            == spec_apply_document(document, spec_compose(first, second)),
+{
+    lemma_apply_changes_append(document.entries, first.changes, second.changes);
+}
 
 proof fn lemma_before_irreflexive(a: Seq<char>)
     ensures
@@ -277,7 +307,7 @@ proof fn lemma_process_layout(config: Config)
     lemma_nodes_layout(config, 0);
     let nodes = spec_nodes(config, 0);
     let world = spec_world(config);
-    assert(world == nodes + seq![(Pid::Store, crate::rover::Proc::Store(
+    assert(world == nodes + seq![(Pid::Store, crate::state::Proc::Store(
         crate::state::StoreV {
             entries: Seq::empty(),
             appendable: config.appendable,
@@ -422,7 +452,7 @@ proof fn lemma_keep_integrity(
     if spec_body_is_empty(doc) && etag is None {
         lemma_forget_integrity(node, key, 0);
     } else {
-        lemma_remember_integrity(node, key, crate::state::spec_encode_body(doc), etag, 0);
+        lemma_remember_integrity(node, key, crate::handler::spec_encode_body(doc), etag, 0);
     }
 }
 
@@ -449,8 +479,8 @@ proof fn lemma_earliest_from_cached(
     decreases docs.len() - i,
 {
     if i < docs.len() {
-        match crate::state::spec_earliest_in(
-            crate::state::spec_read(docs[i].key, docs[i].body),
+        match crate::handler::spec_earliest_in(
+            crate::handler::spec_read(docs[i].key, docs[i].body),
             now,
         ) {
             Some(at) if spec_owns(node, docs[i].key) => {
@@ -528,20 +558,20 @@ proof fn lemma_decide_integrity(node: NodeV, flight: FlightV, doc: DocumentBodyV
 {
     let (next_doc, reply, born, notify) = match flight.job {
         crate::state::JobV::External(request) => {
-            let (next, response) = crate::state::spec_handle(doc, request, flight.now);
+            let (next, response) = crate::handler::spec_handle(doc, request, flight.now);
             (next, Some(response), Seq::empty(), Seq::empty())
         },
-        crate::state::JobV::Due => crate::state::spec_run_due(doc, flight.now, node.retry_timeout),
+        crate::state::JobV::Due => crate::handler::spec_run_due(doc, flight.now, node.retry_timeout),
         crate::state::JobV::Occurrence(pending) => (
-            crate::state::spec_occurrence(doc, pending, flight.now),
+            crate::handler::spec_occurrence(doc, pending, flight.now),
             None,
             Seq::empty(),
             Seq::empty(),
         ),
     };
     let previous = match spec_cached(node, flight.key) {
-        Some(cached) => crate::state::spec_read(flight.key, cached.body),
-        None => crate::state::spec_empty_body(flight.key),
+        Some(cached) => crate::handler::spec_read(flight.key, cached.body),
+        None => crate::handler::spec_empty_body(flight.key),
     };
     if next_doc == previous && born.len() == 0 {
         lemma_keep_integrity(node, flight.key, next_doc, flight.etag);
@@ -573,8 +603,8 @@ proof fn lemma_begin_integrity(
         Some(cached) => {
             lemma_decide_integrity(
                 node,
-                crate::state::spec_flight(0, key, cached.etag, now, caller, job),
-                crate::state::spec_read(key, cached.body),
+                crate::handler::spec_flight(0, key, cached.etag, now, caller, job),
+                crate::handler::spec_read(key, cached.body),
             );
         },
         None => {
@@ -595,7 +625,7 @@ proof fn lemma_request_integrity(node: NodeV, now: Time, request: Call)
             &&& node.next_op <= next.next_op
         }),
 {
-    match crate::state::spec_key(request.request) {
+    match crate::handler::spec_key(request.request) {
         Some(key) if spec_owns(node, key) => {
             lemma_begin_integrity(
                 node,
@@ -624,7 +654,7 @@ proof fn lemma_timeout_integrity(node: NodeV, now: Time)
     if node.pending.len() > 0 {
         let pending = node.pending[0];
         let without = NodeV { pending: node.pending.skip(1), ..node };
-        let key = crate::state::spec_origin_key(echod_types::origin(pending.promise));
+        let key = crate::handler::spec_origin_key(echod_types::origin(pending.promise));
         if spec_owns(without, key) {
             lemma_begin_integrity(
                 without,
@@ -667,10 +697,10 @@ proof fn lemma_store_reply_integrity(
                     StoreRes::Get { result: Ok(got) } => {
                         let (doc, etag) = match got {
                             Some((body, tag)) => (
-                                crate::state::spec_read(flight.key, body@),
+                                crate::handler::spec_read(flight.key, body@),
                                 Some(tag.0@),
                             ),
-                            None => (crate::state::spec_empty_body(flight.key), None),
+                            None => (crate::handler::spec_empty_body(flight.key), None),
                         };
                         lemma_decide_integrity(
                             NodeV { flight: None, ..node },
@@ -1099,7 +1129,7 @@ proof fn lemma_apply_put_match(
     let request = StoreReq::PutIfMatch { key, body, etag };
     let next = spec_apply(store, request).0;
     match spec_find(store.entries, key@, 0) {
-        Some(i) if crate::state::spec_etag(store.entries[i].body) == etag => {
+        Some(i) if crate::handler::spec_etag(store.entries[i].body) == etag => {
             assert(spec_bump(store.entries[i].version) >= store.entries[i].version);
             assert(spec_bump(store.entries[i].version) > 0);
             let entry = EntryV {
@@ -1142,7 +1172,7 @@ proof fn lemma_apply_append(
     let next = spec_apply(store, request).0;
     if store.appendable {
         match spec_find(store.entries, key@, 0) {
-            Some(i) if crate::state::spec_etag(store.entries[i].body) == etag
+            Some(i) if crate::handler::spec_etag(store.entries[i].body) == etag
                 && store.entries[i].body.len() == offset => {
                 assert(spec_bump(store.entries[i].version) >= store.entries[i].version);
                 assert(spec_bump(store.entries[i].version) > 0);
@@ -1342,8 +1372,6 @@ proof fn lemma_initial_world(config: Config)
     lemma_initial_nodes(config, 0);
 }
 
-/// Every configured concrete fleet and every selected process response satisfy
-/// the integrity claim.
 pub proof fn property_proof(config: Config)
     ensures
         property_claim(config),
@@ -1373,4 +1401,164 @@ pub proof fn property_proof(config: Config)
     };
 }
 
-} // verus!
+pub proof fn lemma_string_realised(chars: Seq<char>)
+    ensures
+        spec_string(chars)@ == chars,
+{
+    reveal(spec_string);
+    axiom_string_realised(chars);
+}
+
+pub proof fn lemma_string_of(s: String)
+    ensures
+        spec_string(s@) == s,
+{
+    lemma_string_realised(s@);
+    axiom_string_ext(spec_string(s@), s);
+}
+
+pub proof fn lemma_bytes_realised(bytes: Seq<u8>)
+    ensures
+        spec_bytes(bytes)@ == bytes,
+{
+    reveal(spec_bytes);
+    axiom_bytes_realised(bytes);
+}
+
+pub proof fn lemma_keyed_notes_from_input(
+    doc: DocumentBodyV,
+    notes: Seq<NoteV>,
+    count: nat,
+    k: int,
+)
+    requires
+        count <= notes.len(),
+        0 <= k < spec_keyed_notes(doc, notes, count).len(),
+    ensures
+        exists|j: int| 0 <= j < count
+            && spec_keyed_notes(doc, notes, count)[k] == notes[j],
+    decreases count,
+{
+    if count > 0 {
+        let prior = spec_keyed_notes(doc, notes, (count - 1) as nat);
+        let note = notes[count as int - 1];
+        if !spec_note_relevant(doc, note) || exists|i: int| 0 <= i < prior.len()
+            && spec_note_key(prior[i]) == spec_note_key(note)
+        {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else if k < prior.len() {
+            lemma_keyed_notes_from_input(doc, notes, (count - 1) as nat, k);
+        } else {
+            assert(k == prior.len());
+        }
+    }
+}
+
+proof fn lemma_before_irrefl(a: Seq<char>)
+    ensures
+        !spec_before(a, a),
+    decreases a.len(),
+{
+    if a.len() > 0 {
+        lemma_before_irrefl(a.drop_first());
+    }
+}
+
+proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
+    requires
+        spec_before(a, b),
+        spec_before(b, c),
+    ensures
+        spec_before(a, c),
+    decreases a.len() + b.len() + c.len(),
+{
+    if a.len() == 0 {
+    } else if b.len() == 0 {
+    } else if c.len() == 0 {
+    } else if a[0] != b[0] {
+    } else if b[0] != c[0] {
+    } else {
+        lemma_before_trans(a.drop_first(), b.drop_first(), c.drop_first());
+    }
+}
+
+proof fn lemma_least_key_exists(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        exists|k: Seq<char>| least_key(keys, k),
+    decreases keys.len(),
+{
+    let x = keys.choose();
+    assert(keys.contains(x));
+    let rest = keys.remove(x);
+    assert(rest.len() == keys.len() - 1);
+    if rest.len() == 0 {
+        assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+            if o != x {
+                assert(rest.contains(o));
+            } else {
+                lemma_before_irrefl(x);
+            }
+        };
+        assert(least_key(keys, x));
+    } else {
+        lemma_least_key_exists(rest);
+        let m = choose|m: Seq<char>| least_key(rest, m);
+        assert(keys.contains(m));
+        if spec_before(x, m) {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+                if o == x {
+                    lemma_before_irrefl(x);
+                } else {
+                    assert(rest.contains(o));
+                    if spec_before(o, x) {
+                        lemma_before_trans(o, x, m);
+                    }
+                }
+            };
+            assert(least_key(keys, x));
+        } else {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, m) by {
+                if o != x {
+                    assert(rest.contains(o));
+                }
+            };
+            assert(least_key(keys, m));
+        }
+    }
+}
+
+pub proof fn lemma_min_key_present(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        keys.contains(spec_min_key(keys)),
+{
+    reveal(spec_min_key);
+    lemma_least_key_exists(keys);
+    let k = choose|k: Seq<char>| least_key(keys, k);
+    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k));
+}
+
+
+
+pub proof fn lemma_prefix_bounds(bytes: Seq<u8>, width: nat, pos: nat)
+    requires
+        pos <= bytes.len(),
+        pos <= width,
+    ensures
+        pos <= spec_prefix(bytes, width, pos) <= bytes.len(),
+    decreases width - pos,
+{
+    if pos >= width {
+    } else if pos >= bytes.len() || !spec_utf8_ok(bytes[0], pos, bytes[pos as int]) {
+    } else {
+        lemma_prefix_bounds(bytes, width, pos + 1);
+    }
+}
+
+
+}

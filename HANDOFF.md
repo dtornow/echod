@@ -188,10 +188,10 @@ and not a dependent of the process:
 - the document catalogue and the `spec_*` handler functions
 - the one step, `on_event`, which cites those functions
 - the Echod concrete adapter in `rover.rs`: one `Proc` process enum (`Node` or `Store`),
-  nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` dispatching
-  each enum variant to its local step
+  nodes and one store in `spec_world`, and `RoverSpec::Proc::on_event` delegating
+  to `handler::on_event`, which dispatches each enum variant to its local step
 - the Rover adapter over those concrete semantics
-- `state.rs` for node and store state and transitions, in separate commented sections
+- `state.rs` for node, store and document structures; `handler.rs` for transitions
 - `property_claim.rs` for concrete integrity and `property_proof.rs` for its proof
 
 Shared `Call`/`Output`/`Dispatch` payloads live in `echod-types`. Both models

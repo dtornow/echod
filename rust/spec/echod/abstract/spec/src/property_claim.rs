@@ -1,49 +1,22 @@
-//! Resonate conformance property claims over Rover's abstract state.
-//!
-//! Upstream's catalogue has 93 entries. 82 are directly expressible against
-//! Rover's server state (38 state and 44 transition properties). The remaining
-//! 11 mention the coalesced model's outbox:
-//!
-//! - new-message claims translate to the selected `StepResultV.send`;
-//! - persistence translates to Rover's generic proved append-only-network
-//!   theorem, `semantics::step_preserves_network`;
-//! - outbox-key uniqueness is structural there but deliberately false of
-//!   Rover's duplicate-delivery network;
-//! - execute-address/target-tag equality is not recoverable because Rover
-//!   compresses the target tag and its `Execute` dispatch carries no address.
-//!
-//! Two additional internal-provenance checks need the timeout event plus the
-//! selected pending work; response properties need the request and emitted
-//! response. True liveness needs a future infinite-execution/fairness layer,
-//! while algebraic properties are equations between `on_event` compositions.
-//!
-//! The predicates below retain upstream names wherever their meaning survives.
-//! Proof code lives in `property_proof.rs`; this module contains claims only.
-
-#![cfg_attr(not(verus_keep_ghost), allow(unused_imports))]
-
+//! property_claim definitions for the abstract model.
+#![allow(unused_imports)]
 use vstd::prelude::*;
-
-use rover_spec::rover::comm::ProcessEvent;
-use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
-use rover_spec::rover::comm::Time;
-
-use super::rover::{Pid, Proc};
+use vstd::contrib::make_spec_type;
+use echod_types::*;
 #[cfg(verus_keep_ghost)]
-use super::axioms::origin;
-use echod_types::{PromiseState, TaskState};
-use super::state::Config;
-use echod_types::Message;
+use echod_types::common::*;
+use rover_spec::rover::comm::{Sched, ProcessEvent};
+use rover_spec::rover::RoverSpec;
+use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
+use crate::state::{Time, Chars, PromiseV, TaskV, ScheduleV, Proc};
+use crate::rover::{Config};
 #[cfg(verus_keep_ghost)]
-use super::state::distinct;
-use super::state::{Chars, PromiseV, ScheduleV, TaskV};
+use crate::handler::{on_event, distinct};
+use crate::rover::{Pid, empty_store};
+#[cfg(verus_keep_ghost)]
+use crate::axioms::*;
 
 verus! {
-
-// ---------------------------------------------------------------------------
-// State properties
-// ---------------------------------------------------------------------------
-
 pub open spec fn well_formed_promise_created_at_lte_timeout_at_at(
     promise: PromiseV,
 ) -> bool {
@@ -232,7 +205,6 @@ pub open spec fn well_formed_task_acquired_version_positive_at(
     task.state != TaskState::Acquired || task.version > 0
 }
 
-/// Tasks are created only as the runnable half of a promise object.
 pub open spec fn well_formed_task_has_matching_promise(
     _now: Time,
     state: Proc,
@@ -265,12 +237,10 @@ pub open spec fn well_formed_schedule_last_run_at_lt_next_run_at_at(
     }
 }
 
-/// Object ids are map keys in Rover, so duplicate rows are unrepresentable.
 pub open spec fn well_formed_store_object_ids_unique(_state: Proc) -> bool {
     true
 }
 
-/// Schedule ids are map keys for the same reason.
 pub open spec fn well_formed_store_schedule_ids_unique(_state: Proc) -> bool {
     true
 }
@@ -356,10 +326,6 @@ pub open spec fn state_properties(now: Time, state: Proc) -> bool {
     &&& well_formed_store_object_ids_unique(state)
     &&& well_formed_store_schedule_ids_unique(state)
 }
-
-// ---------------------------------------------------------------------------
-// Transition and event properties
-// ---------------------------------------------------------------------------
 
 pub open spec fn monotone_promise_set_grows(
     _now: Time,
@@ -523,12 +489,6 @@ pub open spec fn step_properties(
     &&& transition_properties(now, before, outcome.state)
 }
 
-// ---------------------------------------------------------------------------
-// Preservation obligation
-// ---------------------------------------------------------------------------
-
-/// The initial process is well formed, and every legal local process outcome
-/// preserves all state and transition properties.
 pub open spec fn property_claim(config: Config) -> bool {
     &&& state_properties(
         0,
@@ -549,5 +509,4 @@ pub open spec fn property_claim(config: Config) -> bool {
                 before.on_event(config, now, event)[i],
             )
 }
-
-} // verus!
+}

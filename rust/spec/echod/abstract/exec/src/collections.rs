@@ -221,7 +221,7 @@ impl<V: Clone + std::hash::Hash> PMap<V> {
     #[verifier::external_body]
     pub fn keys(&self) -> (r: Vec<String>)
         ensures
-            r@.map_values(|s: String| s@) == echod_abstract_spec::state::spec_keys(self@),
+            r@.map_values(|s: String| s@) == echod_abstract_spec::handler::spec_keys(self@),
             forall|i: int| 0 <= i < r.len() ==> #[trigger] self@.contains_key(r[i]@),
             forall|k: Seq<char>| #[trigger] self@.contains_key(k) ==> exists|i: int| 0 <= i < r.len() && #[trigger] r[i]@ == k,
     {

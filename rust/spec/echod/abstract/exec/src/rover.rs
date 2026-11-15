@@ -8,24 +8,31 @@ use crate::projection::group_views as group_exec_views;
 use crate::runtime::copy;
 use crate::state::{unavailable, Handlers, InOut, Out, Store, Work};
 use echod_types::{Call, Dispatch, DispatchV, Message, Output};
-use echod_abstract_spec::state::Config;
+use echod_abstract_spec::rover::Config;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::pset_seq;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::spec_handler;
+use echod_abstract_spec::handler::spec_handler;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::rover::{
-    empty_store, lemma_losses_map, remove_at, spec_derived, spec_due_result, spec_idle,
-    spec_internal_result, spec_keep, spec_lose, spec_losses, spec_over_callbacks,
-    spec_over_listeners, spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue,
-    spec_ready, spec_request_outcome, spec_run, spec_run_timeout, spec_send, spec_service,
-    spec_shed,
-};
-use echod_abstract_spec::rover::{Pid, Proc as SpecProc, Spec as SpecModel};
+use echod_abstract_spec::rover::{empty_store};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::{lemma_losses_map};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{remove_at, spec_derived, spec_due_result, spec_idle, spec_internal_result, spec_keep, spec_lose, spec_losses, spec_over_callbacks, spec_over_listeners, spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout, spec_send, spec_service, spec_shed};
+use echod_abstract_spec::rover::{Pid, Spec as SpecModel};
+use echod_abstract_spec::state::{Proc as SpecProc};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::spec_body;
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::spec_body;
 
 verus! {
 #[derive(Clone, PartialEq, Eq, Debug)]

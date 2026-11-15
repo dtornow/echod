@@ -34,29 +34,25 @@ use echod_types::{MAX_TIME, MAX_VERSION};
 use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    DocumentBodyV, Held, ObjV, PromV, spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle,
-    spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map,
-    spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj,
-    spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get,
-    spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record,
-    spec_schedule_key, spec_tag_is, spec_tag_key, spec_targeted, spec_task_record, spec_timer,
-    spec_with_workflow, TkV,
-};
+use echod_concrete_spec::state::{DocumentBodyV, Held, ObjV, PromV, TkV};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{spec_sat_add, spec_starts};
+use echod_concrete_spec::handler::{spec_awaitable, spec_delay as c_delay, spec_fulfill_task, spec_handle, spec_held, spec_key, spec_new_obj, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map, spec_parse_acc as c_parse_acc, spec_parse_u64 as c_parse_u64, spec_project_obj, spec_project_prom, spec_promise_create as c_promise_create, spec_promise_get as c_promise_get, spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_record, spec_schedule_key, spec_tag_is, spec_tag_key, spec_targeted, spec_task_record, spec_timer, spec_with_workflow};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_has_key, spec_has_target, spec_is_external_tag, spec_is_global, spec_is_timer, spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_settle, spec_task_record as a_task_record, tag_delay, tag_external, tag_global, tag_scope, tag_target, tag_timer, tag_true,
-};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_handler, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, SpecHeld,
-};
+use echod_concrete_spec::handler::{spec_sat_add, spec_starts};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_delay as a_delay, spec_external, spec_first, spec_fulfill, spec_has_key, spec_has_target, spec_is_external_tag, spec_is_global, spec_is_timer, spec_new_object, spec_out, spec_parse_acc as a_parse_acc, spec_parse_u64 as a_parse_u64, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_settle, spec_task_record as a_task_record, tag_delay, tag_external, tag_global, tag_scope, tag_target, tag_timer, tag_true};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_handler, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle};
+use echod_abstract_spec::state::{SpecHeld};
 #[cfg(verus_keep_ghost)]
 use echod_types::common::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
+use echod_abstract_spec::state::{OutV, PromiseV, ScheduleV, StoreV as AStore, TaskV};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{sat_add};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
@@ -708,24 +704,24 @@ pub(crate) proof fn lemma_others_same(key: Seq<char>, s: AStore)
 /// The chosen string of some characters is the string of those characters.
 pub(crate) proof fn lemma_string_view(chars: Seq<char>)
     ensures
-        echod_concrete_spec::rover::spec_string(chars)@ == chars,
-        echod_abstract_spec::state::spec_string(chars)@ == chars,
-        echod_concrete_spec::rover::spec_string(chars) == echod_abstract_spec::state::spec_string(chars),
+        echod_concrete_spec::handler::spec_string(chars)@ == chars,
+        echod_abstract_spec::handler::spec_string(chars)@ == chars,
+        echod_concrete_spec::handler::spec_string(chars) == echod_abstract_spec::handler::spec_string(chars),
 {
-    reveal(echod_concrete_spec::rover::spec_string);
-    reveal(echod_abstract_spec::state::spec_string);
+    reveal(echod_concrete_spec::handler::spec_string);
+    reveal(echod_abstract_spec::handler::spec_string);
     axiom_string_realised(chars);
-    axiom_string_ext(echod_concrete_spec::rover::spec_string(chars), echod_abstract_spec::state::spec_string(chars));
+    axiom_string_ext(echod_concrete_spec::handler::spec_string(chars), echod_abstract_spec::handler::spec_string(chars));
 }
 
 /// A string is the chosen string of its characters.
 pub(crate) proof fn lemma_string_of(s: String)
     ensures
-        echod_concrete_spec::rover::spec_string(s@) == s,
-        echod_abstract_spec::state::spec_string(s@) == s,
+        echod_concrete_spec::handler::spec_string(s@) == s,
+        echod_abstract_spec::handler::spec_string(s@) == s,
 {
     lemma_string_view(s@);
-    axiom_string_ext(echod_concrete_spec::rover::spec_string(s@), s);
+    axiom_string_ext(echod_concrete_spec::handler::spec_string(s@), s);
 }
 
 pub(crate) proof fn lemma_task_record(id: String, c: TkV, a: TaskV)
@@ -1457,28 +1453,29 @@ use super::interpretation::{doc_rel, finite_store, others_kept, request_agrees};
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::{Config as ConcreteConfig, Spec as CModel};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::rover::{
-    Message as CMessage, NodeV, Pid as CPid, spec_string, StoreV as CStore,
-};
+use echod_concrete_spec::state::{Message as CMessage};
+use echod_concrete_spec::state::{NodeV, StoreV as CStore};
+use echod_concrete_spec::rover::{Pid as CPid};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_cached, spec_empty_body, spec_encode_body,
-    spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due,
-};
+use echod_concrete_spec::handler::{spec_string};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    Etag, spec_etag, spec_etag_chars, spec_find, spec_fnv, StoreReq, StoreRes,
-};
+use echod_concrete_spec::state::{CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_handler,
-};
+use echod_concrete_spec::handler::{spec_cached, spec_empty_body, spec_encode_body, spec_handle, spec_key, spec_occurrence, spec_origin_key, spec_owns, spec_read, spec_run_due};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_create_if_absent,
-};
+use echod_concrete_spec::state::{Etag, StoreReq, StoreRes};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::rover::{Pid as APid, spec_run_timeout};
+use echod_concrete_spec::handler::{spec_etag, spec_etag_chars, spec_find, spec_fnv};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_handler};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_create_if_absent};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{Pid as APid};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_run_timeout};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Message as AMessage, Dispatch, Output};
 #[cfg(verus_keep_ghost)]
@@ -1875,12 +1872,12 @@ pub(crate) open spec fn request_of(flight: FlightV) -> StoreReq {
         match flight.etag {
             Some(chars) => StoreReq::PutIfMatch {
                 key: spec_string(flight.key),
-                body: echod_concrete_spec::rover::spec_bytes(flight.decided.unwrap()),
+                body: echod_concrete_spec::handler::spec_bytes(flight.decided.unwrap()),
                 etag: Etag(spec_string(chars)),
             },
             None => StoreReq::PutIfNoneMatch {
                 key: spec_string(flight.key),
-                body: echod_concrete_spec::rover::spec_bytes(flight.decided.unwrap()),
+                body: echod_concrete_spec::handler::spec_bytes(flight.decided.unwrap()),
             },
         }
     }
@@ -2196,36 +2193,22 @@ use super::interpretation::{
     origin_rel, promise_rel, request_agrees, schedule_rel, slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    DocumentBodyV, Held, ObjV, PromV, spec_acquire as c_acquire, spec_add_callbacks,
-    spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited,
-    spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check,
-    spec_fulfill_task, spec_handle, spec_heartbeat as c_heartbeat, spec_held, spec_key,
-    spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key,
-    spec_workflow_map, spec_project_obj, spec_promise_create as c_promise_create,
-    spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle,
-    spec_register_callback as c_register_callback, spec_register_listener as c_register_listener,
-    spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete,
-    spec_schedule_get as c_schedule_get, spec_schedule_key, spec_seen, spec_suspend as c_suspend,
-    spec_targeted, spec_task_acquire as c_task_acquire, spec_task_continue as c_task_continue,
-    spec_task_create as c_task_create, spec_task_fulfill as c_task_fulfill,
-    spec_task_get as c_task_get, spec_task_halt as c_task_halt, spec_task_release as c_task_release,
-    spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_workflow, TkV,
-};
+use echod_concrete_spec::state::{DocumentBodyV, Held, ObjV, PromV, TkV};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_acquire as a_acquire, spec_claim_res, spec_external, spec_fence_res, spec_fulfill, spec_has_target, spec_is_timer, spec_out, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_task_get_res, spec_task_record as a_task_record, spec_unlease as a_unlease,
-};
+use echod_concrete_spec::handler::{spec_acquire as c_acquire, spec_add_callbacks, spec_any_settled as c_any_settled, spec_awaitable, spec_bad_suspend, spec_distinct_awaited, spec_extend as c_extend, spec_fence as c_fence, spec_fence_check as c_fence_check, spec_fulfill_task, spec_handle, spec_heartbeat as c_heartbeat, spec_held, spec_key, spec_missing_awaited, spec_new_obj, spec_one_origin, spec_opened, spec_origin_key, spec_workflow_map, spec_project_obj, spec_promise_create as c_promise_create, spec_promise_res as c_promise_res, spec_promise_settle as c_promise_settle, spec_register_callback as c_register_callback, spec_register_listener as c_register_listener, spec_schedule_create as c_schedule_create, spec_schedule_delete as c_schedule_delete, spec_schedule_get as c_schedule_get, spec_schedule_key, spec_seen, spec_suspend as c_suspend, spec_targeted, spec_task_acquire as c_task_acquire, spec_task_continue as c_task_continue, spec_task_create as c_task_create, spec_task_fulfill as c_task_fulfill, spec_task_get as c_task_get, spec_task_halt as c_task_halt, spec_task_release as c_task_release, spec_timer, spec_unawaitable, spec_unlease as c_unlease, spec_with_workflow};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_any_settled as a_any_settled, spec_awaited, spec_callbacks as a_callbacks, spec_extend as a_extend, spec_fence as a_fence, spec_handler, spec_heartbeat as a_heartbeat, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, spec_refs_one_origin, spec_register_callback as a_register_callback, spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create, spec_suspend as a_suspend, spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue, spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_halt as a_task_halt, spec_task_release as a_task_release, spec_wrap_fence, SpecHeld,
-};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_acquire as a_acquire, spec_claim_res, spec_external, spec_fence_res, spec_fulfill, spec_has_target, spec_is_timer, spec_out, spec_project_promise, spec_project_task, spec_promise_record, spec_promise_res as a_promise_res, spec_schedule_res, spec_schedule_value, spec_settle, spec_status_res, spec_task_get_res, spec_task_record as a_task_record, spec_unlease as a_unlease};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_any_settled as a_any_settled, spec_awaited, spec_callbacks as a_callbacks, spec_extend as a_extend, spec_fence as a_fence, spec_handler, spec_heartbeat as a_heartbeat, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, spec_refs_one_origin, spec_register_callback as a_register_callback, spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create, spec_suspend as a_suspend, spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue, spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_halt as a_task_halt, spec_task_release as a_task_release, spec_wrap_fence};
+use echod_abstract_spec::state::{SpecHeld};
 #[cfg(verus_keep_ghost)]
 use echod_types::common::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
-};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{all_in_origin, distinct, sat_add};
+use echod_abstract_spec::state::{OutV, PromiseV, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
@@ -2465,7 +2448,7 @@ pub(crate) proof fn lemma_register_callback_agrees(
             } else {
                 lemma_record(awaited, ao.promise, p);
                 let res = a_promise_res(200, Some(spec_promise_record(awaited, p)));
-                assert(c_promise_res(200, Some(echod_concrete_spec::state::spec_record(awaited, ao.promise))) == res);
+                assert(c_promise_res(200, Some(echod_concrete_spec::handler::spec_record(awaited, ao.promise))) == res);
                 if ao.promise.state == PromiseState::Pending && wo.promise.state == PromiseState::Pending {
                     assert(ao == map[awaited@]);
                     assert(p == p0);
@@ -2821,7 +2804,7 @@ pub(crate) proof fn lemma_task_create_agrees(
             let live = action.timeout_at > now;
             let p_a = PromiseV {
                 state: if live { PromiseState::Pending } else { PromiseState::RejectedTimedout },
-                value: echod_abstract_spec::state::spec_empty_value(),
+                value: echod_abstract_spec::handler::spec_empty_value(),
                 param: action.param,
                 timeout_at: action.timeout_at,
                 created_at: if live { now } else { action.timeout_at },
@@ -3143,7 +3126,7 @@ pub(crate) proof fn lemma_task_fulfill_agrees(
                 assert(n.promises[x] == q);
                 lemma_record(req.id, promise, q);
                 assert(outs == spec_out(a_promise_res(200, Some(spec_promise_record(req.id, q))), n));
-                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(echod_concrete_spec::state::spec_record(req.id, promise))));
+                assert(c_task_fulfill(doc, req.id, req.version, action, now).1 == c_promise_res(200, Some(echod_concrete_spec::handler::spec_record(req.id, promise))));
                 lemma_held_update(key, o, map, s, x, obj2, q, u);
                 assert(c_task_fulfill(doc, req.id, req.version, action, now).0 == DocumentBodyV::Workflow(map.insert(x, obj2)));
             },
@@ -3462,7 +3445,7 @@ pub(crate) proof fn lemma_extend(
                 Some(n) => n,
                 None => 0,
             };
-            let at = echod_concrete_spec::state::spec_sat_add(now, ttl);
+            let at = echod_concrete_spec::handler::spec_sat_add(now, ttl);
             let t2 = TkV { lease_timeout_at: Some(at), ..t };
             let obj2 = ObjV { task: Some(t2), ..obj };
             let t_a = a->Ok_0;
@@ -4363,41 +4346,41 @@ use super::interpretation::{
     slot_rel, task_rel,
 };
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::rover::{spec_string as c_string};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    lemma_min_key_present as c_lemma_min_key, DocumentBodyV, NoteV, ObjV, PendingV, PromV, spec_due_id,
-    spec_min_key as c_min_key, spec_new_obj, spec_obj_due, spec_occurrence, spec_offer_at,
-    spec_opened, spec_origin_key, spec_workflow_map, spec_project_obj, spec_record, spec_resume,
-    spec_run_due, spec_schedule_key, spec_sorted as c_sorted, spec_step_object, spec_targeted,
-    spec_timer, spec_unlease as c_unlease, TkV,
-};
+use echod_concrete_spec::handler::{spec_string as c_string};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{spec_sat_add, spec_starts};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_proof::{lemma_min_key_present as c_lemma_min_key};
+use echod_concrete_spec::state::{DocumentBodyV, NoteV, ObjV, PendingV, PromV, TkV};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{spec_due_id, spec_min_key as c_min_key, spec_new_obj, spec_obj_due, spec_occurrence, spec_offer_at, spec_opened, spec_origin_key, spec_workflow_map, spec_project_obj, spec_record, spec_resume, spec_run_due, spec_schedule_key, spec_sorted as c_sorted, spec_step_object, spec_targeted, spec_timer, spec_unlease as c_unlease};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{spec_sat_add, spec_starts};
 #[cfg(verus_keep_ghost)]
 use super::relation::{
     agreement, as_item, due_agrees, dues_agree, items, note_sends, occurrence_agrees,
     occurrences_agree,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_has_target, spec_is_timer, spec_lease_at, spec_new_object, spec_project_promise, spec_project_task, spec_promise_record, spec_string as a_string, spec_unlease as a_unlease,
-};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_lease, spec_listener, spec_process_work, spec_retry, spec_schedule_step,
-};
+use echod_abstract_spec::handler::{spec_has_target, spec_is_timer, spec_lease_at, spec_new_object, spec_project_promise, spec_project_task, spec_promise_record, spec_string as a_string, spec_unlease as a_unlease};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::rover::{
-    Pid as APid, spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners,
-    spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout, Proc,
-};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    InOutV, InternalV, lemma_lift_dispatch, lemma_min_key as a_lemma_min_key,
-    lift_dispatch, PromiseV, sat_add, ScheduleV, spec_keys, spec_min_key as a_min_key,
-    spec_sorted as a_sorted, StoreV as AStore, TaskV,
-};
+use echod_abstract_spec::handler::{spec_callback, spec_callback_apply, spec_create_if_absent, spec_did, spec_lease, spec_listener, spec_process_work, spec_retry, spec_schedule_step};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{Pid as APid};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_derived, spec_due_result, spec_keep, spec_over_callbacks, spec_over_listeners, spec_over_promises, spec_over_schedules, spec_over_tasks, spec_queue, spec_run_timeout};
+use echod_abstract_spec::state::{Proc};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::state::{InOutV, InternalV, PromiseV, ScheduleV, StoreV as AStore, TaskV};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::{lemma_lift_dispatch, lemma_min_key as a_lemma_min_key};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{lift_dispatch, sat_add, spec_keys, spec_min_key as a_min_key, spec_sorted as a_sorted};
 #[cfg(verus_keep_ghost)]
 use echod_types::{Message as AMessage, Dispatch, DispatchV, Output};
 #[cfg(verus_keep_ghost)]
@@ -4418,7 +4401,7 @@ verus! {
 broadcast use
     vstd::seq::group_seq_lemmas,
     vstd::set::group_set_lemmas,
-    echod_abstract_spec::state::group_views;
+    echod_abstract_spec::property_proof::group_views;
 
 /// One abstract step result.
 #[cfg(verus_keep_ghost)]
@@ -6303,40 +6286,35 @@ use super::interpretation::{doc_rel, finite_store, lemma_others_same, others_kep
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::{Config as ConcreteConfig, Proc as CProc, Spec as CModel};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::rover::{
-    EntryV, Message as CMessage, NodeV, Pid as CPid, spec_bytes, spec_get,
-    spec_initial_node as initial_node,
-    spec_node as spec_node_step, spec_nodes, spec_notes, spec_notify, spec_one, spec_reply,
-    spec_store, spec_string, spec_world, StoreV as CStore,
-};
+use echod_concrete_spec::state::{EntryV, NodeV, StoreV as CStore};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    axiom_decode_encode_body, CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV, spec_begin, spec_cached,
-    spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key,
-    spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep,
-    spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request,
-    spec_run_due, spec_store_reply, spec_timeout, spec_unavailable,
-};
+use echod_concrete_spec::rover::{Pid as CPid, spec_initial_node as initial_node, spec_nodes, spec_world};
+use echod_concrete_spec::state::{Message as CMessage};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    Etag, spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put, StoreReq, StoreRes,
-};
+use echod_concrete_spec::handler::{spec_bytes, spec_get, spec_node as spec_node_step, spec_notes, spec_notify, spec_one, spec_reply, spec_store, spec_string};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{axiom_decode_encode_body, spec_begin, spec_cached, spec_cached_from, spec_commit, spec_decide, spec_earliest_from, spec_earliest_key, spec_empty_body, spec_encode_body, spec_flight, spec_forget, spec_handle, spec_body_is_empty, spec_keep, spec_key, spec_occurrence, spec_owns, spec_pure, spec_read, spec_remember, spec_request, spec_run_due, spec_store_reply, spec_timeout, spec_unavailable};
+use echod_concrete_spec::state::{CachedV, DocumentBodyV, FlightV, JobV, NoteV, PendingV};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::state::{Etag, StoreReq, StoreRes};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{spec_apply, spec_etag, spec_etag_chars, spec_find, spec_put};
 #[cfg(verus_keep_ghost)]
 use super::relation::*;
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_handler,
-};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::state::{
-    spec_body, spec_create_if_absent, spec_process_work,
-};
+use echod_abstract_spec::handler::{spec_handler};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::rover::{
-    empty_store, lemma_empty_heartbeat_is_first, lemma_shed_is_last, remove_at, spec_idle,
-    spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout,
-    spec_send, spec_service, spec_shed,
-};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_body, spec_create_if_absent, spec_process_work};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::rover::{empty_store};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::{lemma_empty_heartbeat_is_first, lemma_shed_is_last};
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{remove_at, spec_idle, spec_internal_result, spec_queue, spec_ready, spec_request_outcome, spec_run, spec_run_timeout, spec_send, spec_service, spec_shed};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::rover::Pid as APid;
 #[cfg(verus_keep_ghost)]
@@ -6897,7 +6875,7 @@ pub(crate) proof fn lemma_service_step(
 // ---------------------------------------------------------------------------
 
 /// `spec_find` from `j` finds the first entry at or after `j` with the key.
-pub(crate) proof fn lemma_find_from(entries: Seq<echod_concrete_spec::rover::EntryV>, key: Seq<char>, j: int)
+pub(crate) proof fn lemma_find_from(entries: Seq<echod_concrete_spec::state::EntryV>, key: Seq<char>, j: int)
     requires
         0 <= j <= entries.len(),
     ensures
@@ -6916,7 +6894,7 @@ pub(crate) proof fn lemma_find_from(entries: Seq<echod_concrete_spec::rover::Ent
 }
 
 /// The characterisation of a hit, in both directions.
-pub(crate) proof fn lemma_find_is(entries: Seq<echod_concrete_spec::rover::EntryV>, key: Seq<char>, i: int)
+pub(crate) proof fn lemma_find_is(entries: Seq<echod_concrete_spec::state::EntryV>, key: Seq<char>, i: int)
     requires
         0 <= i < entries.len(),
         entries[i].key == key,
@@ -6939,7 +6917,7 @@ pub(crate) proof fn lemma_find_is(entries: Seq<echod_concrete_spec::rover::Entry
     }
 }
 
-pub(crate) proof fn lemma_find_absent(entries: Seq<echod_concrete_spec::rover::EntryV>, key: Seq<char>)
+pub(crate) proof fn lemma_find_absent(entries: Seq<echod_concrete_spec::state::EntryV>, key: Seq<char>)
     requires
         forall|k: int| 0 <= k < entries.len() ==> #[trigger] entries[k].key != key,
     ensures
@@ -7266,8 +7244,8 @@ pub(crate) proof fn lemma_keep(
 /// Inserting an absent key: the new key is found with its body, other keys
 /// read as before, and keys stay distinct.
 pub(crate) proof fn lemma_insert_at(
-    entries: Seq<echod_concrete_spec::rover::EntryV>,
-    entry: echod_concrete_spec::rover::EntryV,
+    entries: Seq<echod_concrete_spec::state::EntryV>,
+    entry: echod_concrete_spec::state::EntryV,
     i: int,
 )
     requires
@@ -7277,23 +7255,23 @@ pub(crate) proof fn lemma_insert_at(
             0 <= j < k < entries.len() ==> #[trigger] entries[j].key != #[trigger] entries[k].key,
     ensures
         ({
-            let next = echod_concrete_spec::state::spec_insert_at(entries, entry, i);
+            let next = echod_concrete_spec::handler::spec_insert_at(entries, entry, i);
             &&& forall|j: int, k: int| 0 <= j < k < next.len() ==> #[trigger] next[j].key != #[trigger] next[k].key
-            &&& physical(echod_concrete_spec::rover::StoreV { entries: next, appendable: false, seen: Seq::empty() }, entry.key)
+            &&& physical(echod_concrete_spec::state::StoreV { entries: next, appendable: false, seen: Seq::empty() }, entry.key)
                 == Some(entry.body)
             &&& forall|other: Seq<char>| other != entry.key ==> #[trigger] physical(
-                echod_concrete_spec::rover::StoreV { entries: next, appendable: false, seen: Seq::empty() },
+                echod_concrete_spec::state::StoreV { entries: next, appendable: false, seen: Seq::empty() },
                 other,
             ) == physical(
-                echod_concrete_spec::rover::StoreV { entries, appendable: false, seen: Seq::empty() },
+                echod_concrete_spec::state::StoreV { entries, appendable: false, seen: Seq::empty() },
                 other,
             )
         }),
     decreases entries.len() - i,
 {
-    let next = echod_concrete_spec::state::spec_insert_at(entries, entry, i);
-    let after = echod_concrete_spec::rover::StoreV { entries: next, appendable: false, seen: Seq::empty() };
-    let before_store = echod_concrete_spec::rover::StoreV { entries, appendable: false, seen: Seq::empty() };
+    let next = echod_concrete_spec::handler::spec_insert_at(entries, entry, i);
+    let after = echod_concrete_spec::state::StoreV { entries: next, appendable: false, seen: Seq::empty() };
+    let before_store = echod_concrete_spec::state::StoreV { entries, appendable: false, seen: Seq::empty() };
     if i >= entries.len() {
         assert(next == entries.push(entry));
         assert forall|j: int, k: int| 0 <= j < k < next.len() implies #[trigger] next[j].key
@@ -7327,7 +7305,7 @@ pub(crate) proof fn lemma_insert_at(
                 },
             }
         };
-    } else if echod_concrete_spec::state::spec_before(entry.key, entries[i].key) {
+    } else if echod_concrete_spec::handler::spec_before(entry.key, entries[i].key) {
         assert(next == entries.take(i).push(entry) + entries.skip(i));
         assert(next.len() == entries.len() + 1);
         assert forall|k: int| 0 <= k < next.len() implies #[trigger] next[k] == (if k < i {
@@ -7382,15 +7360,15 @@ pub(crate) proof fn lemma_insert_at(
 /// `spec_put`: the key reads as the new body, other keys as before, and keys
 /// stay distinct.
 pub(crate) proof fn lemma_put(
-    store: echod_concrete_spec::rover::StoreV,
-    entry: echod_concrete_spec::rover::EntryV,
+    store: echod_concrete_spec::state::StoreV,
+    entry: echod_concrete_spec::state::EntryV,
 )
     requires
         entries_distinct(store),
     ensures
         ({
-            let next = echod_concrete_spec::rover::StoreV {
-                entries: echod_concrete_spec::state::spec_put(store.entries, entry),
+            let next = echod_concrete_spec::state::StoreV {
+                entries: echod_concrete_spec::handler::spec_put(store.entries, entry),
                 ..store
             };
             &&& entries_distinct(next)
@@ -7400,8 +7378,8 @@ pub(crate) proof fn lemma_put(
         }),
 {
     let entries = store.entries;
-    let next_entries = echod_concrete_spec::state::spec_put(entries, entry);
-    let next = echod_concrete_spec::rover::StoreV { entries: next_entries, ..store };
+    let next_entries = echod_concrete_spec::handler::spec_put(entries, entry);
+    let next = echod_concrete_spec::state::StoreV { entries: next_entries, ..store };
     lemma_find_from(entries, entry.key, 0);
     match spec_find(entries, entry.key, 0) {
         Some(i) => {
@@ -7427,12 +7405,12 @@ pub(crate) proof fn lemma_put(
         },
         None => {
             lemma_insert_at(entries, entry, 0);
-            let bare_next = echod_concrete_spec::rover::StoreV {
+            let bare_next = echod_concrete_spec::state::StoreV {
                 entries: next_entries,
                 appendable: false,
                 seen: Seq::empty(),
             };
-            let bare = echod_concrete_spec::rover::StoreV { entries, appendable: false, seen: Seq::empty() };
+            let bare = echod_concrete_spec::state::StoreV { entries, appendable: false, seen: Seq::empty() };
             assert(physical(bare_next, entry.key) == physical(next, entry.key));
             assert forall|other: Seq<char>| other != entry.key implies #[trigger] physical(next, other)
                 == physical(store, other) by {
@@ -7549,7 +7527,7 @@ pub(crate) proof fn lemma_remove_at<A>(s: Seq<A>, i: int)
     requires
         0 <= i < s.len(),
     ensures
-        echod_abstract_spec::rover::remove_at(s, i) =~= s.remove(i),
+        echod_abstract_spec::handler::remove_at(s, i) =~= s.remove(i),
 {
 }
 
@@ -7567,7 +7545,7 @@ pub(crate) proof fn lemma_empty_body_rel(key: Seq<char>, doc: DocumentBodyV, s: 
 {
     match doc {
         DocumentBodyV::Workflow(map) => {
-            assert(!echod_concrete_spec::state::spec_starts(key, super::interpretation::schedule_prefix()));
+            assert(!echod_concrete_spec::handler::spec_starts(key, super::interpretation::schedule_prefix()));
             assert(map.dom().finite());
             assert(map.dom().len() == 0);
             assert(map.dom() =~= Set::<Seq<char>>::empty());
@@ -7576,7 +7554,7 @@ pub(crate) proof fn lemma_empty_body_rel(key: Seq<char>, doc: DocumentBodyV, s: 
         },
         DocumentBodyV::Schedule(slot) => {
             assert(slot is None);
-            if echod_concrete_spec::state::spec_starts(key, super::interpretation::schedule_prefix()) {
+            if echod_concrete_spec::handler::spec_starts(key, super::interpretation::schedule_prefix()) {
                 assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
             } else {
                 let map = Map::<Seq<char>, echod_concrete_spec::state::ObjV>::empty();
@@ -7608,14 +7586,14 @@ pub(crate) proof fn lemma_string(chars: Seq<char>)
     ensures
         spec_string(chars)@ == chars,
 {
-    echod_concrete_spec::rover::lemma_string_realised(chars);
+    echod_concrete_spec::property_proof::lemma_string_realised(chars);
 }
 
 pub(crate) proof fn lemma_bytes(bytes: Seq<u8>)
     ensures
-        echod_concrete_spec::rover::spec_bytes(bytes)@ == bytes,
+        echod_concrete_spec::handler::spec_bytes(bytes)@ == bytes,
 {
-    echod_concrete_spec::rover::lemma_bytes_realised(bytes);
+    echod_concrete_spec::property_proof::lemma_bytes_realised(bytes);
 }
 
 /// `spec_notes` sends each note's output to the outside.
@@ -7688,7 +7666,7 @@ pub(crate) proof fn lemma_empty_is_empty(key: Seq<char>)
     ensures
         spec_body_is_empty(spec_empty_body(key)),
 {
-    if echod_concrete_spec::state::spec_starts(key, seq!['s', '/']) {
+    if echod_concrete_spec::handler::spec_starts(key, seq!['s', '/']) {
     } else {
         let map = Map::<Seq<char>, echod_concrete_spec::state::ObjV>::empty();
         assert(map.dom() =~= Set::<Seq<char>>::empty());
@@ -7857,7 +7835,7 @@ pub(crate) proof fn lemma_queue_offers(config: AbstractConfig, state: AProc, now
 
 /// The second half of `spec_run_timeout`, named so the sum above reads.
 pub(crate) open spec fn derived(config: AbstractConfig, state: AProc, now: Time) -> Seq<StepResultV<AProc, APid, AMessage>> {
-    echod_abstract_spec::rover::spec_derived(config, state, now)
+    echod_abstract_spec::handler::spec_derived(config, state, now)
 }
 
 /// A timeout result at `j` is an response of the service's timeout step.
@@ -7895,7 +7873,7 @@ pub(crate) proof fn lemma_earliest_from(
     } else if !spec_owns(node, docs[i].key) {
         lemma_earliest_from(node, docs, i + 1, now, best);
     } else {
-        match echod_concrete_spec::state::spec_earliest_in(spec_read(docs[i].key, docs[i].body), now) {
+        match echod_concrete_spec::handler::spec_earliest_in(spec_read(docs[i].key, docs[i].body), now) {
             Some(at) => {
                 let better = match best {
                     None => true,
@@ -8574,7 +8552,7 @@ pub(crate) open spec fn begin_keyed(key: Seq<char>, job: JobV, caller: Option<(S
     match job {
         JobV::External(request) => caller is Some && spec_key(request) == Some(key),
         JobV::Due => caller is None,
-        JobV::Occurrence(pending) => caller is None && key == echod_concrete_spec::state::spec_origin_key(
+        JobV::Occurrence(pending) => caller is None && key == echod_concrete_spec::handler::spec_origin_key(
             origin(pending.promise),
         ),
     }
@@ -9178,7 +9156,7 @@ pub(crate) proof fn lemma_send_is_reply(network: Seq<Envelope<APid, AMessage>>, 
     assert(Seq::<echod_types::DispatchV>::empty().map_values(
         |dispatch: echod_types::DispatchV| (
             APid::Outside,
-            AMessage::Output(Output::Dispatch(echod_abstract_spec::state::lift_dispatch(dispatch))),
+            AMessage::Output(Output::Dispatch(echod_abstract_spec::handler::lift_dispatch(dispatch))),
         ),
     ) =~= Seq::<(APid, AMessage)>::empty());
     assert(send =~= seq![(APid::Outside, AMessage::Output(output))]);
@@ -9298,7 +9276,7 @@ pub(crate) proof fn lemma_request_served(
     let served = spec_run(config, state, request, at);
     assert(served.len() == 1);
     assert(served[0] == spec_request_outcome(state, request, outs[0]));
-    assert(outcomes == served + echod_abstract_spec::rover::spec_losses(state, request, outs) + seq![spec_shed(state, request)]);
+    assert(outcomes == served + echod_abstract_spec::handler::spec_losses(state, request, outs) + seq![spec_shed(state, request)]);
     assert(outcomes[0] == served[0]);
     let aa = lemma_service_step(config, ab, at, event, 0);
     let step_result = outcomes[0];
@@ -9468,7 +9446,7 @@ pub(crate) proof fn lemma_occurrence_begin(
             let node0 = node_at(cb, i);
             let p = node0.pending[0];
             let node1 = NodeV { pending: node0.pending.skip(1), ..node0 };
-            let key = echod_concrete_spec::state::spec_origin_key(origin(p.promise));
+            let key = echod_concrete_spec::handler::spec_origin_key(origin(p.promise));
             &&& spec_owns(node1, key)
             &&& (node2, send) == spec_begin(node1, key, JobV::Occurrence(p), at, None)
         }),
@@ -9483,7 +9461,7 @@ pub(crate) proof fn lemma_occurrence_begin(
     let pending = node0.pending;
     let p = pending[0];
     let node1 = NodeV { pending: pending.skip(1), ..node0 };
-    let key = echod_concrete_spec::state::spec_origin_key(origin(p.promise));
+    let key = echod_concrete_spec::handler::spec_origin_key(origin(p.promise));
     let job = JobV::Occurrence(p);
     let caller = None::<(Seq<char>, u64)>;
     let state = astate(ab);
@@ -10244,7 +10222,7 @@ pub(crate) proof fn lemma_store_answers(fleet: ConcreteConfig, world: State<CMod
                 assert(store.entries[idx].body == c.body);
                 assert(spec_etag(c.body) == Etag(spec_string(chars)));
                 assert(spec_etag(store.entries[idx].body) == Etag(spec_string(chars)));
-                let entry = EntryV { key, body: decided, version: echod_concrete_spec::state::spec_bump(store.entries[idx].version) };
+                let entry = EntryV { key, body: decided, version: echod_concrete_spec::handler::spec_bump(store.entries[idx].version) };
                 let (next, response) = spec_apply(store, request_of(flight));
                 assert(next == (CStore { entries: spec_put(store.entries, entry), ..store }));
                 assert(response == StoreRes::PutIfMatch { result: Ok(spec_etag(decided)) });
@@ -10506,8 +10484,8 @@ pub(crate) proof fn lemma_node(
                     if w <= at as nat && node.flight is None && node.next_op < u64::MAX {
                         let (next, send) = spec_timeout(node, at);
                         let node2 = NodeV {
-                            logic: echod_concrete_spec::rover::LogicV { clock: at as nat, last_wake: None, ..node.logic },
-                            wake: echod_concrete_spec::state::spec_wake(next),
+                            logic: echod_concrete_spec::state::LogicV { clock: at as nat, last_wake: None, ..node.logic },
+                            wake: echod_concrete_spec::handler::spec_wake(next),
                             ..next
                         };
                         assert(results == spec_one(CProc::Node(node2), send));
@@ -10546,9 +10524,9 @@ pub(crate) proof fn lemma_node(
             } else {
                 let (next, send) = spec_request(node, at, request);
                 let node2 = NodeV {
-                    logic: echod_concrete_spec::rover::spec_clock(node.logic, at),
+                    logic: echod_concrete_spec::handler::spec_clock(node.logic, at),
                     next_request: (node.next_request + 1) as u64,
-                    wake: echod_concrete_spec::state::spec_wake(next),
+                    wake: echod_concrete_spec::handler::spec_wake(next),
                     ..next
                 };
                 assert(results == spec_one(CProc::Node(node2), send));
@@ -10570,8 +10548,8 @@ pub(crate) proof fn lemma_node(
             } else {
                 let (next, send) = spec_store_reply(node, op, response);
                 let node2 = NodeV {
-                    logic: echod_concrete_spec::rover::spec_clock(node.logic, at),
-                    wake: echod_concrete_spec::state::spec_wake(next),
+                    logic: echod_concrete_spec::handler::spec_clock(node.logic, at),
+                    wake: echod_concrete_spec::handler::spec_wake(next),
                     ..next
                 };
                 assert(results == spec_one(CProc::Node(node2), send));
@@ -10585,7 +10563,7 @@ pub(crate) proof fn lemma_node(
         },
         ProcessEvent::Receive { sender: CPid::Outside, message: CMessage::Stop } => {
             let node2 = NodeV {
-                logic: echod_concrete_spec::rover::LogicV { clock: at as nat, loops: false, stopping: true, ..node.logic },
+                logic: echod_concrete_spec::state::LogicV { clock: at as nat, loops: false, stopping: true, ..node.logic },
                 ..node
             };
             assert(results == spec_one(CProc::Node(node2), Seq::empty()));
@@ -10891,7 +10869,7 @@ pub(crate) proof fn lemma_empty_reads(key: Seq<char>)
         doc_rel(key, spec_empty_body(key), empty_store()),
 {
     let s = empty_store();
-    if echod_concrete_spec::state::spec_starts(key, seq!['s', '/']) {
+    if echod_concrete_spec::handler::spec_starts(key, seq!['s', '/']) {
         assert(spec_empty_body(key) == DocumentBodyV::Schedule(None::<echod_types::Schedule>));
         assert(!s.schedules.contains_key(key.skip(2)));
     } else {
@@ -10899,7 +10877,7 @@ pub(crate) proof fn lemma_empty_reads(key: Seq<char>)
         assert(spec_empty_body(key) == DocumentBodyV::Workflow(map));
         assert(map.dom() =~= Set::<Seq<char>>::empty());
         assert(Set::<Seq<char>>::empty().len() == 0);
-        if echod_concrete_spec::state::spec_starts(key, super::interpretation::origin_prefix()) {
+        if echod_concrete_spec::handler::spec_starts(key, super::interpretation::origin_prefix()) {
             let o = key.skip(2);
             assert forall|id: Seq<char>| #![trigger origin(id)] origin(id) == o implies {
                 &&& s.promises.contains_key(id) == map.contains_key(id)
@@ -11041,7 +11019,7 @@ pub(crate) proof fn lemma_timeout(
     if node0.pending.len() > 0 {
         let p = node0.pending[0];
         let node1 = NodeV { pending: node0.pending.skip(1), ..node0 };
-        let key = echod_concrete_spec::state::spec_origin_key(origin(p.promise));
+        let key = echod_concrete_spec::handler::spec_origin_key(origin(p.promise));
         if !spec_owns(node1, key) {
             assert(node2 == node1);
             assert(send =~= Seq::<(CPid, CMessage)>::empty());
@@ -11132,22 +11110,26 @@ use vstd::prelude::*;
 use echod_types::{PromiseRecord, Request};
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::document::{
-    document_effects, well_formed, workflow_effects, ObjV, PromiseEffectV, ProtocolEffectKeyV,
-    ProtocolEffectV, StoredDocumentV,
-};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{
-    spec_committed_notes, spec_execute_notes, spec_keyed_notes, spec_note_key,
-    spec_request_commits, spec_request_transition, spec_sorted_present, spec_stored_body,
-    spec_stored_committed_at, spec_unavailable, spec_unblock_notes, spec_unblock_notes_for,
-    DocumentBodyV, NoteV,
-};
+use echod_concrete_spec::handler::{document_effects, workflow_effects};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::request_claim::{on_request, routed};
+use echod_concrete_spec::property_claim::{well_formed};
+use echod_concrete_spec::state::{ObjV, PromiseEffectV, ProtocolEffectKeyV, ProtocolEffectV, StoredDocumentV};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{spec_committed_notes, spec_execute_notes, spec_keyed_notes, spec_note_key, spec_request_commits, spec_request_transition, spec_sorted_present, spec_stored_body, spec_stored_committed_at, spec_unavailable, spec_unblock_notes, spec_unblock_notes_for};
+use echod_concrete_spec::state::{DocumentBodyV, NoteV};
+#[cfg(verus_keep_ghost)]
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::on_request;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_claim::routed;
 
 
-use echod_concrete_spec::effects_claim::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_claim::*;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{note_effect, note_effects, note_effect_keys, record_effect, request_document};
 
 use super::requests::*;
 verus! {
@@ -11156,8 +11138,8 @@ verus! {
 proof fn lemma_note_keys_agree(left: NoteV, right: NoteV)
     ensures
         spec_note_key(left) == spec_note_key(right)
-            <==> echod_concrete_spec::document::protocol_effect_key(note_effect(left))
-                == echod_concrete_spec::document::protocol_effect_key(note_effect(right)),
+            <==> echod_concrete_spec::handler::protocol_effect_key(note_effect(left))
+                == echod_concrete_spec::handler::protocol_effect_key(note_effect(right)),
 {
 }
 
@@ -11183,18 +11165,18 @@ pub proof fn lemma_keyed_notes_no_duplicate_effect_keys(
             notes,
             (count - 1) as nat,
         );
-        if echod_concrete_spec::state::spec_note_relevant(doc, note)
+        if echod_concrete_spec::handler::spec_note_relevant(doc, note)
             && !(exists|i: int| 0 <= i < prior.len()
                 && spec_note_key(prior[i]) == spec_note_key(note))
         {
             assert forall|i: int| 0 <= i < prior.len() implies
-                echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i]))
-                    != echod_concrete_spec::document::protocol_effect_key(note_effect(note)) by {
+                echod_concrete_spec::handler::protocol_effect_key(note_effect(prior[i]))
+                    != echod_concrete_spec::handler::protocol_effect_key(note_effect(note)) by {
                 lemma_note_keys_agree(prior[i], note);
             }
             assert(note_effect_keys(prior.push(note))
                 == note_effect_keys(prior).push(
-                    echod_concrete_spec::document::protocol_effect_key(note_effect(note)),
+                    echod_concrete_spec::handler::protocol_effect_key(note_effect(note)),
                 ));
         }
     }
@@ -11301,7 +11283,7 @@ proof fn lemma_execute_notes(
                 note_effects(notes).contains(effect) <==> match effect {
                     ProtocolEffectV::Execute { id, version } =>
                         keys.take(count as int).contains(id)
-                            && echod_concrete_spec::document::offer_committed(
+                            && echod_concrete_spec::handler::offer_committed(
                                 before,
                                 after,
                                 id,
@@ -11327,7 +11309,7 @@ proof fn lemma_execute_notes(
         lemma_nodup_last_not_in_prefix(keys, count);
         assert(keys.take(count as int)
             == keys.take(count as int - 1).push(id));
-        if echod_concrete_spec::document::offer_committed(before, after, id, committed_at) {
+        if echod_concrete_spec::handler::offer_committed(before, after, id, committed_at) {
             let note = NoteV::Execute {
                 id,
                 version: after[id].task.unwrap().version,
@@ -11351,7 +11333,7 @@ proof fn lemma_execute_notes(
                         && note_effect_keys(prior)[i]
                             == ProtocolEffectKeyV::Execute { id };
                     assert(note_effect_keys(prior)[i]
-                        == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+                        == echod_concrete_spec::handler::protocol_effect_key(note_effect(prior[i])));
                     assert(note_effects(prior).contains(note_effect(prior[i])));
                     match note_effect(prior[i]) {
                         ProtocolEffectV::Execute { id: prior_id, .. } => {
@@ -11397,7 +11379,7 @@ proof fn lemma_execute_notes(
                 .contains(effect) <==> match effect {
                 ProtocolEffectV::Execute { id, version } =>
                     keys.take(count as int).contains(id)
-                        && echod_concrete_spec::document::offer_committed(
+                        && echod_concrete_spec::handler::offer_committed(
                             before,
                             after,
                             id,
@@ -11409,7 +11391,7 @@ proof fn lemma_execute_notes(
             assert(note_effects(prior).contains(effect) <==> match effect {
                 ProtocolEffectV::Execute { id, version } =>
                     keys.take(count as int - 1).contains(id)
-                        && echod_concrete_spec::document::offer_committed(
+                        && echod_concrete_spec::handler::offer_committed(
                             before,
                             after,
                             id,
@@ -11420,7 +11402,7 @@ proof fn lemma_execute_notes(
             });
             match effect {
                 ProtocolEffectV::Execute { id: effect_id, version } => {
-                    if echod_concrete_spec::document::offer_committed(
+                    if echod_concrete_spec::handler::offer_committed(
                         before,
                         after,
                         id,
@@ -11454,7 +11436,7 @@ proof fn lemma_execute_notes(
                         ) == prior);
                     }
                     if effect_id == id
-                        && echod_concrete_spec::document::offer_committed(
+                        && echod_concrete_spec::handler::offer_committed(
                             before,
                             after,
                             id,
@@ -11495,13 +11477,13 @@ proof fn lemma_unblock_notes_for(
                     } =>
                         effect_promise == promise
                             && listeners.take(count as int).contains(address)
-                            && echod_concrete_spec::document::listener_committed(
+                            && echod_concrete_spec::handler::listener_committed(
                                 before,
                                 after,
                                 promise,
                                 address,
                             )
-                            && record == echod_concrete_spec::document::promise_effect(
+                            && record == echod_concrete_spec::handler::promise_effect(
                                 promise,
                                 after[promise].promise,
                             ),
@@ -11529,7 +11511,7 @@ proof fn lemma_unblock_notes_for(
         lemma_nodup_last_not_in_prefix(listeners, count);
         assert(listeners.take(count as int)
             == listeners.take(count as int - 1).push(address));
-        if echod_concrete_spec::document::listener_committed(
+        if echod_concrete_spec::handler::listener_committed(
             before,
             after,
             promise,
@@ -11538,16 +11520,16 @@ proof fn lemma_unblock_notes_for(
             super::interpretation::lemma_string_view(promise);
             let note = NoteV::Unblock {
                 address,
-                promise: echod_concrete_spec::state::spec_record(
-                    echod_concrete_spec::rover::spec_string(promise),
+                promise: echod_concrete_spec::handler::spec_record(
+                    echod_concrete_spec::handler::spec_string(promise),
                     after[promise].promise,
                 ),
             };
             lemma_note_effects_push(prior, note);
-            assert(record_effect(echod_concrete_spec::state::spec_record(
-                echod_concrete_spec::rover::spec_string(promise),
+            assert(record_effect(echod_concrete_spec::handler::spec_record(
+                echod_concrete_spec::handler::spec_string(promise),
                 after[promise].promise,
-            )) == echod_concrete_spec::document::promise_effect(
+            )) == echod_concrete_spec::handler::promise_effect(
                 promise,
                 after[promise].promise,
             ));
@@ -11574,7 +11556,7 @@ proof fn lemma_unblock_notes_for(
                         && note_effect_keys(prior)[i]
                             == ProtocolEffectKeyV::Unblock { promise, address };
                     assert(note_effect_keys(prior)[i]
-                        == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+                        == echod_concrete_spec::handler::protocol_effect_key(note_effect(prior[i])));
                     assert(note_effects(prior).contains(note_effect(prior[i])));
                     match note_effect(prior[i]) {
                         ProtocolEffectV::Unblock {
@@ -11643,13 +11625,13 @@ proof fn lemma_unblock_notes_for(
                 } =>
                     effect_promise == promise
                         && listeners.take(count as int).contains(effect_address)
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             promise,
                             effect_address,
                         )
-                        && record == echod_concrete_spec::document::promise_effect(
+                        && record == echod_concrete_spec::handler::promise_effect(
                             promise,
                             after[promise].promise,
                         ),
@@ -11663,13 +11645,13 @@ proof fn lemma_unblock_notes_for(
                 } =>
                     effect_promise == promise
                         && listeners.take(count as int - 1).contains(effect_address)
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             promise,
                             effect_address,
                         )
-                        && record == echod_concrete_spec::document::promise_effect(
+                        && record == echod_concrete_spec::handler::promise_effect(
                             promise,
                             after[promise].promise,
                         ),
@@ -11681,7 +11663,7 @@ proof fn lemma_unblock_notes_for(
                     address: effect_address,
                     record,
                 } => {
-                    if echod_concrete_spec::document::listener_committed(
+                    if echod_concrete_spec::handler::listener_committed(
                         before,
                         after,
                         promise,
@@ -11690,8 +11672,8 @@ proof fn lemma_unblock_notes_for(
                         super::interpretation::lemma_string_view(promise);
                         let note = NoteV::Unblock {
                             address,
-                            promise: echod_concrete_spec::state::spec_record(
-                                echod_concrete_spec::rover::spec_string(promise),
+                            promise: echod_concrete_spec::handler::spec_record(
+                                echod_concrete_spec::handler::spec_string(promise),
                                 after[promise].promise,
                             ),
                         };
@@ -11709,7 +11691,7 @@ proof fn lemma_unblock_notes_for(
                         assert(effect == note_effect(note) <==> {
                             &&& effect_promise == promise
                             &&& effect_address == address
-                            &&& record == echod_concrete_spec::document::promise_effect(
+                            &&& record == echod_concrete_spec::handler::promise_effect(
                                 promise,
                                 after[promise].promise,
                             )
@@ -11787,13 +11769,13 @@ proof fn lemma_unblock_notes(
                         record,
                     } =>
                         keys.take(count as int).contains(promise)
-                            && echod_concrete_spec::document::listener_committed(
+                            && echod_concrete_spec::handler::listener_committed(
                                 before,
                                 after,
                                 promise,
                                 address,
                             )
-                            && record == echod_concrete_spec::document::promise_effect(
+                            && record == echod_concrete_spec::handler::promise_effect(
                                 promise,
                                 after[promise].promise,
                             ),
@@ -11833,9 +11815,9 @@ proof fn lemma_unblock_notes(
                 && 0 <= j < note_effect_keys(current).len()
                 implies note_effect_keys(prior)[i] != note_effect_keys(current)[j] by {
             assert(note_effect_keys(prior)[i]
-                == echod_concrete_spec::document::protocol_effect_key(note_effect(prior[i])));
+                == echod_concrete_spec::handler::protocol_effect_key(note_effect(prior[i])));
             assert(note_effect_keys(current)[j]
-                == echod_concrete_spec::document::protocol_effect_key(note_effect(current[j])));
+                == echod_concrete_spec::handler::protocol_effect_key(note_effect(current[j])));
             assert(note_effects(prior).contains(note_effect(prior[i])));
             assert(note_effects(current).contains(note_effect(current[j])));
             match (note_effect(prior[i]), note_effect(current[j])) {
@@ -11874,13 +11856,13 @@ proof fn lemma_unblock_notes(
                     record,
                 } =>
                     keys.take(count as int).contains(effect_promise)
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             effect_promise,
                             address,
                         )
-                        && record == echod_concrete_spec::document::promise_effect(
+                        && record == echod_concrete_spec::handler::promise_effect(
                             effect_promise,
                             after[effect_promise].promise,
                         ),
@@ -11897,13 +11879,13 @@ proof fn lemma_unblock_notes(
                     record,
                 } =>
                     keys.take(count as int - 1).contains(promise)
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             promise,
                             address,
                         )
-                        && record == echod_concrete_spec::document::promise_effect(
+                        && record == echod_concrete_spec::handler::promise_effect(
                             promise,
                             after[promise].promise,
                         ),
@@ -11918,13 +11900,13 @@ proof fn lemma_unblock_notes(
                 } =>
                     effect_promise == promise
                         && listeners.contains(address)
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             promise,
                             address,
                         )
-                        && record == echod_concrete_spec::document::promise_effect(
+                        && record == echod_concrete_spec::handler::promise_effect(
                             promise,
                             after[promise].promise,
                         ),
@@ -11937,7 +11919,7 @@ proof fn lemma_unblock_notes(
                     ..
                 } => {
                     if effect_promise == promise
-                        && echod_concrete_spec::document::listener_committed(
+                        && echod_concrete_spec::handler::listener_committed(
                             before,
                             after,
                             promise,
@@ -11955,25 +11937,25 @@ proof fn lemma_unblock_notes(
 
 proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
     ensures
-        echod_concrete_spec::state::spec_sorted(keys).no_duplicates(),
+        echod_concrete_spec::handler::spec_sorted(keys).no_duplicates(),
     decreases keys.len(),
 {
     if keys.len() > 0 {
         super::work::lemma_min_key(keys);
-        let first = echod_concrete_spec::state::spec_min_key(keys);
+        let first = echod_concrete_spec::handler::spec_min_key(keys);
         let rest = keys.remove(first);
         lemma_sorted_no_duplicates(rest);
         super::work::lemma_sorted(rest);
-        assert(!echod_concrete_spec::state::spec_sorted(rest).contains(first)) by {
-            if echod_concrete_spec::state::spec_sorted(rest).contains(first) {
+        assert(!echod_concrete_spec::handler::spec_sorted(rest).contains(first)) by {
+            if echod_concrete_spec::handler::spec_sorted(rest).contains(first) {
                 let i = choose|i: int|
-                    0 <= i < echod_concrete_spec::state::spec_sorted(rest).len()
-                        && #[trigger] echod_concrete_spec::state::spec_sorted(rest)[i] == first;
+                    0 <= i < echod_concrete_spec::handler::spec_sorted(rest).len()
+                        && #[trigger] echod_concrete_spec::handler::spec_sorted(rest)[i] == first;
                 assert(rest.contains(first));
             }
         };
-        assert(echod_concrete_spec::state::spec_sorted(keys)
-            == seq![first] + echod_concrete_spec::state::spec_sorted(rest));
+        assert(echod_concrete_spec::handler::spec_sorted(keys)
+            == seq![first] + echod_concrete_spec::handler::spec_sorted(rest));
     }
 }
 
@@ -12037,11 +12019,11 @@ proof fn lemma_committed_notes_match(
                     implies note_effect_keys(executes)[i]
                         != note_effect_keys(unblocks)[j] by {
                 assert(note_effect_keys(executes)[i]
-                    == echod_concrete_spec::document::protocol_effect_key(
+                    == echod_concrete_spec::handler::protocol_effect_key(
                         note_effect(executes[i]),
                     ));
                 assert(note_effect_keys(unblocks)[j]
-                    == echod_concrete_spec::document::protocol_effect_key(
+                    == echod_concrete_spec::handler::protocol_effect_key(
                         note_effect(unblocks[j]),
                     ));
                 assert(note_effects(executes).contains(note_effect(executes[i])));
@@ -12060,7 +12042,7 @@ proof fn lemma_committed_notes_match(
                 assert(note_effects(executes).contains(effect) <==> match effect {
                     ProtocolEffectV::Execute { id, version } =>
                         new_keys.contains(id)
-                            && echod_concrete_spec::document::offer_committed(
+                            && echod_concrete_spec::handler::offer_committed(
                                 old,
                                 new,
                                 id,
@@ -12077,13 +12059,13 @@ proof fn lemma_committed_notes_match(
                         record,
                     } =>
                         old_keys.contains(promise)
-                            && echod_concrete_spec::document::listener_committed(
+                            && echod_concrete_spec::handler::listener_committed(
                                 old,
                                 new,
                                 promise,
                                 address,
                             )
-                            && record == echod_concrete_spec::document::promise_effect(
+                            && record == echod_concrete_spec::handler::promise_effect(
                                 promise,
                                 new[promise].promise,
                             ),
@@ -12127,7 +12109,7 @@ proof fn lemma_committed_notes_match(
 
 
 /// Complete endpoint correspondence for one atomic request transition.
-#[verifier::rlimit(20)]
+#[verifier::rlimit(40)]
 pub proof fn lemma_request_transition_effects(
     document: StoredDocumentV,
     request: Request,
@@ -12170,10 +12152,10 @@ pub proof fn lemma_request_transition_effects(
     }) by {
         match document {
             StoredDocumentV::Workflow(workflow) => {
-                reveal(echod_concrete_spec::document::workflow_well_formed);
-                reveal(echod_concrete_spec::document::workflow_body_well_formed);
-                assert(echod_concrete_spec::document::workflow_well_formed(workflow));
-                assert(echod_concrete_spec::document::workflow_body_well_formed(
+                reveal(echod_concrete_spec::property_claim::workflow_well_formed);
+                reveal(echod_concrete_spec::property_claim::workflow_body_well_formed);
+                assert(echod_concrete_spec::property_claim::workflow_well_formed(workflow));
+                assert(echod_concrete_spec::property_claim::workflow_body_well_formed(
                     workflow.document,
                     workflow.objects,
                     workflow.committed_at,
@@ -12183,26 +12165,26 @@ pub proof fn lemma_request_transition_effects(
                         workflow.objects[id].promise.listeners.no_duplicates() by {
                     assert({
                         &&& echod_types::origin(id) == workflow.document
-                        &&& echod_concrete_spec::document::promise_well_formed(
+                        &&& echod_concrete_spec::property_claim::promise_well_formed(
                             id,
                             workflow.objects[id],
                             workflow.committed_at,
                         )
-                        &&& echod_concrete_spec::document::task_well_formed(
+                        &&& echod_concrete_spec::property_claim::task_well_formed(
                             workflow.objects[id],
                             workflow.committed_at,
                         )
-                        &&& echod_concrete_spec::document::callback_targets_well_formed(
+                        &&& echod_concrete_spec::property_claim::callback_targets_well_formed(
                             workflow.objects,
                             workflow.objects[id],
                         )
-                        &&& echod_concrete_spec::document::suspended_rung_well_formed(
+                        &&& echod_concrete_spec::property_claim::suspended_rung_well_formed(
                             workflow.objects,
                             id,
                             workflow.objects[id],
                         )
                     });
-                    assert(echod_concrete_spec::document::promise_well_formed(
+                    assert(echod_concrete_spec::property_claim::promise_well_formed(
                         id,
                         workflow.objects[id],
                         workflow.committed_at,
@@ -12229,7 +12211,7 @@ pub proof fn lemma_request_transition_effects(
                     now,
                     retry_timeout,
                     limit,
-                ) == echod_concrete_spec::state::spec_advance_stored(
+                ) == echod_concrete_spec::handler::spec_advance_stored(
                     StoredDocumentV::Workflow(old),
                     DocumentBodyV::Workflow(new),
                     now,

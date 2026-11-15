@@ -8,6 +8,14 @@ use echod_types::{Dispatch, DispatchV};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::axiom_pset_seq;
 use echod_abstract_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::property_proof::*;
 
 verus! {
 impl View for Promise {

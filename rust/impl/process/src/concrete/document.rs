@@ -20,6 +20,10 @@ use vstd::pervasive::VecAdditionalExecFns;
 use vstd::prelude::*;
 
 pub use echod_concrete_spec::state::*;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::*;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::property_proof::*;
 
 use echod_types::{
     deadline_bounded, MAX_TIME, MAX_VERSION, origin_of, same_origin, PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq,
@@ -45,13 +49,13 @@ use rover_spec::rover::comm::Time;
 use echod_types::{origin, same_origin_spec, spec_deadline_bounded, AValue};
 
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::rover::{
-    spec_bytes, spec_clock, spec_get, spec_initial_node, spec_node, spec_notes, spec_notify,
-    spec_one, spec_reply, spec_string, Proc, LogicV,
-};
+use echod_concrete_spec::handler::{spec_bytes, spec_clock, spec_get, spec_node, spec_notes, spec_notify, spec_one, spec_reply, spec_string};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::rover::{spec_initial_node};
+use echod_concrete_spec::state::{Proc, LogicV};
 use crate::concrete::rover::{Config, Logic, Message, Pid};
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::{spec_before, spec_fnv, spec_sat_add, spec_starts};
+use echod_concrete_spec::handler::{spec_before, spec_fnv, spec_sat_add, spec_starts};
 use crate::concrete::store::{Read, StoreError};
 use crate::concrete::store::{fnv1a, Etag, StoreReq, StoreRes};
 
@@ -2219,7 +2223,7 @@ fn task_record(id: &String, t: &Tk) -> (r: TaskRecord)
 {
     proof {
         if t@.pid is Some {
-            echod_concrete_spec::rover::lemma_string_of(t.pid.unwrap());
+            echod_concrete_spec::property_proof::lemma_string_of(t.pid.unwrap());
         }
     }
     TaskRecord {
@@ -3635,7 +3639,7 @@ fn step_object(objs: Objects, id: &String, now: u64, retry_timeout: u64) -> (r: 
                 let address = promise.listeners.remove(0);
                 proof {
                     lemma_strs_skip(before);
-                    echod_concrete_spec::rover::lemma_string_of(*id);
+                    echod_concrete_spec::property_proof::lemma_string_of(*id);
                 }
                 let rec = record(id, &promise);
                 let mut notes: Vec<Outbound> = Vec::new();
@@ -3937,7 +3941,7 @@ fn offer_is_committed(
     committed_at: u64,
 ) -> (r: bool)
     ensures
-        r == echod_concrete_spec::document::offer_committed(
+        r == echod_concrete_spec::handler::offer_committed(
             before@,
             after@,
             id@,
@@ -3986,7 +3990,7 @@ fn listener_is_committed(
     address: &String,
 ) -> (r: bool)
     ensures
-        r == echod_concrete_spec::document::listener_committed(
+        r == echod_concrete_spec::handler::listener_committed(
             before@,
             after@,
             promise@,
@@ -4127,7 +4131,7 @@ fn committed_notes(
                 let ghost outbound_v = outbound@;
                 notes.push(outbound);
                 proof {
-                    echod_concrete_spec::rover::lemma_string_of(*promise);
+                    echod_concrete_spec::property_proof::lemma_string_of(*promise);
                     lemma_notes_push(prior, notes@[prior.len() as int]);
                     assert(outbound_v == NoteV::Unblock {
                         address: address@,
@@ -4318,7 +4322,7 @@ fn reply(client: &String, id: u64, response: Response) -> (r: (Pid, Message))
         r == spec_reply(client@, id, response),
 {
     proof {
-        echod_concrete_spec::rover::lemma_string_of(*client);
+        echod_concrete_spec::property_proof::lemma_string_of(*client);
     }
     (Pid::Outside, Message::Output(Output::Response { client: client.clone(), id, response }))
 }
@@ -4342,13 +4346,13 @@ fn notify(note: &Outbound) -> (r: (Pid, Message))
     match note {
         Outbound::Execute { id, version } => {
             proof {
-                echod_concrete_spec::rover::lemma_string_of(*id);
+                echod_concrete_spec::property_proof::lemma_string_of(*id);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Execute { id: id.clone(), version: *version })))
         },
         Outbound::Unblock { address, promise } => {
             proof {
-                echod_concrete_spec::rover::lemma_string_of(*address);
+                echod_concrete_spec::property_proof::lemma_string_of(*address);
             }
             (Pid::Outside, Message::Output(Output::Dispatch(Dispatch::Unblock { address: address.clone(), promise: copy(promise) })))
         },
@@ -4671,7 +4675,7 @@ impl Node {
                 next.flight = Some(flight);
                 next.next_op = op + 1;
                 proof {
-                    echod_concrete_spec::rover::lemma_string_of(key);
+                    echod_concrete_spec::property_proof::lemma_string_of(key);
                 }
                 (next, one((Pid::Store, Message::StoreReq { op, request: StoreReq::Get { key } })))
             },
@@ -4727,14 +4731,14 @@ impl Node {
             let op = self.next_op;
             let body = encode_body(&next);
             proof {
-                echod_concrete_spec::rover::lemma_bytes_realised(spec_encode_body(next@));
+                echod_concrete_spec::property_proof::lemma_bytes_realised(spec_encode_body(next@));
                 axiom_vec_ext(body, spec_bytes(spec_encode_body(next@)));
-                echod_concrete_spec::rover::lemma_string_of(key);
+                echod_concrete_spec::property_proof::lemma_string_of(key);
             }
             let request = match &etag {
                 Some(tag) => {
                     proof {
-                        echod_concrete_spec::rover::lemma_string_of(tag.0);
+                        echod_concrete_spec::property_proof::lemma_string_of(tag.0);
                     }
                     StoreReq::PutIfMatch { key: key.clone(), body, etag: copy(tag) }
                 },

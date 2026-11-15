@@ -1,19 +1,388 @@
-//! Proofs for the abstract property claims.
-
+//! property_proof definitions for the abstract model.
+#![allow(unused_imports)]
 use vstd::prelude::*;
-
-use echod_types::{same_origin_spec, PromiseCreateReq, Request, Tags, Value};
-use rover_spec::rover::comm::ProcessEvent;
-use rover_spec::rover::RoverSpec::{Proc as _, StepResultV};
-
-use super::property_claim::*;
-use echod_types::{Call, Message};
-use super::state::*;
-use super::rover::*;
-use super::axioms::origin;
-use echod_types::common::axiom_next_cron_after;
+use vstd::contrib::make_spec_type;
+use echod_types::*;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::*;
+use rover_spec::rover::comm::{Sched, ProcessEvent};
+use rover_spec::rover::RoverSpec;
+use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
+use crate::state::{Time, Chars, PromiseV, TaskV, StoreV, InternalV, OutV, SpecHeld, Proc};
+use crate::rover::{Config};
+#[cfg(verus_keep_ghost)]
+use crate::handler::{on_event, strs, schedule_v, sat_add, distinct, all_in_origin, lift_dispatch, spec_before, spec_min_key, spec_sorted, least, spec_keys, spec_is_timer, spec_has_target, spec_delay, spec_external, spec_string, spec_empty_value, spec_acquire, spec_schedule_value, spec_new_object, spec_status_res, spec_held, spec_promise_create, spec_promise_settle, spec_task_create, spec_awaited, spec_callbacks, spec_any_settled, spec_refs_one_origin, spec_extend, spec_handler, spec_body, spec_process_work, spec_send, spec_request_outcome, spec_shed, spec_lose, spec_losses, spec_ready, spec_internal_result, spec_idle, spec_run, spec_due_result, spec_queue, spec_keep, spec_over_callbacks, spec_over_listeners, spec_over_promises, spec_over_tasks, spec_over_schedules, spec_derived, spec_run_timeout, spec_service};
+use crate::rover::{Pid, empty_store};
+#[cfg(verus_keep_ghost)]
+use crate::property_claim::{well_formed_promise_created_at_lte_timeout_at_at, well_formed_promise_created_at_lte_timeout_at, well_formed_promise_settled_at_lte_timeout_at_at, well_formed_promise_settled_at_lte_timeout_at, well_formed_promise_created_at_lte_settled_at_at, well_formed_promise_created_at_lte_settled_at, well_formed_promise_settled_at_iff_not_pending_at, well_formed_promise_settled_at_iff_not_pending, well_formed_promise_pending_created_before_deadline_at, well_formed_promise_pending_has_no_value_at, well_formed_promise_deadline_settlement_has_no_value_at, well_formed_promise_timedout_is_server_owned_at, well_formed_promise_awaiter_is_not_self_at, well_formed_promise_callbacks_same_origin_at, well_formed_promise_created_at_lte_now_at, well_formed_promise_settled_at_lte_now_at, well_formed_task_acquired_iff_has_pid_at, well_formed_task_acquired_iff_has_ttl_at, well_formed_task_pending_iff_has_retry_timeout_at_at, well_formed_task_fulfilled_is_cleared_at, well_formed_task_suspended_is_cleared_at, well_formed_task_halted_is_cleared_at, well_formed_task_suspended_has_no_resumes_at, well_formed_task_resumes_unique_at, well_formed_task_acquired_version_positive_at, well_formed_task_has_matching_promise, well_formed_store_object_ids_unique, well_formed_store_schedule_ids_unique, state_properties, monotone_promise_set_grows, monotone_task_set_grows, preserved_promise_birth_fields_immutable, preserved_schedule_birth_fields_immutable, preserved_promise_settlement_is_one_way, preserved_promise_state_frozen_once_settled, preserved_promise_value_until_settlement, monotone_task_version, monotone_promise_callbacks_while_pending, monotone_promise_listeners_while_pending, transition_properties, step_properties, property_claim};
+#[cfg(verus_keep_ghost)]
+use crate::axioms::*;
 
 verus! {
+pub broadcast proof fn lemma_mv_empty<A, B>(f: spec_fn(A) -> B)
+    ensures
+        #[trigger] Seq::<A>::empty().map_values(f) == Seq::<B>::empty(),
+{
+    assert(Seq::<A>::empty().map_values(f) =~= Seq::<B>::empty());
+}
+
+pub broadcast proof fn lemma_mv_push<A, B>(v: Seq<A>, x: A, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] v.push(x).map_values(f) == v.map_values(f).push(f(x)),
+{
+    assert(v.push(x).map_values(f) =~= v.map_values(f).push(f(x)));
+}
+
+pub broadcast proof fn lemma_mv_add<A, B>(a: Seq<A>, b: Seq<A>, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] (a + b).map_values(f) == a.map_values(f) + b.map_values(f),
+{
+    assert((a + b).map_values(f) =~= a.map_values(f) + b.map_values(f));
+}
+
+pub broadcast proof fn lemma_mv_take<A, B>(v: Seq<A>, i: int, f: spec_fn(A) -> B)
+    requires
+        0 <= i <= v.len(),
+    ensures
+        #[trigger] v.take(i).map_values(f) == v.map_values(f).take(i),
+{
+    assert(v.take(i).map_values(f) =~= v.map_values(f).take(i));
+}
+
+pub broadcast proof fn lemma_map_values_insert<A, B>(m: Map<Chars, A>, k: Chars, v: A, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] m.insert(k, v).map_values(f) == m.map_values(f).insert(k, f(v)),
+{
+    assert(m.insert(k, v).map_values(f) =~= m.map_values(f).insert(k, f(v)));
+}
+
+pub broadcast proof fn lemma_map_values_remove<A, B>(m: Map<Chars, A>, k: Chars, f: spec_fn(A) -> B)
+    ensures
+        #[trigger] m.remove(k).map_values(f) == m.map_values(f).remove(k),
+{
+    assert(m.remove(k).map_values(f) =~= m.map_values(f).remove(k));
+}
+
+pub broadcast proof fn lemma_strs_len(v: Seq<String>)
+    ensures
+        #[trigger] strs(v).len() == v.len(),
+{
+}
+
+pub broadcast proof fn lemma_strs_index(v: Seq<String>, i: int)
+    requires
+        0 <= i < v.len(),
+    ensures
+        #[trigger] strs(v)[i] == v[i]@,
+{
+}
+
+pub broadcast proof fn lemma_strs_empty(v: Seq<String>)
+    requires
+        v.len() == 0,
+    ensures
+        #[trigger] strs(v) == Seq::<Chars>::empty(),
+{
+    assert(strs(v) =~= Seq::<Chars>::empty());
+}
+
+pub broadcast group group_views {
+    lemma_strs_len,
+    lemma_strs_index,
+    lemma_strs_empty,
+    lemma_mv_empty,
+    lemma_mv_push,
+    lemma_mv_add,
+    lemma_mv_take,
+    lemma_map_values_insert,
+    lemma_map_values_remove,
+    axiom_pset_seq,
+}
+
+#[verifier::external_body]
+pub proof fn axiom_realised(d: DispatchV)
+    ensures
+        lift_dispatch(d)@ == d,
+{
+}
+
+pub proof fn lemma_prec_ext(a: PromiseRecord, b: PromiseRecord)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_record_ext(a, b);
+}
+
+pub proof fn lemma_dispatch_ext(a: Dispatch, b: Dispatch)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    match (a, b) {
+        (Dispatch::Execute { id: x, .. }, Dispatch::Execute { id: y, .. }) => axiom_string_ext(x, y),
+        (Dispatch::Unblock { address: x, promise: p }, Dispatch::Unblock { address: y, promise: q }) => {
+            axiom_string_ext(x, y);
+            lemma_prec_ext(p, q);
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_lift_dispatch(d: Dispatch)
+    ensures
+        lift_dispatch(d@) == d,
+{
+    axiom_realised(d@);
+    lemma_dispatch_ext(lift_dispatch(d@), d);
+}
+
+
+
+pub proof fn lemma_before_irrefl(a: Seq<char>)
+    ensures
+        !spec_before(a, a),
+    decreases a.len(),
+{
+    if a.len() == 0 {
+    } else {
+        lemma_before_irrefl(a.drop_first());
+    }
+}
+
+pub proof fn lemma_before_trans(a: Seq<char>, b: Seq<char>, c: Seq<char>)
+    requires
+        spec_before(a, b),
+        spec_before(b, c),
+    ensures
+        spec_before(a, c),
+    decreases a.len() + b.len() + c.len(),
+{
+    if a.len() == 0 {
+    } else if b.len() == 0 {
+    } else if c.len() == 0 {
+    } else if a[0] != b[0] {
+    } else if b[0] != c[0] {
+    } else {
+        lemma_before_trans(a.drop_first(), b.drop_first(), c.drop_first());
+    }
+}
+
+pub proof fn lemma_least_exists(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        exists|k: Seq<char>| least(keys, k),
+    decreases keys.len(),
+{
+    let x = keys.choose();
+    assert(keys.contains(x));
+    let rest = keys.remove(x);
+    assert(rest.len() == keys.len() - 1);
+    if rest.len() == 0 {
+        assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+            if o != x {
+                assert(rest.contains(o));
+            } else {
+                lemma_before_irrefl(x);
+            }
+        };
+        assert(least(keys, x));
+    } else {
+        lemma_least_exists(rest);
+        let m = choose|m: Seq<char>| least(rest, m);
+        assert(keys.contains(m));
+        if spec_before(x, m) {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, x) by {
+                if o == x {
+                    lemma_before_irrefl(x);
+                } else {
+                    assert(rest.contains(o));
+                    if spec_before(o, x) {
+                        lemma_before_trans(o, x, m);
+                    }
+                }
+            };
+            assert(least(keys, x));
+        } else {
+            assert forall|o: Seq<char>| keys.contains(o) implies !spec_before(o, m) by {
+                if o != x {
+                    assert(rest.contains(o));
+                }
+            };
+            assert(least(keys, m));
+        }
+    }
+}
+
+pub proof fn lemma_min_key(keys: Set<Seq<char>>)
+    requires
+        keys.finite(),
+        keys.len() > 0,
+    ensures
+        keys.contains(spec_min_key(keys)),
+{
+    reveal(spec_min_key);
+    lemma_least_exists(keys);
+    let k = choose|k: Seq<char>| least(keys, k);
+    assert(keys.contains(k) && forall|o: Seq<char>| keys.contains(o) ==> !spec_before(o, k));
+}
+
+pub proof fn lemma_schedule_ext(a: Schedule, b: Schedule)
+    requires
+        a@ == b@,
+    ensures
+        a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    axiom_string_ext(a.cron, b.cron);
+    axiom_string_ext(a.promise_id, b.promise_id);
+    lemma_value_ext(a.promise_param, b.promise_param);
+    lemma_tags_ext(a.promise_tags, b.promise_tags);
+}
+
+pub proof fn lemma_schedule_value(c: Schedule)
+    ensures
+        spec_schedule_value(schedule_v(c)) == c,
+{
+    lemma_string_of(c.id);
+    lemma_string_of(c.cron);
+    lemma_string_of(c.promise_id);
+}
+
+pub proof fn lemma_string_of(s: String)
+    ensures
+        spec_string(s@) == s,
+{
+    reveal(spec_string);
+    axiom_string_ext(spec_string(s@), s);
+}
+
+pub proof fn lemma_refs_one_origin(refs: Seq<TaskRef>, j: int)
+    requires
+        1 <= j,
+    ensures
+        spec_refs_one_origin(refs, j) <==> (forall|k: int| j <= k < refs.len() ==> origin(#[trigger] refs[k].id@) == origin(refs[0].id@)),
+    decreases refs.len() - j,
+{
+    if j < refs.len() {
+        lemma_refs_one_origin(refs, j + 1);
+    }
+}
+
+pub proof fn lemma_losses_map(before: Proc, call: Call, outcomes: Seq<OutV>)
+    ensures
+        spec_losses(before, call, outcomes) == outcomes.map_values(|o: OutV| spec_lose(before, call, o)),
+    decreases outcomes.len(),
+{
+    if outcomes.len() == 0 {
+        assert(spec_losses(before, call, outcomes) =~= outcomes.map_values(|o: OutV| spec_lose(before, call, o)));
+    } else {
+        lemma_losses_map(before, call, outcomes.skip(1));
+        assert(spec_losses(before, call, outcomes) =~= outcomes.map_values(|o: OutV| spec_lose(before, call, o)));
+    }
+}
+
+pub proof fn lemma_shed_is_last(
+    config: Config,
+    state: Proc,
+    now: Time,
+    call: Call,
+)
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            };
+            let outcomes = state.on_event(config, now, event);
+            &&& outcomes.len() > 0
+            &&& outcomes[outcomes.len() as int - 1] == spec_shed(state, call)
+        }),
+{
+    let event = ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    };
+    let outcomes = state.on_event(config, now, event);
+    let served = spec_run(config, state, call, now);
+    let lost = spec_losses(state, call, spec_handler(config, call.request, state.store, now));
+    let shed = seq![spec_shed(state, call)];
+    assert(outcomes == served + lost + shed);
+    let prefix = served + lost;
+    vstd::seq::lemma_seq_add_len(prefix, shed);
+    vstd::seq::lemma_seq_push_len(Seq::<StepResultV<Proc, Pid, Message>>::empty(), spec_shed(state, call));
+    assert(shed.len() == 1);
+    let j = prefix.len() as int;
+    vstd::seq::lemma_seq_add_index2(prefix, shed, j);
+    vstd::seq::lemma_seq_push_index_same(
+        Seq::<StepResultV<Proc, Pid, Message>>::empty(),
+        spec_shed(state, call),
+        0,
+    );
+    assert(shed[0] == spec_shed(state, call));
+    assert(outcomes[j] == spec_shed(state, call));
+    assert(j == outcomes.len() as int - 1);
+}
+
+pub proof fn lemma_empty_heartbeat_is_first(
+    config: Config,
+    state: Proc,
+    now: Time,
+    call: Call,
+)
+    requires
+        match call.request {
+            Request::TaskHeartbeat(q) => q.tasks@.len() == 0,
+            _ => false,
+        },
+    ensures
+        ({
+            let event = ProcessEvent::Receive {
+                sender: Pid::Outside,
+                message: Message::Request(call),
+            };
+            let outcomes = state.on_event(config, now, event);
+            &&& outcomes.len() > 0
+            &&& outcomes[0].state == state
+            &&& outcomes[0].send == spec_send(
+                call,
+                Response::Status(echod_types::StatusRes { status: 200 }),
+                Seq::empty(),
+            )
+        }),
+{
+    let event = ProcessEvent::Receive {
+        sender: Pid::Outside,
+        message: Message::Request(call),
+    };
+    let outcomes = state.on_event(config, now, event);
+    let handler = spec_handler(config, call.request, state.store, now);
+    assert(handler.len() == 1);
+    let outcome = handler[0];
+    assert(outcome.resp == spec_status_res(200));
+    assert(spec_status_res(200) == Response::Status(echod_types::StatusRes { status: 200 }));
+    assert(outcome.work =~= Seq::empty());
+    assert(outcome.send =~= Seq::empty());
+    assert(outcome.next == state.store);
+    let served = spec_run(config, state, call, now);
+    assert(served.len() == 1);
+    assert(served[0] == spec_request_outcome(state, call, outcome));
+    assert(served[0].state == state);
+    assert(served[0].send == spec_send(
+        call,
+        Response::Status(echod_types::StatusRes { status: 200 }),
+        Seq::empty(),
+    ));
+    let lost = spec_losses(state, call, handler);
+    let shed = seq![spec_shed(state, call)];
+    assert(outcomes == served + lost + shed);
+    vstd::seq::lemma_seq_add_index1(served, lost + shed, 0);
+    assert(outcomes[0] == served[0]);
+}
 
 proof fn initial_state_properties()
     ensures
@@ -1471,8 +1840,6 @@ proof fn property_proof_with_empty_value(config: Config)
     reveal(property_claim);
 }
 
-/// Every initial abstract service and every legal Rover outcome satisfy all
-/// strengthened state invariants and all ten transition clauses.
 pub fn property_proof(config: Config)
     ensures
         property_claim(config),
@@ -1483,5 +1850,4 @@ pub fn property_proof(config: Config)
         property_proof_with_empty_value(config);
     }
 }
-
-} // verus!
+}

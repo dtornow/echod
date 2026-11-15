@@ -55,13 +55,15 @@ it events by hand. The runtime performs what it asks. The simulator is the
 evidence. [DESIGN.md](DESIGN.md) is the design; [BACKLOG.md](BACKLOG.md) is
 what is next. Each crate root opens with a map of its files.
 
-Both mathematical specification crates use `state.rs` for state and transition
-definitions and `rover.rs` for process orchestration and the Rover adapter.
-Concrete `state.rs` separates Node and Store with section comments; abstract
-`state.rs` separates state, requests, and internal work. Concrete
-`Proc::on_event` still delegates to `spec_node` or `spec_store`; the abstract
-process delegates to `spec_service`. Model-specific document/protocol helpers
-and claim/proof files remain separate.
+Both mathematical specification crates have the same layout:
+`state.rs` holds state and document structures; `handler.rs` holds event dispatch
+and transitions; `rover.rs` holds wiring, initialization and observation;
+`property_claim.rs` holds properties; `property_proof.rs` holds local proofs.
+Each Rover `Proc::on_event` delegates to `handler::on_event`. Concrete dispatch
+selects Node or Store handlers in that same file.
+Abstract-only `axioms.rs` remains separate. Verus requires three termination
+proofs to stay beside their recursive functions in `handler.rs`; other local
+proofs live in `property_proof.rs`. Cross-model proofs remain in refinement.
 
 ## Document and request boundaries
 

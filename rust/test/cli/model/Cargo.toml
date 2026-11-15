@@ -10,6 +10,7 @@ name = "echod-model"
 path = "src/main.rs"
 
 [dependencies]
+echod-types = { path = "../../../comm/types" }
 rover-spec = { path = "../../../spec/rover/spec" }
 rover-exec = { path = "../../../spec/rover/exec" }
 echod-abstract-spec = { path = "../../../spec/echod/abstract/spec" }

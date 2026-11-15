@@ -3,7 +3,7 @@
 use rover_spec::rover::comm::{BoundaryEvent, ProcessEvent};
 use rover_exec::{check_unranked, CheckConfig, Spec as _};
 use echod_abstract_spec::rover::Pid;
-use echod_abstract_spec::types::*;
+
 use echod_abstract_spec::*;
 use echod_abstract_exec::{runtime::next_cron, Spec as AbstractExec};
 
