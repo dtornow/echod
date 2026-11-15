@@ -12,6 +12,7 @@ use echod_types::{
     Tags, TaskClaimRes, TaskFenceInnerRes, TaskFenceRes, TaskGetRes, TaskRecord, TaskState, Value,
 };
 use super::axioms::*;
+use echod_types::common::*;
 
 pub type Time = u64;
 
@@ -439,49 +440,6 @@ pub open spec fn spec_unavailable(request: Request) -> Response {
         Request::TaskCreate(_) | Request::TaskAcquire(_) => spec_claim_res(503, None, None),
         Request::TaskFulfill(_) => spec_promise_res(503, None),
         Request::TaskFence(_) => spec_fence_res(503, None),
-    }
-}
-
-/// Tags are their strings.
-pub proof fn lemma_tags_ext(a: Tags, b: Tags)
-    requires
-        a.deep_view() == b.deep_view(),
-    ensures
-        a == b,
-{
-    let av = a@;
-    let bv = b@;
-    assert(a.deep_view().len() == av.len());
-    assert(b.deep_view().len() == bv.len());
-    assert forall|i: int| 0 <= i < av.len() implies #[trigger] av[i] == bv[i] by {
-        assert(a.deep_view()[i] == av[i].deep_view());
-        assert(b.deep_view()[i] == bv[i].deep_view());
-        axiom_string_ext(av[i].0, bv[i].0);
-        axiom_string_ext(av[i].1, bv[i].1);
-    };
-    assert(av =~= bv);
-    axiom_vec_ext(a, b);
-}
-
-/// A value is its view.
-pub proof fn lemma_value_ext(a: Value, b: Value)
-    requires
-        a@ == b@,
-    ensures
-        a == b,
-{
-    assert(a@.headers == a.headers.deep_view());
-    assert(b@.headers == b.headers.deep_view());
-    lemma_tags_ext(a.headers, b.headers);
-    match (a.data, b.data) {
-        (Some(x), Some(y)) => {
-            assert(x@ == y@);
-            axiom_string_ext(x, y);
-        },
-        (None, None) => {},
-        _ => {
-            assert(false);
-        },
     }
 }
 

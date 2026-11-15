@@ -54,7 +54,7 @@ use echod_abstract_spec::state::{
     spec_handler, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, SpecHeld,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::axioms::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
+use echod_types::common::{axiom_string_ext, axiom_string_realised, axiom_vec_ext};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV};
 #[cfg(verus_keep_ghost)]
@@ -2221,7 +2221,7 @@ use echod_abstract_spec::state::{
     spec_any_settled as a_any_settled, spec_awaited, spec_callbacks as a_callbacks, spec_extend as a_extend, spec_fence as a_fence, spec_handler, spec_heartbeat as a_heartbeat, spec_held as a_held, spec_promise_create as a_promise_create, spec_promise_settle as a_promise_settle, spec_refs_one_origin, spec_register_callback as a_register_callback, spec_register_listener as a_register_listener, spec_schedule_create as a_schedule_create, spec_suspend as a_suspend, spec_task_acquire as a_task_acquire, spec_task_continue as a_task_continue, spec_task_create as a_task_create, spec_task_fulfill as a_task_fulfill, spec_task_halt as a_task_halt, spec_task_release as a_task_release, spec_wrap_fence, SpecHeld,
 };
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::axioms::axiom_string_ext;
+use echod_types::common::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{
     all_in_origin, distinct, OutV, PromiseV, sat_add, ScheduleV, StoreV as AStore, TaskV,
@@ -4165,7 +4165,7 @@ pub(crate) proof fn lemma_schedule_create_agrees(
     lemma_schedule_doc(key, req.id@, doc, s);
     lemma_schedule_key(req.id@);
     let slot = doc->Schedule_0;
-    let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
+    let next_run_at = echod_types::common::spec_next_cron(req.cron@, now);
     if !spec_deadline_bounded(next_run_at, req.promise_timeout)
         || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         assert(outs == spec_out(spec_schedule_res(400, None), s));
@@ -4401,7 +4401,9 @@ use echod_abstract_spec::state::{
 #[cfg(verus_keep_ghost)]
 use echod_types::{Message as AMessage, Dispatch, DispatchV, Output};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::axioms::{pset_seq, spec_expand, spec_next_cron};
+use echod_abstract_spec::axioms::pset_seq;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::{spec_expand, spec_next_cron};
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::Config as AbstractConfig;
 #[cfg(verus_keep_ghost)]
@@ -6340,7 +6342,7 @@ use echod_abstract_spec::rover::Pid as APid;
 #[cfg(verus_keep_ghost)]
 use echod_types::{Message as AMessage, BoundaryEvent, Call, Output};
 #[cfg(verus_keep_ghost)]
-use echod_abstract_spec::axioms::axiom_string_ext;
+use echod_types::common::axiom_string_ext;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::{InOutV, InternalV, OutV, StoreV as AStore};
 #[cfg(verus_keep_ghost)]

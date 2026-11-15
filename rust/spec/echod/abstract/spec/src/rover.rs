@@ -11,7 +11,9 @@ use echod_types::{Request, Response};
 use super::state::*;
 use echod_types::{BoundaryEvent, Call, DispatchV, Message, Output};
 #[cfg(verus_keep_ghost)]
-use super::axioms::{pset_seq, spec_expand};
+use super::axioms::pset_seq;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::spec_expand;
 
 verus! {
 #[derive(Clone, Copy, PartialEq, Eq, Structural, Hash, PartialOrd, Ord, Debug)]

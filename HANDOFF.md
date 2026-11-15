@@ -196,9 +196,9 @@ and not a dependent of the process:
 
 Shared `Call`/`Output`/`Dispatch` payloads live in `echod-types`. Both models
 use Rover boundary events specialized to unit routing identity and shared
-messages; observation still excludes clocks and internal traffic. The remaining
-dependency on `echod-abstract-spec` supplies trusted functions, including cron
-and occurrence expansion, rather than boundary types.
+messages; observation still excludes clocks and internal traffic. Shared trusted
+functions and proofs live in `echod_types::common`; concrete and production
+crates have no dependency on `echod-abstract-spec`.
 
 Executable `Doc`/`Obj`/store types, handlers, their `View` bridges, and
 exec-to-spec proofs live under `impl/process/src/concrete`; production code
@@ -236,18 +236,22 @@ remains the primary simulator.
 ## Dependency direction
 
 ```text
-spec/rover/spec ---> spec/echod/abstract/spec ---> spec/echod/concrete/spec ---> impl/process ---> impl/runtime ---> impl/cli
-      |               |                              |
-      v               v                              v
-spec/rover/exec --> spec/echod/abstract/exec     spec/echod/refinement
-                       |                              ^
-                       +------------------------------+
+comm/types (protocol + common) <--- abstract/spec <--- abstract/exec
+             ^                          ^
+             |                          |
+        concrete/spec <---------- refinement
+             ^
+             |
+        impl/process <--- impl/runtime <--- impl/cli
 
-impl + spec -----------------> test/*
+Both models also depend on spec/rover/spec.
+Arrows point from dependent to dependency.
+
+impl + spec <----------------- test/*
 ```
 
-Concrete depends on the Rover world, shared payloads in `echod-types`, and the
-abstract model's trusted functions. Refinement depends on both models. The process depends on concrete,
+Concrete depends on the Rover world and shared payloads, declarations and proofs
+in `echod-types`. Refinement depends on both models. The process depends on concrete,
 because a handler's `ensures` names `spec_promise_create`. Concrete and
 refinement depend on neither the process nor the runtime. Production code must
 never depend on test code. The ghost half of the concrete crate erases

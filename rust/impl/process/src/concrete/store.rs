@@ -175,7 +175,7 @@ fn copy_entry(e: &Entry) -> (r: Entry)
 {
     let r = Entry { key: e.key.clone(), body: copy_bytes(&e.body), version: e.version };
     proof {
-        echod_abstract_spec::axioms::axiom_vec_ext(r.body, e.body);
+        echod_types::common::axiom_vec_ext(r.body, e.body);
     }
     r
 }
@@ -346,10 +346,10 @@ pub proof fn lemma_bytes_keys(v: Vec<String>)
     assert forall|i: int| 0 <= i < v@.len() implies #[trigger] w@[i] == v@[i] by {
         assert(key_views(w@)[i] == w@[i]@);
         assert(key_views(v@)[i] == v@[i]@);
-        echod_abstract_spec::axioms::axiom_string_ext(w@[i], v@[i]);
+        echod_types::common::axiom_string_ext(w@[i], v@[i]);
     }
     assert(w@ =~= v@);
-    echod_abstract_spec::axioms::axiom_vec_ext(w, v);
+    echod_types::common::axiom_vec_ext(w, v);
 }
 
 
@@ -549,8 +549,8 @@ impl Store {
     {
         let r = Store { entries: copy_entries(&self.entries), appendable: self.appendable, seen: copy_seen(&self.seen) };
         proof {
-            echod_abstract_spec::axioms::axiom_vec_ext(r.entries, self.entries);
-            echod_abstract_spec::axioms::axiom_vec_ext(r.seen, self.seen);
+            echod_types::common::axiom_vec_ext(r.entries, self.entries);
+            echod_types::common::axiom_vec_ext(r.seen, self.seen);
         }
         r
     }
@@ -569,7 +569,7 @@ impl Store {
                     let body = copy_bytes(&entry.body);
                     proof {
                         echod_concrete_spec::rover::lemma_bytes_realised(entry.body@);
-                        echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
+                        echod_types::common::axiom_vec_ext(body, spec_bytes(entry.body@));
                     }
                     StoreRes::Get { result: Ok(Some((body, etag(&entry.body)))) }
                 },
@@ -581,14 +581,14 @@ impl Store {
                     let have = etag(&entry.body);
                     if have.0 == want.0 {
                         proof {
-                            echod_abstract_spec::axioms::axiom_string_ext(have.0, want.0);
+                            echod_types::common::axiom_string_ext(have.0, want.0);
                         }
                         StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }
                     } else {
                         let body = copy_bytes(&entry.body);
                         proof {
                             echod_concrete_spec::rover::lemma_bytes_realised(entry.body@);
-                            echod_abstract_spec::axioms::axiom_vec_ext(body, spec_bytes(entry.body@));
+                            echod_types::common::axiom_vec_ext(body, spec_bytes(entry.body@));
                         }
                         StoreRes::GetIfNoneMatch { result: Ok(Read::Body(body, have)) }
                     }
@@ -607,7 +607,7 @@ impl Store {
                     let have = etag(&self.entries[i].body);
                     if have.0 == want.0 {
                         proof {
-                            echod_abstract_spec::axioms::axiom_string_ext(have.0, want.0);
+                            echod_types::common::axiom_string_ext(have.0, want.0);
                         }
                         let version = bump(self.entries[i].version);
                         put_entry(&mut next.entries, Entry { key: key.clone(), body: copy_bytes(body), version });
@@ -641,7 +641,7 @@ impl Store {
                             let have = etag(&self.entries[i].body);
                             if have.0 == want.0 && self.entries[i].body.len() as u64 == *offset {
                                 proof {
-                                    echod_abstract_spec::axioms::axiom_string_ext(have.0, want.0);
+                                    echod_types::common::axiom_string_ext(have.0, want.0);
                                 }
                                 let mut joined = copy_bytes(&self.entries[i].body);
                                 let mut more = copy_bytes(body);

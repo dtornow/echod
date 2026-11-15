@@ -10,7 +10,8 @@ use super::property_claim::*;
 use echod_types::{Call, Message};
 use super::state::*;
 use super::rover::*;
-use super::axioms::{axiom_next_cron_after, origin};
+use super::axioms::origin;
+use echod_types::common::axiom_next_cron_after;
 
 verus! {
 
@@ -1296,7 +1297,7 @@ proof fn lemma_over_schedules_integrity(
         let schedule = before.store.schedules[id];
         let work = InternalV::ScheduleTimeout {
             id,
-            promise: super::axioms::spec_expand(
+            promise: echod_types::common::spec_expand(
                 schedule.promise_id,
                 id,
                 schedule.next_run_at,

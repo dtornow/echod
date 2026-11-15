@@ -5,10 +5,9 @@
 //! concrete-to-abstract interpretation and simulation live in
 //! `echod-refinement`. The sole executable concrete document/store
 //! implementation lives in `echod-process::concrete`.
-//! `echod-abstract-spec` remains a semantic dependency because the concrete
-//! Rover boundary uses its `Call`/`Output`/`Dispatch` protocol types and
-//! schedule transitions use its trusted cron and occurrence-expansion
-//! functions.
+//! Shared payloads and trusted mathematical declarations live in
+//! `echod-types::{protocol, common}`. Neither this crate nor the executable
+//! process depends on the abstract model.
 //!
 //! A world is the nodes and one store. Each node keeps its own documents
 //! and takes one flight at a time.

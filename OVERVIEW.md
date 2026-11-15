@@ -44,8 +44,11 @@ each proved equal to `rust/spec/echod/concrete/spec`'s specification; the proces
 its bookkeeping and the sequence of store calls around each step included.
 Shared boundary payloads live in `echod-types`; both models specialize Rover's
 boundary events with unit routing identity. Their observations exclude clocks
-and internal traffic. Concrete still depends on the abstract model for trusted
-cron/occurrence algebra; it does not depend on the process.
+and internal traffic. Shared cron/occurrence declarations, extensionality and
+realizability assumptions, and value/tag proofs live in `echod_types::common`.
+Concrete and the production process have no dependency on the abstract model;
+refinement alone connects the two models. These are relocated assumptions,
+not repaired or strengthened proof foundations.
 What the process assumes — the text of keys, the bytes of documents — is
 stated as specifications and listed in `src/verified/mod.rs`; its tests feed
 it events by hand. The runtime performs what it asks. The simulator is the

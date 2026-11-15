@@ -11,6 +11,8 @@ use crate::runtime::*;
 use crate::projection::{group_views as group_exec_views, outs_v, sends, works};
 use echod_types::Dispatch;
 use echod_abstract_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::{lemma_tags_ext, lemma_value_ext};
 
 verus! {
 /// Executable handlers bound to a passive specification configuration.

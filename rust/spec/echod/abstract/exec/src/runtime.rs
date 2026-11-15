@@ -5,9 +5,10 @@
 use vstd::prelude::*;
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::axioms::{
-    spec_address_valid, spec_cron_valid, spec_expand, spec_has_colon as abstract_spec_has_colon,
-    spec_next_cron,
+    spec_address_valid, spec_cron_valid, spec_has_colon as abstract_spec_has_colon,
 };
+#[cfg(verus_keep_ghost)]
+use echod_types::common::{spec_expand, spec_next_cron};
 
 verus! {
 /// A derived `Clone` is a copy.
