@@ -12,8 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 echod-types = { path = "../../../../comm/types" }
 rover-spec = { path = "../../../rover/spec" }
-# Schedule transitions share the abstract model's trusted cron/expansion algebra.
-echod-abstract-spec = { path = "../../abstract/spec" }
 vstd = "=0.0.0-2026-10-11-0230"
 verus_builtin = "=0.0.0-2026-10-11-0230"
 verus_builtin_macros = "=0.0.0-2026-09-20-0158"

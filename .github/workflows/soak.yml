@@ -13,6 +13,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Model dependency boundaries
+        run: python3 scripts/check-model-dependencies.py
       - name: Smoke — 5 seeds, 100 operations each
         if: github.event_name != 'workflow_dispatch'
         run: cargo run --release --locked -p echod-sim -- soak --from 1 --seeds 5 --operations 100

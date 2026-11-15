@@ -13,6 +13,7 @@ use vstd::contrib::{make_spec_type, self_view};
 use vstd::prelude::*;
 
 pub mod protocol;
+pub mod common;
 pub use protocol::{BoundaryEvent, Call, Dispatch, DispatchV, Message, Output};
 
 verus! {

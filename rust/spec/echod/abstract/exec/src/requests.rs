@@ -10,6 +10,8 @@ use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_abstract_spec::state::*;
+#[cfg(verus_keep_ghost)]
+use echod_types::common::{lemma_tags_ext, lemma_value_ext};
 use echod_abstract_spec::state::{Config, Id, Time};
 use echod_types::{
     PromiseCreateReq, PromiseRecord, PromiseRegisterCallbackReq, PromiseSettleReq, PromiseState,

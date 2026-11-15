@@ -1135,7 +1135,6 @@ dependencies = [
 name = "echod-concrete-spec"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
  "echod-types",
  "rover-spec",
  "verus_builtin",
@@ -1198,7 +1197,6 @@ dependencies = [
 name = "echod-process"
 version = "0.1.0"
 dependencies = [
- "echod-abstract-spec",
  "echod-concrete-spec",
  "echod-cron",
  "echod-types",

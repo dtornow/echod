@@ -1432,7 +1432,7 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 }
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
-    let next_run_at = echod_abstract_spec::axioms::spec_next_cron(req.cron@, now);
+    let next_run_at = echod_types::common::spec_next_cron(req.cron@, now);
     if !spec_deadline_bounded(next_run_at, req.promise_timeout)
         || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
     {
@@ -1470,7 +1470,7 @@ pub open spec fn spec_run_due(doc: DocumentBodyV, now: Time, retry_timeout: u64)
         DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
             let at = schedule.next_run_at;
             let pending = PendingV {
-                promise: echod_abstract_spec::axioms::spec_expand(schedule.promise_id@, schedule.id@, at),
+                promise: echod_types::common::spec_expand(schedule.promise_id@, schedule.id@, at),
                 at,
                 timeout: schedule.promise_timeout,
                 param: schedule.promise_param,
@@ -1478,7 +1478,7 @@ pub open spec fn spec_run_due(doc: DocumentBodyV, now: Time, retry_timeout: u64)
             };
             let schedule = Schedule {
                 last_run_at: Some(at),
-                next_run_at: echod_abstract_spec::axioms::spec_next_cron(schedule.cron@, at),
+                next_run_at: echod_types::common::spec_next_cron(schedule.cron@, at),
                 ..schedule
             };
             (DocumentBodyV::Schedule(Some(schedule)), None, seq![pending], Seq::empty())
