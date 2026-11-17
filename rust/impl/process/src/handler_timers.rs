@@ -6,13 +6,12 @@ use vstd::prelude::*;
 
 use crate::verified::flight::FiredKey;
 use crate::verified::node::Key;
-use crate::verified::table::Table;
 use crate::verified::text::{concat, copy_string};
 
 use crate::handler_docs::{take_opt, Firing, Work};
 use crate::keys::TimerEntry;
 use crate::state::{Owner, State};
-use crate::state_timers::{Listing, CONCURRENCY, RELIST_AFTER_MS, RETRY_AFTER_MS};
+use crate::state_timers::{AfterListing, Listing, TimerScan, CONCURRENCY, RELIST_AFTER_MS, RETRY_AFTER_MS};
 use crate::target::Target;
 use crate::types::*;
 
@@ -46,13 +45,13 @@ pub use echod_concrete_spec::handler::{
     production_handler_timers_spec_timers_membership_changed as spec_timers_membership_changed,
     production_handler_timers_spec_timers_run as spec_timers_run,
     production_handler_timers_spec_reload as spec_reload,
-    production_handler_timers_spec_take_bucket as spec_take_bucket,
-    production_handler_timers_spec_list_buckets as spec_list_buckets,
+    production_handler_timers_spec_start_bucket as spec_start_bucket,
+    production_handler_timers_spec_advance_scan as spec_advance_scan,
+    production_handler_timers_spec_finish_listing as spec_finish_listing,
+    production_handler_timers_spec_apply_listing as spec_apply_listing,
     production_handler_timers_spec_timers_completed as spec_timers_completed,
     production_handler_timers_spec_prefixes_listed as spec_prefixes_listed,
     production_handler_timers_spec_bucket_listed as spec_bucket_listed,
-    production_handler_timers_spec_extended as spec_extended,
-    production_handler_timers_spec_relisted as spec_relisted,
     production_handler_timers_spec_reloaded as spec_reloaded,
     production_handler_timers_spec_listing_failed as spec_listing_failed,
     production_handler_timers_spec_fire_due as spec_fire_due,
@@ -90,9 +89,7 @@ verus! {
 /// Load what is owed, else fire what is due.
 
 
-/// The full load: every bucket at or before the horizon, this node's
-/// share. Keys for targets that are no longer this node's leave the wheel;
-/// their owner lists them.
+/// The full load: this node's share of every bucket through the horizon.
 
 
 /// Take this node's share of a listed bucket into the wheel; `n` counts
@@ -214,16 +211,28 @@ impl State {
         proof {
             reveal(spec_timers_run);
         }
-        if !self.timers.started || self.timers.listing.is_some() {
+        if !self.timers.started {
             return;
         }
         if let Some(b) = self.timers.backoff_until {
             if now < b {
+                if self.timers.loaded_through.is_some() { self.fire_due(now); }
                 return;
             }
         }
         self.timers.backoff_until = None;
-        if self.timers.reload_pending {
+        if let Some(listing) = take_opt(&mut self.timers.listing) {
+            match listing {
+                Listing::Scan { scan } => self.advance_scan(scan, now),
+                Listing::Applying { keys, loaded, after } => self.apply_listing(keys, loaded, after, now),
+                Listing::Retry { after } => self.start_bucket(after),
+                other => self.timers.listing = Some(other),
+            }
+            if self.timers.loaded_through.is_some() { self.fire_due(now); }
+            return;
+        }
+        let rediscover = match self.timers.rediscover_at { Some(at) => at <= now, None => false };
+        if self.timers.reload_pending || rediscover {
             self.reload(now);
             return;
         }
@@ -254,131 +263,131 @@ impl State {
         }
     }
 
-    /// The full load: every bucket at or before the horizon, this node's
-    /// share. Keys for targets that are no longer this node's leave the
-    /// wheel; their owner lists them.
+    /// Reload through the horizon. Existing slots are ownership-checked at firing.
     fn reload(&mut self, now: u64)
         ensures
             final(self).deep_view() == spec_reload(old(self).deep_view(), now),
     {
         let horizon = self.horizon(now);
-        let ghost s0 = self.deep_view();
-        let ghost armed = self.timers.wheel.armed.deep_view();
-        let mut kept: Vec<crate::state_timers::Slot> = Vec::new();
-        let mut i: usize = 0;
-        proof {
-            reveal(Seq::filter);
-            assert(kept.deep_view() =~= Seq::<SlotSpec>::empty());
-            assert(armed.take(0) =~= Seq::<SlotSpec>::empty());
-        }
-        while i < self.timers.wheel.armed.len()
-            invariant
-                i <= self.timers.wheel.armed.len(),
-                *self == *old(self),
-                s0 == self.deep_view(),
-                armed == self.timers.wheel.armed.deep_view(),
-                kept.deep_view() == armed.take(i as int).filter(|k: SlotSpec| spec_owns_key(s0, k.1)),
-            decreases self.timers.wheel.armed.len() - i,
-        {
-            let ghost k0 = kept.deep_view();
-            let at = self.timers.wheel.armed[i].0;
-            let key = copy_string(&self.timers.wheel.armed[i].1);
-            if self.owns_key(key.as_str()) {
-                kept.push((at, key));
-                proof {
-                    assert(kept.deep_view() =~= k0.push(armed[i as int]));
-                }
-            }
-            proof {
-                reveal(Seq::filter);
-                assert(armed.take(i as int + 1).drop_last() =~= armed.take(i as int));
-                assert(armed.take(i as int + 1).last() == armed[i as int]);
-            }
-            i += 1;
-        }
-        proof {
-            assert(armed.take(i as int) =~= armed);
-        }
-        self.timers.wheel.armed = kept;
+        self.timers.rediscover_at = Some(now.saturating_add(self.cfg.timer_rediscovery_ms));
+        self.timers.reload_pending = true;
         let prefix = self.keys.timer_prefix();
         let op = self.store(StoreReq::ListPrefixes { prefix }, Owner::Timers);
         self.timers.listing = Some(Listing::Prefixes { op, horizon });
     }
 
-    /// Take this node's share of a listed bucket into the wheel.
-    fn take_bucket(&mut self, keys: &Vec<String>) -> (n: usize)
-        ensures
-            (final(self).deep_view(), n as nat) == spec_take_bucket(old(self).deep_view(), keys.deep_view(), 0),
+    fn start_bucket(&mut self, after: AfterListing)
+        ensures final(self).deep_view() == spec_start_bucket(old(self).deep_view(), after.deep_view()),
     {
-        let ghost ks = keys.deep_view();
-        let ghost s0 = old(self).deep_view();
-        let mut n: usize = 0;
-        let mut i: usize = 0;
-        proof {
-            assert(ks.skip(0) =~= ks);
-        }
-        while i < keys.len()
-            invariant
-                i <= keys.len(),
-                n <= i,
-                ks == keys.deep_view(),
-                spec_take_bucket(s0, ks, 0) == spec_take_bucket(self.deep_view(), ks.skip(i as int), n as nat),
-            decreases keys.len() - i,
-        {
-            proof {
-                assert(ks.skip(i as int).drop_first() =~= ks.skip(i as int + 1));
-                assert(ks.skip(i as int)[0] == ks[i as int]);
-            }
-            let key = copy_string(&keys[i]);
-            if let Some(e) = self.keys.parse_timer_key(key.as_str()) {
-                if self.owns_entry(&e) {
-                    self.timers.wheel.arm(e.deadline(), key);
-                    n += 1;
-                }
-            }
-            i += 1;
-        }
-        proof {
-            assert(ks.skip(i as int) =~= Seq::<Seq<char>>::empty());
-        }
-        n
+        let bucket = match &after {
+            AfterListing::Scan { bucket, .. } | AfterListing::Extend { bucket } | AfterListing::Relist { bucket } => *bucket,
+        };
+        let prefix = self.keys.bucket_prefix(bucket);
+        let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
+        self.timers.listing = Some(match after {
+            AfterListing::Scan { bucket, scan } => Listing::Bucket { op, bucket, scan },
+            AfterListing::Extend { bucket } => Listing::Extend { op, bucket },
+            AfterListing::Relist { bucket } => Listing::Relist { op, bucket },
+        });
     }
 
-    /// List every bucket at or before the horizon.
-    fn list_buckets(&mut self, prefixes: &Vec<String>, horizon: u64, pending: &mut Table<OpId, u64>)
-        ensures
-            (final(self).deep_view(), final(pending).deep_view()) == spec_list_buckets(old(self).deep_view(), prefixes.deep_view(), horizon, old(pending).deep_view()),
+    fn advance_scan(&mut self, input: TimerScan, now: u64)
+        ensures final(self).deep_view() == spec_advance_scan(old(self).deep_view(), input.deep_view(), now, 32),
     {
-        let ghost ps = prefixes.deep_view();
-        let ghost s0 = old(self).deep_view();
-        let ghost p0 = old(pending).deep_view();
-        let mut i: usize = 0;
-        proof {
-            assert(ps.skip(0) =~= ps);
-        }
-        while i < prefixes.len()
+        let ghost start = old(self).deep_view();
+        let ghost original = input.deep_view();
+        let mut scan = input;
+        let mut fuel: usize = 32;
+        while scan.prefixes.len() > 0 && fuel > 0 && self.timers.budget > 0
             invariant
-                i <= prefixes.len(),
-                ps == prefixes.deep_view(),
-                spec_list_buckets(s0, ps, horizon, p0) == spec_list_buckets(self.deep_view(), ps.skip(i as int), horizon, pending.deep_view()),
-            decreases prefixes.len() - i,
+                fuel <= 32,
+                start == old(self).deep_view(),
+                original == input.deep_view(),
+                spec_advance_scan(start, original, now, 32) == spec_advance_scan(self.deep_view(), scan.deep_view(), now, fuel as nat),
+            decreases fuel,
         {
+            let ghost before = self.deep_view();
+            let ghost current = scan.deep_view();
+            let ghost previous_fuel = fuel;
+            let ghost prefixes = scan.prefixes.deep_view();
+            let prefix = scan.prefixes.pop().unwrap();
             proof {
-                assert(ps.skip(i as int).drop_first() =~= ps.skip(i as int + 1));
-                assert(ps.skip(i as int)[0] == ps[i as int]);
+                assert(prefix@ == prefixes.last());
+                assert(scan.prefixes.deep_view() =~= prefixes.drop_last());
             }
-            if let Some(bucket) = self.keys.parse_bucket_prefix(prefixes[i].as_str()) {
-                if bucket <= horizon {
-                    let prefix = self.keys.bucket_prefix(bucket);
-                    let op = self.store(StoreReq::List { prefix, max_keys: usize::MAX }, Owner::Timers);
-                    pending.insert(op, bucket);
+            self.timers.budget -= 1;
+            fuel -= 1;
+            if let Some(bucket) = self.keys.parse_bucket_prefix(prefix.as_str()) {
+                if bucket <= scan.horizon {
+                    proof {
+                        assert(spec_advance_scan(before, current, now, previous_fuel as nat)
+                            == spec_start_bucket(self.deep_view(), AfterListingSpec::Scan { bucket, scan: scan.deep_view() }));
+                    }
+                    self.start_bucket(AfterListing::Scan { bucket, scan });
+                    return;
                 }
             }
-            i += 1;
         }
-        proof {
-            assert(ps.skip(i as int) =~= Seq::<Seq<char>>::empty());
+        if scan.prefixes.len() == 0 {
+            self.reloaded(scan.horizon, scan.loaded, now);
+        } else {
+            self.timers.listing = Some(Listing::Scan { scan });
         }
+    }
+
+    fn finish_listing(&mut self, after: AfterListing, loaded: usize, now: u64)
+        ensures final(self).deep_view() == spec_finish_listing(old(self).deep_view(), after.deep_view(), loaded, now),
+    {
+        match after {
+            AfterListing::Scan { mut scan, .. } => {
+                scan.loaded = scan.loaded.saturating_add(loaded);
+                if scan.prefixes.len() == 0 { self.reloaded(scan.horizon, scan.loaded, now); }
+                else { self.timers.listing = Some(Listing::Scan { scan }); }
+            },
+            AfterListing::Extend { bucket } => {
+                self.note(Note::BucketLoaded { bucket, deadlines: loaded });
+                self.note(Note::TimerListing { ok: true });
+                self.timers.loaded_through = Some(bucket);
+            },
+            AfterListing::Relist { bucket } => {
+                self.note(Note::BucketLoaded { bucket, deadlines: loaded });
+                self.note(Note::TimerListing { ok: true });
+                self.timers.closed_through = Some(bucket);
+            },
+        }
+    }
+
+    fn apply_listing(&mut self, mut keys: Vec<String>, mut loaded: usize, after: AfterListing, now: u64)
+        ensures final(self).deep_view() == spec_apply_listing(old(self).deep_view(), keys.deep_view(), loaded, after.deep_view(), now, 32),
+    {
+        let ghost start = old(self).deep_view();
+        let ghost original = keys.deep_view();
+        let ghost original_loaded = loaded;
+        let mut fuel: usize = 32;
+        while keys.len() > 0 && fuel > 0 && self.timers.budget > 0
+            invariant
+                fuel <= 32,
+                spec_apply_listing(start, original, original_loaded, after.deep_view(), now, 32)
+                    == spec_apply_listing(self.deep_view(), keys.deep_view(), loaded, after.deep_view(), now, fuel as nat),
+            decreases fuel,
+        {
+            let ghost before = keys.deep_view();
+            let key = keys.pop().unwrap();
+            proof {
+                assert(key@ == before.last());
+                assert(keys.deep_view() =~= before.drop_last());
+            }
+            self.timers.budget -= 1;
+            fuel -= 1;
+            if let Some(entry) = self.keys.parse_timer_key(key.as_str()) {
+                if self.owns_entry(&entry) {
+                    self.timers.wheel.arm(entry.deadline(), key);
+                    loaded = loaded.saturating_add(1);
+                }
+            }
+        }
+        if keys.len() == 0 { self.finish_listing(after, loaded, now); }
+        else { self.timers.listing = Some(Listing::Applying { keys, loaded, after }); }
     }
 
     pub fn timers_completed(&mut self, op: OpId, outcome: StoreRes)
@@ -399,12 +408,10 @@ impl State {
         let now = self.now();
         match listing {
             Listing::Prefixes { horizon, .. } => self.prefixes_listed(horizon, now, outcome),
-            Listing::Buckets { mut pending, horizon, loaded, failed } => {
-                pending.remove(&op);
-                self.bucket_listed(pending, horizon, loaded, failed, now, outcome);
-            },
-            Listing::Extend { bucket, .. } => self.extended(bucket, now, outcome),
-            Listing::Relist { bucket, .. } => self.relisted(bucket, now, outcome),
+            Listing::Bucket { bucket, scan, .. } => self.bucket_listed(AfterListing::Scan { bucket, scan }, now, outcome),
+            Listing::Extend { bucket, .. } => self.bucket_listed(AfterListing::Extend { bucket }, now, outcome),
+            Listing::Relist { bucket, .. } => self.bucket_listed(AfterListing::Relist { bucket }, now, outcome),
+            _ => {},
         }
     }
 
@@ -418,84 +425,34 @@ impl State {
         }
         match outcome {
             StoreRes::ListPrefixes { result: Ok(prefixes) } => {
-                let mut pending: Table<OpId, u64> = Table::new();
-                self.list_buckets(&prefixes, horizon, &mut pending);
-                if pending.is_empty() {
-                    self.reloaded(horizon, 0, now);
-                } else {
-                    self.timers.listing = Some(Listing::Buckets { pending, horizon, loaded: 0, failed: None });
-                }
+                self.timers.listing = Some(Listing::Scan { scan: TimerScan { prefixes, horizon, loaded: 0 } });
+                self.timers_run(now);
             },
             StoreRes::ListPrefixes { result: Err(e) } => self.listing_failed(e, now),
             _ => self.listing_failed(unexpected(), now),
         }
     }
 
-    /// One bucket of the full load is listed.
-    fn bucket_listed(&mut self, pending: Table<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError>, now: u64, outcome: StoreRes)
+    fn bucket_listed(&mut self, after: AfterListing, now: u64, outcome: StoreRes)
         ensures
-            final(self).deep_view() == spec_bucket_listed(old(self).deep_view(), pending@, horizon, loaded, failed.deep_view(), now, outcome),
+            final(self).deep_view() == spec_bucket_listed(old(self).deep_view(), after.deep_view(), now, outcome),
     {
         proof {
             reveal(spec_bucket_listed);
         }
-        let (loaded, failed) = match outcome {
-            StoreRes::List { result: Ok(keys) } => {
-                let n = self.take_bucket(&keys);
-                (loaded.saturating_add(n), failed)
-            },
-            StoreRes::List { result: Err(e) } => (loaded, Some(e)),
-            _ => (loaded, Some(unexpected())),
-        };
-        if !pending.is_empty() {
-            self.timers.listing = Some(Listing::Buckets { pending, horizon, loaded, failed });
-        } else {
-            match failed {
-                Some(e) => self.listing_failed(e, now),
-                None => self.reloaded(horizon, loaded, now),
-            }
-        }
-    }
-
-    /// The next bucket is listed: the horizon moves.
-    fn extended(&mut self, bucket: u64, now: u64, outcome: StoreRes)
-        ensures
-            final(self).deep_view() == spec_extended(old(self).deep_view(), bucket, now, outcome),
-    {
-        proof {
-            reveal(spec_extended);
-        }
         match outcome {
             StoreRes::List { result: Ok(keys) } => {
-                let n = self.take_bucket(&keys);
-                self.note(Note::BucketLoaded { bucket, deadlines: n });
-                self.note(Note::TimerListing { ok: true });
-                self.timers.loaded_through = Some(bucket);
+                self.timers.listing = Some(Listing::Applying { keys, loaded: 0, after });
                 self.timers_run(now);
             },
-            StoreRes::List { result: Err(e) } => self.listing_failed(e, now),
-            _ => self.listing_failed(unexpected(), now),
-        }
-    }
-
-    /// A past bucket is listed again: it is closed.
-    fn relisted(&mut self, bucket: u64, now: u64, outcome: StoreRes)
-        ensures
-            final(self).deep_view() == spec_relisted(old(self).deep_view(), bucket, now, outcome),
-    {
-        proof {
-            reveal(spec_relisted);
-        }
-        match outcome {
-            StoreRes::List { result: Ok(keys) } => {
-                let n = self.take_bucket(&keys);
-                self.note(Note::BucketLoaded { bucket, deadlines: n });
-                self.note(Note::TimerListing { ok: true });
-                self.timers.closed_through = Some(bucket);
-                self.timers_run(now);
+            StoreRes::List { result: Err(e) } => {
+                self.timers.listing = Some(Listing::Retry { after });
+                self.listing_failed(e, now);
             },
-            StoreRes::List { result: Err(e) } => self.listing_failed(e, now),
-            _ => self.listing_failed(unexpected(), now),
+            _ => {
+                self.timers.listing = Some(Listing::Retry { after });
+                self.listing_failed(unexpected(), now);
+            },
         }
     }
 
@@ -515,7 +472,6 @@ impl State {
         let wheel = self.timers.wheel.len();
         let epoch = self.node.core.epoch;
         self.note(Note::TimersLoaded { deadlines: loaded, wheel, epoch });
-        self.timers_run(now);
     }
 
     fn listing_failed(&mut self, e: StoreError, now: u64)
@@ -539,8 +495,10 @@ impl State {
             reveal(spec_fire_due);
         }
         let ghost b0 = self.timers.backlog.deep_view();
-        let mut due = self.timers.wheel.take_due(now);
+        let limit = if self.timers.inflight < CONCURRENCY && self.timers.backlog.len() == 0 { self.timers.budget / 2 } else { 0 };
+        let mut due = self.timers.wheel.take_due(now, limit);
         let ghost d0 = due.deep_view();
+        self.timers.budget -= due.len();
         self.timers.backlog.append(&mut due);
         proof {
             assert(self.timers.backlog.deep_view() =~= b0 + d0);
@@ -555,7 +513,7 @@ impl State {
         let ghost s0 = old(self).deep_view();
         let fuel = self.timers.backlog.len();
         let mut k: usize = 0;
-        while k < fuel && self.timers.inflight < CONCURRENCY && self.timers.backlog.len() > 0
+        while k < fuel && self.timers.budget > 0 && self.timers.inflight < CONCURRENCY && self.timers.backlog.len() > 0
             invariant
                 k <= fuel,
                 spec_dispatch_due(s0, now, fuel as nat) == spec_dispatch_due(self.deep_view(), now, (fuel - k) as nat),
@@ -563,11 +521,12 @@ impl State {
         {
             let ghost s1 = self.deep_view();
             let ghost b0 = self.timers.backlog.deep_view();
-            let (at, key) = self.timers.backlog.remove(0);
+            let (at, key) = self.timers.backlog.pop_front().unwrap();
+            self.timers.budget -= 1;
             proof {
                 assert(b0[0] == (at, key@));
                 assert(self.timers.backlog.deep_view() =~= b0.drop_first());
-                assert(self.deep_view() == spec_with_timers(s1, TimersSpec { backlog: s1.timers.backlog.drop_first(), ..s1.timers }));
+                assert(self.deep_view() == spec_with_timers(s1, TimersSpec { backlog: s1.timers.backlog.drop_first(), budget: (s1.timers.budget - 1) as usize, ..s1.timers }));
             }
             self.timer_fire(key, at, now);
             k += 1;
@@ -651,3 +610,173 @@ impl State {
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use crate::{Config, State};
+    use crate::state_timers::TIMER_WORK_BUDGET;
+    use crate::types::{Armed, Effect, Event, StoreError, StoreReq, StoreRes};
+    use super::{AfterListing, Listing, TimerScan};
+
+    fn active_state(now: u64) -> State {
+        let mut state = State::new(Config::memory("node"));
+        state.loops = true;
+        state.node.core.read_config(now, 1, vec!["node".into()]);
+        state.node.members.next_heartbeat = Some(now + 5_000);
+        state.timers.started = true;
+        state.timers.bucket_ms = 3_600_000;
+        state.timers.loaded_through = Some(3_600_000);
+        state.timers.closed_through = Some(0);
+        state.timers.rediscover_at = Some(now + 300_000);
+        state
+    }
+
+    #[test]
+    fn bucket_application_yields_to_real_wakes() {
+        let now = 3_600_000;
+        let mut state = active_state(now);
+        let keys = (0..1_000).map(|i| state.keys.timer_key(&format!("origin-{i}"), 7_200_000, 1, "node")).collect();
+        state.timers.listing = Some(Listing::Applying { keys, loaded: 0, after: AfterListing::Extend { bucket: 7_200_000 } });
+        let mut clock = now;
+        let mut applied = 0;
+        while state.timers.listing.is_some() {
+            let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+            let next = state.timers.wheel.len();
+            assert!(next > applied && next - applied <= 32);
+            assert!(state.timers.budget >= 32);
+            applied = next;
+            if state.timers.listing.is_some() {
+                let delay = effects.iter().find_map(|effect| match effect {
+                    Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+                    _ => None,
+                }).expect("application continuation must emit a physical wake");
+                assert_eq!(delay, 1);
+                clock += delay;
+            }
+        }
+        assert_eq!(applied, 1_000);
+        assert_eq!(state.timers.loaded_through, Some(7_200_000));
+    }
+
+    #[test]
+    fn prefix_processing_is_bounded_and_bucket_retries_preserve_progress() {
+        let now = 3_600_000;
+        let mut state = active_state(now);
+        let mut prefixes = vec![state.keys.bucket_prefix(0), state.keys.bucket_prefix(3_600_000)];
+        prefixes.extend((0..100).map(|i| format!("invalid-{i}")));
+        state.timers.listing = Some(Listing::Scan { scan: TimerScan { prefixes, horizon: 7_200_000, loaded: 0 } });
+        let mut clock = now;
+        let (op, request) = loop {
+            let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+            let stores: Vec<_> = effects.iter().filter_map(|effect| match effect {
+                Effect::Store { op, request: StoreReq::List { prefix, .. } } => Some((*op, prefix.clone())),
+                _ => None,
+            }).collect();
+            assert!(stores.len() <= 1);
+            assert!(state.timers.budget >= 32);
+            if let Some(store) = stores.into_iter().next() { break store; }
+            let delay = effects.iter().find_map(|effect| match effect {
+                Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+                _ => None,
+            }).expect("prefix continuation must emit a physical wake");
+            assert_eq!(delay, 1);
+            clock += delay;
+        };
+        clock += 400_000;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        assert!(!effects.iter().any(|effect| matches!(effect,
+            Effect::Store { request: StoreReq::List { prefix, .. } | StoreReq::ListPrefixes { prefix }, .. }
+                if prefix.starts_with(&state.keys.timer_prefix()))));
+        clock += 1;
+        let effects = state.on_event(Event::Store { clock, op, response: StoreRes::List { result: Err(StoreError::Unavailable("retry".into())) } });
+        assert!(matches!(state.timers.listing, Some(Listing::Retry { .. })));
+        assert_eq!(state.timers.loaded_through, Some(3_600_000));
+        assert_eq!(state.timers.backoff_until, Some(clock + 1_000));
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+            _ => None,
+        }).unwrap();
+        assert_eq!(delay, 1_000);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        let (retry_op, retried) = effects.iter().find_map(|effect| match effect {
+            Effect::Store { op, request: StoreReq::List { prefix, .. } } => Some((*op, prefix.clone())),
+            _ => None,
+        }).unwrap();
+        assert_eq!(retried, request);
+        assert!(matches!(state.timers.listing, Some(Listing::Bucket { ref scan, .. }) if scan.prefixes.len() == 1));
+        let effects = state.on_event(Event::Store { clock, op: retry_op, response: StoreRes::List { result: Ok(vec![]) } });
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+            _ => None,
+        }).unwrap();
+        assert_eq!(delay, 1);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        let past_op = effects.iter().find_map(|effect| match effect {
+            Effect::Store { op, request: StoreReq::List { prefix, .. } } if *prefix == state.keys.bucket_prefix(0) => Some(*op),
+            _ => None,
+        }).expect("the closed historical bucket must still be scanned");
+        let effects = state.on_event(Event::Store { clock, op: past_op, response: StoreRes::List { result: Ok(vec![]) } });
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+            _ => None,
+        }).unwrap();
+        assert_eq!(delay, 1);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        assert_eq!(effects.iter().filter(|effect| matches!(effect,
+            Effect::Store { request: StoreReq::ListPrefixes { .. }, .. })).count(), 1);
+        assert_eq!(state.timers.rediscover_at, Some(clock + 300_000));
+    }
+
+    #[test]
+    fn repeated_dispatch_shares_the_same_event_budget() {
+        let mut state = State::new(Config::memory("node"));
+        state.timers.budget = TIMER_WORK_BUDGET;
+        for i in 0..1_000 {
+            state.timers.backlog.push_back((0, format!("unparseable-{i}")));
+        }
+        state.dispatch_due(0);
+        assert_eq!(state.timers.backlog.len(), 1_000 - TIMER_WORK_BUDGET);
+        assert_eq!(state.timers.budget, 0);
+        state.dispatch_due(0);
+        assert_eq!(state.timers.backlog.len(), 1_000 - TIMER_WORK_BUDGET);
+    }
+
+    #[test]
+    fn saturated_concurrency_does_not_extract_more_due_keys() {
+        let mut state = State::new(Config::memory("node"));
+        state.timers.budget = TIMER_WORK_BUDGET;
+        state.timers.inflight = super::CONCURRENCY;
+        state.timers.wheel.arm(0, "unparseable".into());
+        state.fire_due(0);
+        assert_eq!(state.timers.wheel.len(), 1);
+        assert!(state.timers.backlog.is_empty());
+        assert_eq!(state.timers.budget, TIMER_WORK_BUDGET);
+    }
+
+    #[test]
+    fn rediscovery_coalesces_missed_start_intervals_without_overlap() {
+        let mut cfg = Config::memory("node");
+        cfg.timer_rediscovery_ms = 2_500;
+        let mut state = State::new(cfg);
+        state.timers.started = true;
+        state.timers.loaded_through = Some(7_200_000);
+        state.timers.rediscover_at = Some(3_600_000);
+        state.timers.budget = TIMER_WORK_BUDGET;
+        state.timers_run(3_600_000);
+        assert!(matches!(state.timers.listing, Some(super::Listing::Prefixes { .. })));
+        assert_eq!(state.timers.rediscover_at, Some(3_602_500));
+        let effects = state.out.len();
+        state.timers_run(3_610_000);
+        assert_eq!(state.out.len(), effects);
+        state.timers.listing = None;
+        state.reloaded(7_200_000, 0, 3_610_000);
+        assert!(state.timers.listing.is_none());
+        assert_eq!(state.timers.wake_at(3_610_000), Some(3_602_500));
+        state.timers_run(3_610_001);
+        assert!(matches!(state.timers.listing, Some(super::Listing::Prefixes { .. })));
+        assert_eq!(state.timers.rediscover_at, Some(3_612_501));
+    }
+}

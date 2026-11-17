@@ -505,6 +505,7 @@ pub fn config_out(config: &Config) -> (data: ProductionConfigData)
         node_id: copy(&config.node_id), url: copy(&config.url), prefix: copy(&config.prefix),
         compact: config.compact, appendable: config.appendable, retry_timeout: config.retry_timeout,
         timer_bucket_ms: config.timer_bucket_ms, heartbeat_ms: config.heartbeat_ms, node_ttl_ms: config.node_ttl_ms,
+        timer_rediscovery_ms: config.timer_rediscovery_ms,
         cache_entries: config.cache_entries, cache_bytes: config.cache_bytes, debug: config.debug,
     }
 }
@@ -516,6 +517,7 @@ fn config_in(config: ProductionConfigData) -> (data: Config)
         node_id: config.node_id, url: config.url, prefix: config.prefix,
         compact: config.compact, appendable: config.appendable, retry_timeout: config.retry_timeout,
         timer_bucket_ms: config.timer_bucket_ms, heartbeat_ms: config.heartbeat_ms, node_ttl_ms: config.node_ttl_ms,
+        timer_rediscovery_ms: config.timer_rediscovery_ms,
         cache_entries: config.cache_entries, cache_bytes: config.cache_bytes, debug: config.debug,
     }
 }

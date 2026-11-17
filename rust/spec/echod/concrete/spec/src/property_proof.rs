@@ -1113,7 +1113,7 @@ pub proof fn lemma_compose_preserves_apply<V>(
     lemma_apply_changes_append(document.entries, first.changes, second.changes);
 }
 
-proof fn lemma_before_irreflexive(a: Seq<char>)
+pub proof fn lemma_before_irreflexive(a: Seq<char>)
     ensures
         !spec_before(a, a),
     decreases a.len(),
@@ -1123,7 +1123,7 @@ proof fn lemma_before_irreflexive(a: Seq<char>)
     }
 }
 
-proof fn lemma_before_transitive(a: Seq<char>, b: Seq<char>, c: Seq<char>)
+pub proof fn lemma_before_transitive(a: Seq<char>, b: Seq<char>, c: Seq<char>)
     requires
         spec_before(a, b),
         spec_before(b, c),
@@ -1142,7 +1142,7 @@ proof fn lemma_before_transitive(a: Seq<char>, b: Seq<char>, c: Seq<char>)
     }
 }
 
-proof fn lemma_before_total(a: Seq<char>, b: Seq<char>)
+pub proof fn lemma_before_total(a: Seq<char>, b: Seq<char>)
     requires
         a != b,
     ensures

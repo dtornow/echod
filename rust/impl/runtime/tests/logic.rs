@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 #[derive(Default)]
 struct Bucket {
     objects: BTreeMap<String, (Vec<u8>, u64)>,
+    next_version: u64,
 }
 
 impl Bucket {
@@ -33,7 +34,8 @@ impl Bucket {
             }) },
             StoreReq::PutIfMatch { key, body, etag } => match self.objects.get(&key) {
                 Some((b, v)) if Self::etag(b, *v) == etag => {
-                    let nv = v + 1;
+                    self.next_version += 1;
+                    let nv = self.next_version;
                     let e = Self::etag(&body, nv);
                     self.objects.insert(key, (body, nv));
                     StoreRes::PutIfMatch { result: Ok(e) }
@@ -44,14 +46,15 @@ impl Bucket {
                 if self.objects.contains_key(&key) {
                     return StoreRes::PutIfNoneMatch { result: Err(echod_logic::types::StoreError::PreconditionFailed) };
                 }
-                let e = Self::etag(&body, 1);
-                self.objects.insert(key, (body, 1));
+                self.next_version += 1;
+                let e = Self::etag(&body, self.next_version);
+                self.objects.insert(key, (body, self.next_version));
                 StoreRes::PutIfNoneMatch { result: Ok(e) }
             }
             StoreReq::AppIfMatch { .. } => StoreRes::AppIfMatch { result: Err(echod_logic::types::StoreError::Unavailable("no appends".into())) },
             StoreReq::Put { key, body } => {
-                let v = self.objects.get(&key).map(|(_, v)| v + 1).unwrap_or(1);
-                self.objects.insert(key, (body, v));
+                self.next_version += 1;
+                self.objects.insert(key, (body, self.next_version));
                 StoreRes::Put { result: Ok(()) }
             }
             StoreReq::Del { key } => {
@@ -514,6 +517,139 @@ fn production_fleet_drives_deadlines_through_real_wakes_and_store_operations() {
             p.state == echod_logic::verified::PromiseState::RejectedTimedout))));
 }
 
+struct SharedTimerFleet {
+    nodes: [Harness; 2],
+    bucket: Bucket,
+    clock: u64,
+    wakes: [Option<(u64, Armed)>; 2],
+}
+
+impl SharedTimerFleet {
+    fn new(interval: u64) -> Self {
+        let node = |id: &str| {
+            let mut cfg = Config::memory(id);
+            cfg.timer_bucket_ms = 3_600_000;
+            cfg.timer_rediscovery_ms = interval;
+            cfg.heartbeat_ms = 5_000;
+            cfg.node_ttl_ms = 15_000;
+            let mut harness = Harness::new(id);
+            harness.state = State::new(cfg);
+            harness
+        };
+        let mut fleet = Self {
+            nodes: [node("a"), node("b")],
+            bucket: Bucket::default(),
+            clock: 3_600_000,
+            wakes: [None, None],
+        };
+        for i in 0..2 { fleet.with_node(i, |node| node.start(true)); }
+        fleet.advance_to(3_620_000);
+        fleet
+    }
+
+    fn with_node<R>(&mut self, index: usize, action: impl FnOnce(&mut Harness) -> R) -> R {
+        let node = &mut self.nodes[index];
+        node.clock = self.clock;
+        std::mem::swap(&mut node.bucket, &mut self.bucket);
+        let result = action(node);
+        std::mem::swap(&mut node.bucket, &mut self.bucket);
+        if let Some(after) = node.wake_after.take() {
+            self.wakes[index] = Some((self.clock + after, node.wake_armed.clone()));
+        }
+        result
+    }
+
+    fn advance_to(&mut self, until: u64) {
+        let mut steps = 0;
+        loop {
+            let next = self.wakes.iter().enumerate()
+                .filter_map(|(i, wake)| wake.as_ref().map(|(at, _)| (*at, i)))
+                .filter(|(at, _)| *at <= until).min();
+            let Some((at, node)) = next else { break; };
+            assert!(at >= self.clock);
+            self.clock = at;
+            let (_, armed) = self.wakes[node].take().unwrap();
+            self.with_node(node, |h| h.apply(Event::Wake { clock: at, armed }));
+            steps += 1;
+            assert!(steps < 10_000, "timer wake loop did not advance");
+        }
+        self.clock = until;
+    }
+
+    fn promise(&self, origin: &str, id: &str) -> echod_logic::concrete::Prom {
+        let bytes = &self.bucket.objects[&format!("wf/{origin}")].0;
+        let loaded = echod_logic::document::decode_workflow(bytes).unwrap();
+        let echod_logic::concrete::DocumentBody::Workflow(objects) = echod_logic::document::loaded_body(&loaded) else {
+            panic!("workflow document");
+        };
+        objects.get(&id.to_owned()).unwrap().promise
+    }
+}
+
+#[test]
+fn stable_owner_rediscovers_nonowner_timer_written_just_after_bucket_scan() {
+    use echod_logic::verified::PromiseState;
+    for interval in [300_000, 2_500] {
+        let mut fleet = SharedTimerFleet::new(interval);
+        let epoch = fleet.nodes[0].state.node.core.epoch;
+        assert_eq!(epoch, fleet.nodes[1].state.node.core.epoch);
+        assert_eq!(fleet.nodes[0].state.node.core.members.len(), 2);
+        let origin = (0..1_000).map(|i| format!("timer-{i}"))
+            .find(|origin| fleet.nodes.iter().all(|node| node.state.node.core.owner(origin).as_deref() == Some("a"))).unwrap();
+        let sentinel = format!("{origin}:sentinel");
+        let sentinel_deadline = fleet.clock + 900_000;
+        assert_eq!(fleet.with_node(0, |node| node.request("promise.create", json!({
+            "id": sentinel, "timeoutAt": sentinel_deadline, "tags": { "resonate:timer": "true" }
+        }))).0, 200);
+        let scan = fleet.nodes[0].state.timers.rediscover_at.unwrap();
+        fleet.advance_to(scan + 1);
+        assert!(fleet.nodes[0].notes.iter().any(|note| matches!(note,
+            Note::TimersLoaded { deadlines, .. } if *deadlines > 0)));
+        let next_scan = fleet.nodes[0].state.timers.rediscover_at.unwrap();
+        assert_eq!(next_scan, scan + interval);
+        let id = format!("{origin}:late");
+        let deadline = fleet.clock + 1_000;
+        assert_eq!(fleet.with_node(1, |node| node.request("promise.create", json!({
+            "id": id, "timeoutAt": deadline, "tags": { "resonate:timer": "true" }
+        }))).0, 200);
+        fleet.advance_to(next_scan - 1);
+        assert_eq!(fleet.promise(&origin, &id).state, PromiseState::Pending);
+        fleet.advance_to(next_scan + 10);
+        let promise = fleet.promise(&origin, &id);
+        assert_eq!(promise.state, PromiseState::Resolved);
+        assert_eq!(promise.settled_at, Some(deadline));
+        assert!(fleet.nodes.iter().all(|node| node.state.node.core.epoch == epoch));
+        assert!(fleet.clock < 7_200_000, "discovery must not wait for the bucket to close");
+    }
+}
+
+#[test]
+fn debug_reset_clears_partial_timer_application_before_reloading() {
+    use echod_logic::state_timers::{AfterListing, Listing};
+    let mut h = Harness::new("n1");
+    h.state.cfg.debug = true;
+    h.start(true);
+    h.advance(1_500);
+    h.state.timers.listing = Some(Listing::Applying {
+        keys: vec!["unapplied".into()], loaded: 0,
+        after: AfterListing::Extend { bucket: h.clock + 1_000 },
+    });
+    h.state.timers.wheel.arm(h.clock + 2_000, "armed".into());
+    h.state.timers.backlog.push_back((h.clock, "queued".into()));
+    h.state.timers.backoff_until = Some(h.clock + 10_000);
+    assert_eq!(h.request("debug.reset", json!({})).0, 200);
+    assert!(h.state.timers.listing.is_none());
+    assert!(h.state.timers.backlog.is_empty());
+    assert_eq!(h.state.timers.wheel.len(), 0);
+    assert!(h.state.timers.backoff_until.is_none());
+    assert!(h.state.timers.rediscover_at.is_none());
+    assert!(h.state.timers.reload_pending);
+    assert_eq!(h.wake_after, Some(1));
+    h.advance(1);
+    assert!(h.state.timers.loaded_through.is_some());
+    assert!(!h.state.timers.reload_pending);
+}
+
 #[test]
 fn public_admission_rejects_empty_heartbeat_before_document_routing() {
     let envelope = RequestEnvelope {
@@ -729,6 +865,7 @@ fn seeded_operation_wrap_can_accept_a_replayed_absent_read() {
     assert_eq!(writer.request("promise.create", json!({
         "id": "target:live", "timeoutAt": 2_000_000, "tags": {}
     })).0, 200);
+    reader.bucket.next_version = reader.bucket.next_version.max(writer.bucket.next_version);
     reader.bucket.objects.extend(writer.bucket.objects);
 
     // Seed only the allocator boundary; this does not establish a reachable
@@ -954,7 +1091,7 @@ fn failed_cas_discards_notifications_and_reloads_before_retry() {
     let (write_op, write) = calls.pop().unwrap();
     assert!(matches!(write, StoreReq::PutIfMatch { .. }));
     let probe = h.replay_probe.as_ref().unwrap();
-    let mut branch_bucket = Bucket { objects: h.bucket.objects.clone() };
+    let mut branch_bucket = Bucket { objects: h.bucket.objects.clone(), next_version: h.bucket.next_version };
     let successful = branch_bucket.call(write.clone());
     let success_event = Event::Store { op: write_op, response: successful, clock: h.clock };
     let failure_event = Event::Store {

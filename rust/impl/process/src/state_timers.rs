@@ -5,12 +5,9 @@
 //! filed under the time bucket its deadline falls in. Every writer puts
 //! the key before the state that arms it and holds it in its wheel after.
 //!
-//! The wheel is where firing happens. A node lists the bucket in exactly
-//! three situations: when it starts, when the configuration changes
-//! (ownership is `hash mod n`, so every node's share moved), and when the
-//! clock reaches a bucket it has not loaded yet. Each listing takes the
-//! keys whose target this node owns and nothing else. Between listings no
-//! store call is made to find out what is due: the wheel knows.
+//! Discovery runs at startup, on membership changes, periodically, and as
+//! buckets enter or leave the loaded range. Listings retain this node's
+//! share, with bounded application steps continued by physical wakes.
 //!
 //! Firing a key sweeps its target, which is idempotent; the key is deleted
 //! only once the sweep has committed, since until then it is the only
@@ -20,24 +17,30 @@
 //! fires again. A key for a target this node no longer owns is dropped
 //! from the wheel unfired; its owner lists it.
 //!
-//! The wheel is a sequence of `(deadline, key)` in order: by deadline, then
-//! by key. Each operation ensures it computes its `spec_*` over that
-//! sequence.
+//! The wheel indexes `(deadline, key)` pairs. Due batches preserve deadline
+//! order and use the key to break ties; the concrete model states both.
 
 
 use vstd::prelude::*;
+use core::cmp::Ordering;
+use std::collections::{BTreeSet, VecDeque};
+#[cfg(verus_keep_ghost)]
+use vstd::std_specs::iter::IteratorSpec;
+#[cfg(verus_keep_ghost)]
+use vstd::std_specs::cmp::{
+    PartialEqSpecImpl, PartialOrdSpecImpl, OrdSpecImpl,
+};
 
 use crate::concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::str_eq;
-use crate::verified::table::Table;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::handler::spec_before;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::StoreErrorSpec;
+pub use echod_concrete_spec::state::{ProductionTimerScanV as TimerScanSpec, ProductionAfterListingV as AfterListingSpec};
 
 #[cfg(verus_keep_ghost)]
 pub use echod_concrete_spec::state::ProductionTimerWheelV as TimerWheelSpec;
@@ -51,8 +54,10 @@ pub use echod_concrete_spec::handler::{
     production_state_timers_spec_slot_before as spec_slot_before,
     production_state_timers_spec_arm as spec_arm,
     production_state_timers_spec_disarm as spec_disarm,
-    production_state_timers_spec_due_count as spec_due_count,
     production_state_timers_spec_take_due as spec_take_due,
+    production_state_timers_spec_take_due_n as spec_take_due_n,
+    production_state_timers_spec_minimum as spec_minimum,
+    production_state_timers_spec_is_first as spec_is_first,
     production_state_timers_spec_nearest as spec_nearest,
     production_state_timers_spec_min_opt as spec_min_opt,
     production_state_timers_spec_max as spec_max,
@@ -61,14 +66,14 @@ pub use echod_concrete_spec::handler::{
     production_state_timers_spec_next_wake as spec_next_wake,
 };
 
-pub use echod_concrete_spec::state::{RETRY_AFTER_MS, RELIST_AFTER_MS, CONCURRENCY};
+pub use echod_concrete_spec::state::{RETRY_AFTER_MS, RELIST_AFTER_MS, CONCURRENCY, TIMER_WORK_BUDGET};
 verus! {
 #[cfg(verus_keep_ghost)]
 impl DeepView for TimerWheel {
     type V = TimerWheelSpec;
     open spec fn deep_view(&self) -> TimerWheelSpec {
         TimerWheelSpec {
-            armed: self.armed.deep_view(),
+            armed: self.armed@,
         }
     }
 }
@@ -92,6 +97,8 @@ impl DeepView for Timers {
             backoff_until: self.backoff_until.deep_view(),
             inflight: self.inflight.deep_view(),
             backlog: self.backlog.deep_view(),
+            budget: self.budget,
+            rediscover_at: self.rediscover_at,
         }
     }
 }
@@ -106,102 +113,303 @@ impl View for Timers {
 pub type Slot = (u64, String);
 pub type SlotSpec = (u64, Seq<char>);
 
-/// Armed keys by deadline.
+pub struct TimerKey {
+    pub at: u64,
+    pub key: String,
+}
+
+pub open spec fn timer_key_order(a: SlotSpec, b: SlotSpec) -> Ordering {
+    if a == b { Ordering::Equal }
+    else if spec_slot_before(a, b) { Ordering::Less }
+    else { Ordering::Greater }
+}
+
+proof fn timer_order_pair(a: SlotSpec, b: SlotSpec)
+    ensures
+        (timer_key_order(a, b) == Ordering::Less) == (timer_key_order(b, a) == Ordering::Greater),
+        (timer_key_order(a, b) == Ordering::Equal) == (a == b),
+{
+    use echod_concrete_spec::property_proof::{
+        lemma_before_irreflexive, lemma_before_transitive, lemma_before_total,
+    };
+    lemma_before_irreflexive(a.1);
+    if a.1 != b.1 { lemma_before_total(a.1, b.1); }
+    if spec_before(a.1, b.1) && spec_before(b.1, a.1) {
+        lemma_before_transitive(a.1, b.1, a.1);
+    }
+}
+
+proof fn timer_order_transitive(a: SlotSpec, b: SlotSpec, c: SlotSpec)
+    requires timer_key_order(a, b) == Ordering::Less, timer_key_order(b, c) == Ordering::Less,
+    ensures timer_key_order(a, c) == Ordering::Less,
+{
+    if a.0 == b.0 && b.0 == c.0 {
+        echod_concrete_spec::property_proof::lemma_before_transitive(a.1, b.1, c.1);
+        echod_concrete_spec::property_proof::lemma_before_irreflexive(a.1);
+    }
+}
+
+proof fn timer_key_obeys_order()
+    ensures vstd::laws_cmp::obeys_cmp::<TimerKey>(),
+{
+    use vstd::laws_cmp::*;
+    use vstd::laws_eq::*;
+    reveal(obeys_eq_spec_properties);
+    reveal(obeys_partial_cmp_spec_properties);
+    reveal(obeys_cmp_partial_ord);
+    reveal(obeys_cmp_ord);
+    assert forall|a: TimerKey, b: TimerKey|
+        #[trigger] timer_key_order(a.deep_view(), b.deep_view()) == Ordering::Less
+        <==> timer_key_order(b.deep_view(), a.deep_view()) == Ordering::Greater by {
+        timer_order_pair(a.deep_view(), b.deep_view());
+    };
+    assert forall|a: TimerKey, b: TimerKey, c: TimerKey|
+        #[trigger] timer_key_order(a.deep_view(), b.deep_view()) == Ordering::Less
+        && #[trigger] timer_key_order(b.deep_view(), c.deep_view()) == Ordering::Less
+        implies timer_key_order(a.deep_view(), c.deep_view()) == Ordering::Less by {
+        timer_order_transitive(a.deep_view(), b.deep_view(), c.deep_view());
+    };
+    assert forall|a: TimerKey, b: TimerKey, c: TimerKey|
+        #[trigger] timer_key_order(a.deep_view(), b.deep_view()) == Ordering::Greater
+        && #[trigger] timer_key_order(b.deep_view(), c.deep_view()) == Ordering::Greater
+        implies timer_key_order(a.deep_view(), c.deep_view()) == Ordering::Greater by {
+        timer_order_pair(b.deep_view(), a.deep_view());
+        timer_order_pair(c.deep_view(), b.deep_view());
+        timer_order_transitive(c.deep_view(), b.deep_view(), a.deep_view());
+        timer_order_pair(c.deep_view(), a.deep_view());
+    };
+}
+
+fn compare_timer_keys(a: &TimerKey, b: &TimerKey) -> (order: Ordering)
+    ensures order == timer_key_order(a.deep_view(), b.deep_view()),
+{
+    if a.at == b.at && str_eq(a.key.as_str(), b.key.as_str()) {
+        Ordering::Equal
+    } else if a.at < b.at || (a.at == b.at && before(&a.key, &b.key)) {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TimerKey {
+    type V = SlotSpec;
+    open spec fn deep_view(&self) -> SlotSpec { (self.at, self.key@) }
+}
+
+#[cfg(verus_keep_ghost)]
+impl PartialEqSpecImpl for TimerKey {
+    open spec fn obeys_eq_spec() -> bool { true }
+    open spec fn eq_spec(&self, other: &Self) -> bool {
+        self.deep_view() == other.deep_view()
+    }
+}
+
+impl PartialEq for TimerKey {
+    fn eq(&self, other: &Self) -> (same: bool)
+        ensures same == (self.deep_view() == other.deep_view()),
+    {
+        self.at == other.at && str_eq(self.key.as_str(), other.key.as_str())
+    }
+}
+
+impl Eq for TimerKey {}
+
+#[cfg(verus_keep_ghost)]
+impl OrdSpecImpl for TimerKey {
+    open spec fn obeys_cmp_spec() -> bool { true }
+    open spec fn cmp_spec(&self, other: &Self) -> Ordering {
+        timer_key_order(self.deep_view(), other.deep_view())
+    }
+}
+
+impl Ord for TimerKey {
+    fn cmp(&self, other: &Self) -> (order: Ordering)
+        ensures order == timer_key_order(self.deep_view(), other.deep_view()),
+    {
+        compare_timer_keys(self, other)
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl PartialOrdSpecImpl for TimerKey {
+    open spec fn obeys_partial_cmp_spec() -> bool { true }
+    open spec fn partial_cmp_spec(&self, other: &Self) -> Option<Ordering> {
+        Some(timer_key_order(self.deep_view(), other.deep_view()))
+    }
+}
+
+impl PartialOrd for TimerKey {
+    fn partial_cmp(&self, other: &Self) -> (order: Option<Ordering>)
+        ensures order == Some(timer_key_order(self.deep_view(), other.deep_view())),
+    {
+        Some(compare_timer_keys(self, other))
+    }
+}
+
+pub struct TimerIndex {
+    keys: BTreeSet<TimerKey>,
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for TimerIndex {
+    type V = Set<SlotSpec>;
+    closed spec fn view(&self) -> Self::V { self.keys.deep_view() }
+}
+
+proof fn timer_key_ext(a: TimerKey, b: TimerKey)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    echod_types::common::axiom_string_ext(a.key, b.key);
+}
+
+impl TimerIndex {
+    pub fn new() -> (index: Self)
+        ensures index@ == Set::<SlotSpec>::empty(),
+    {
+        let keys = BTreeSet::new();
+        Self { keys }
+    }
+
+    pub fn len(&self) -> (count: usize)
+        ensures count == self@.len(),
+    {
+        proof {
+            timer_key_obeys_order();
+            broadcast use vstd::std_specs::btree::group_btree_axioms;
+            assert forall|a: TimerKey, b: TimerKey|
+                self.keys@.contains(a) && self.keys@.contains(b)
+                && a.deep_view() == b.deep_view() implies a == b by {
+                timer_key_ext(a, b);
+            };
+            vstd::set_lib::lemma_map_size(self.keys@, self@, |k: TimerKey| k.deep_view());
+        }
+        self.keys.len()
+    }
+
+    pub fn arm(&mut self, at: u64, key: String)
+        ensures final(self)@ == old(self)@.insert((at, key@)),
+    {
+        proof {
+            timer_key_obeys_order();
+        }
+        let slot = TimerKey { at, key };
+        let ghost old = self.keys@;
+        self.keys.insert(slot);
+        proof {
+            assert(self.keys@ == old.insert(slot));
+            old.lemma_set_map_insert_commute(slot, |k: TimerKey| k.deep_view());
+            assert(self.keys.deep_view() =~= old.map(|k: TimerKey| k.deep_view()).insert((at, key@)));
+        }
+    }
+
+    pub fn disarm(&mut self, at: u64, key: &str)
+        ensures final(self)@ == old(self)@.remove((at, key@)),
+    {
+        proof { timer_key_obeys_order(); }
+        let slot = TimerKey { at, key: crate::verified::text::text(key) };
+        let ghost old = self.keys@;
+        self.keys.remove(&slot);
+        proof {
+            broadcast use vstd::std_specs::btree::group_btree_axioms;
+            broadcast use vstd::set::Set::lemma_map_contains;
+            assert(self.keys@ == old.remove(slot));
+            assert forall|k: TimerKey| k.deep_view() == slot.deep_view() implies k == slot by {
+                timer_key_ext(k, slot);
+            };
+            assert forall|value: SlotSpec|
+                self.keys.deep_view().contains(value)
+                == old.map(|k: TimerKey| k.deep_view()).remove((at, key@)).contains(value) by {
+                if self.keys.deep_view().contains(value) {
+                    let k = choose|k: TimerKey| self.keys@.contains(k) && k.deep_view() == value;
+                    if value == slot.deep_view() { timer_key_ext(k, slot); }
+                } else if old.map(|k: TimerKey| k.deep_view()).remove((at, key@)).contains(value) {
+                    let k = choose|k: TimerKey| old.contains(k) && k.deep_view() == value;
+                    assert(self.keys@.contains(k));
+                }
+            };
+            assert(self.keys.deep_view() =~= old.map(|k: TimerKey| k.deep_view()).remove((at, key@)));
+        }
+    }
+
+    pub fn first(&self) -> (slot: Option<Slot>)
+        ensures
+            match slot {
+                None => self@.is_empty(),
+                Some(k) => self@.contains(k.deep_view())
+                    && forall|other: SlotSpec| self@.contains(other)
+                        ==> !spec_slot_before(other, k.deep_view()),
+            },
+    {
+        proof {
+            timer_key_obeys_order();
+            broadcast use vstd::laws_cmp::group_laws_cmp;
+            broadcast use vstd::std_specs::btree::group_btree_axioms;
+            assert(vstd::std_specs::btree::key_obeys_cmp_spec::<TimerKey>());
+            assert(vstd::laws_cmp::obeys_cmp::<&TimerKey>());
+        }
+        let mut iter = self.keys.iter();
+        let ghost items = iter.remaining();
+        match iter.next() {
+            None => None,
+            Some(key) => {
+                let slot = (key.at, copy_string(&key.key));
+                proof {
+                    broadcast use vstd::std_specs::btree::group_btree_axioms;
+                    broadcast use vstd::set::Set::lemma_map_contains;
+                    assert(items.len() > 0 && items[0] == key);
+                    assert(items.unref()[0] == *key);
+                    assert(items.unref().contains(*key));
+                    items.unref().to_set_ensures();
+                    assert(self.keys@.contains(*key));
+                    assert forall|other: SlotSpec| self@.contains(other)
+                        implies !spec_slot_before(other, slot.deep_view()) by {
+                        let raw = choose|raw: TimerKey| self.keys@.contains(raw) && raw.deep_view() == other;
+                        assert(items.unref().contains(raw));
+                        let j = choose|j: int| 0 <= j < items.len() && *items[j] == raw;
+                        if j == 0 {
+                            assert(raw.deep_view() == key.deep_view());
+                            echod_concrete_spec::property_proof::lemma_before_irreflexive(key.key@);
+                        } else {
+                            assert(vstd::std_specs::cmp::OrdSpec::cmp_spec(&items[0], &items[j]) == Ordering::Less);
+                            timer_order_pair(key.deep_view(), raw.deep_view());
+                        }
+                    };
+                }
+                Some(slot)
+            },
+        }
+    }
+
+}
+
+/// Armed keys indexed by deadline, then key.
 pub struct TimerWheel {
-    pub armed: Vec<Slot>,
+    pub armed: TimerIndex,
 }
 
-/// `a` comes before `b`: an earlier deadline, or the same deadline and an
-/// earlier key.
-
-
-/// `at, key` filed in order; the same key twice is one key.
-
-
-/// Everything that is `at, key`, gone.
-
-
-/// How many slots at the front are due at `now`.
-
-
-/// What is due at `now`, and the wheel without it.
-
-
-
-
-proof fn lemma_due_count_bound(s: Seq<SlotSpec>, now: u64)
-    ensures
-        0 <= spec_due_count(s, now) <= s.len(),
-    decreases s.len(),
+proof fn first_is_minimum(s: Set<SlotSpec>, first: SlotSpec)
+    requires spec_is_first(s, first),
+    ensures first == spec_minimum(s),
 {
-    if !(s.len() == 0 || s[0].0 > now) {
-        lemma_due_count_bound(s.drop_first(), now);
+    assert(exists|k: SlotSpec| spec_is_first(s, k));
+    let other = spec_minimum(s);
+    assert(spec_is_first(s, other));
+    assert(!spec_slot_before(first, other));
+    assert(!spec_slot_before(other, first));
+    if first.0 == other.0 && first.1 != other.1 {
+        echod_concrete_spec::property_proof::lemma_before_total(first.1, other.1);
     }
-}
-
-/// The count from position `i` on, once the first `i` are all due.
-proof fn lemma_due_count_step(s: Seq<SlotSpec>, now: u64, i: int)
-    requires
-        0 <= i <= s.len(),
-        forall|j: int| 0 <= j < i ==> (#[trigger] s[j]).0 <= now,
-    ensures
-        spec_due_count(s, now) == i + spec_due_count(s.skip(i), now),
-    decreases i,
-{
-    if i == 0 {
-        assert(s.skip(0) =~= s);
-    } else {
-        lemma_due_count_step(s, now, i - 1);
-        assert(s.skip(i - 1).drop_first() =~= s.skip(i));
-        assert(s.skip(i - 1)[0] == s[i - 1]);
-    }
-}
-
-/// `spec_arm` past a prefix that comes before the slot.
-proof fn lemma_arm_step(s: Seq<SlotSpec>, at: u64, key: Seq<char>, i: int)
-    requires
-        0 <= i <= s.len(),
-        forall|j: int| 0 <= j < i ==> #[trigger] s[j] != (at, key) && !spec_slot_before((at, key), s[j]),
-    ensures
-        spec_arm(s, at, key) == s.take(i) + spec_arm(s.skip(i), at, key),
-    decreases i,
-{
-    if i == 0 {
-        assert(s.skip(0) =~= s);
-        assert(s.take(0) + spec_arm(s, at, key) =~= spec_arm(s, at, key));
-    } else {
-        lemma_arm_step(s, at, key, i - 1);
-        let rest = s.skip(i - 1);
-        assert(rest.drop_first() =~= s.skip(i));
-        assert(rest[0] == s[i - 1]);
-        assert(s.take(i - 1) + (seq![s[i - 1]] + spec_arm(s.skip(i), at, key)) =~= s.take(i) + spec_arm(s.skip(i), at, key));
-    }
-}
-
-fn slot_before(a: &Slot, b: &Slot) -> (r: bool)
-    ensures
-        r == spec_slot_before(a.deep_view(), b.deep_view()),
-{
-    a.0 < b.0 || (a.0 == b.0 && before(&a.1, &b.1))
-}
-
-fn slot_eq(a: &Slot, b: &Slot) -> (r: bool)
-    ensures
-        r == (a.deep_view() == b.deep_view()),
-{
-    a.0 == b.0 && str_eq(a.1.as_str(), b.1.as_str())
 }
 
 impl TimerWheel {
     pub fn new() -> (r: TimerWheel)
         ensures
-            r.deep_view() == (TimerWheelSpec { armed: Seq::empty() }),
+            r.deep_view() == (TimerWheelSpec { armed: Set::empty() }),
     {
-        let r = TimerWheel { armed: Vec::new() };
-        proof {
-            assert(r.armed.deep_view() =~= Seq::<SlotSpec>::empty());
-        }
-        r
+        TimerWheel { armed: TimerIndex::new() }
     }
 
     /// Hold a key. The same key twice is one key.
@@ -209,152 +417,52 @@ impl TimerWheel {
         ensures
             final(self).deep_view().armed == spec_arm(old(self).deep_view().armed, at, key@),
     {
-        let ghost s = self.armed.deep_view();
-        let slot: Slot = (at, key);
-        let mut i = 0;
-        while i < self.armed.len()
-            invariant
-                i <= self.armed.len(),
-                s == self.armed.deep_view(),
-                s == old(self).deep_view().armed,
-                slot.deep_view() == (at, key@),
-                forall|j: int| 0 <= j < i ==> #[trigger] s[j] != (at, key@) && !spec_slot_before((at, key@), s[j]),
-            decreases self.armed.len() - i,
-        {
-            if slot_eq(&self.armed[i], &slot) {
-                proof {
-                    lemma_arm_step(s, at, key@, i as int);
-                    assert(s.skip(i as int)[0] == s[i as int]);
-                    assert(s.take(i as int) + s.skip(i as int) =~= s);
-                }
-                return;
-            }
-            if slot_before(&slot, &self.armed[i]) {
-                proof {
-                    lemma_arm_step(s, at, key@, i as int);
-                    assert(s.skip(i as int)[0] == s[i as int]);
-                }
-                self.armed.insert(i, slot);
-                proof {
-                    assert(self.armed.deep_view() =~= s.take(i as int) + (seq![(at, key@)] + s.skip(i as int)));
-                }
-                return;
-            }
-            i += 1;
-        }
-        proof {
-            lemma_arm_step(s, at, key@, i as int);
-            assert(s.skip(i as int).len() == 0);
-        }
-        self.armed.push(slot);
-        proof {
-            assert(self.armed.deep_view() =~= s.take(i as int) + seq![(at, key@)]);
-        }
+        self.armed.arm(at, key);
     }
 
     pub fn disarm(&mut self, at: u64, key: &str)
         ensures
             final(self).deep_view().armed == spec_disarm(old(self).deep_view().armed, at, key@),
     {
-        let ghost s = self.armed.deep_view();
-        let mut kept: Vec<Slot> = Vec::new();
-        let mut i = 0;
-        proof {
-            reveal(Seq::filter);
-            assert(kept.deep_view() =~= Seq::<SlotSpec>::empty());
-            assert(s.take(0) =~= Seq::<SlotSpec>::empty());
-        }
-        while i < self.armed.len()
-            invariant
-                i <= self.armed.len(),
-                s == self.armed.deep_view(),
-                kept.deep_view() == spec_disarm(s.take(i as int), at, key@),
-            decreases self.armed.len() - i,
-        {
-            let e = &self.armed[i];
-            let ghost k0 = kept.deep_view();
-            if !(e.0 == at && str_eq(e.1.as_str(), key)) {
-                kept.push((e.0, copy_string(&e.1)));
-                proof {
-                    assert(kept.deep_view() =~= k0.push(s[i as int]));
-                }
-            }
-            proof {
-                reveal(Seq::filter);
-                assert(s.take(i as int + 1).drop_last() =~= s.take(i as int));
-                assert(s.take(i as int + 1).last() == s[i as int]);
-            }
-            i += 1;
-        }
-        proof {
-            assert(s.take(i as int) =~= s);
-        }
-        self.armed = kept;
+        self.armed.disarm(at, key);
     }
 
-    /// Everything due at `now`, removed from the wheel.
-    pub fn take_due(&mut self, now: u64) -> (r: Vec<Slot>)
+    /// One bounded batch due at `now`, removed in deadline/key order.
+    pub fn take_due(&mut self, now: u64, limit: usize) -> (r: VecDeque<Slot>)
         ensures
-            (r.deep_view(), final(self).deep_view().armed) == spec_take_due(old(self).deep_view().armed, now),
+            r.len() <= limit,
+            (r.deep_view(), final(self).deep_view().armed) == spec_take_due(old(self).deep_view().armed, now, limit as nat),
     {
-        let ghost s = self.armed.deep_view();
-        let mut n = 0;
-        while n < self.armed.len() && self.armed[n].0 <= now
+        let ghost start = self.armed@;
+        let mut due: VecDeque<Slot> = VecDeque::new();
+        let mut fuel = limit;
+        while fuel > 0
             invariant
-                n <= self.armed.len(),
-                s == self.armed.deep_view(),
-                forall|j: int| 0 <= j < n ==> (#[trigger] s[j]).0 <= now,
-            decreases self.armed.len() - n,
+                fuel <= limit,
+                due.len() + fuel == limit,
+                start == old(self).deep_view().armed,
+                spec_take_due(start, now, limit as nat).0 == due.deep_view() + spec_take_due_n(self.armed@, now, fuel as nat).0,
+                spec_take_due(start, now, limit as nat).1 == spec_take_due_n(self.armed@, now, fuel as nat).1,
+            decreases fuel,
         {
-            n += 1;
-        }
-        proof {
-            lemma_due_count_step(s, now, n as int);
-            if n < self.armed.len() {
-                assert(s.skip(n as int)[0] == s[n as int]);
+            let slot = match self.armed.first() {
+                None => {
+                    proof { assert(due.deep_view() + Seq::empty() =~= due.deep_view()); }
+                    return due;
+                },
+                Some(slot) => slot,
+            };
+            proof { first_is_minimum(self.armed@, slot.deep_view()); }
+            if slot.0 > now {
+                proof { assert(due.deep_view() + Seq::empty() =~= due.deep_view()); }
+                return due;
             }
-            assert(spec_due_count(s, now) == n);
+            self.armed.disarm(slot.0, slot.1.as_str());
+            let ghost previous = due.deep_view();
+            due.push_back(slot);
+            proof { assert(due.deep_view() =~= previous + seq![slot.deep_view()]); }
+            fuel -= 1;
         }
-        let mut due: Vec<Slot> = Vec::new();
-        let mut rest: Vec<Slot> = Vec::new();
-        let mut i = 0;
-        proof {
-            assert(due.deep_view() =~= Seq::<SlotSpec>::empty());
-        }
-        while i < self.armed.len()
-            invariant
-                i <= self.armed.len(),
-                n <= self.armed.len(),
-                s == self.armed.deep_view(),
-                due.deep_view() == s.take(if i < n { i as int } else { n as int }),
-                rest.deep_view() == (if i <= n { Seq::<SlotSpec>::empty() } else { s.subrange(n as int, i as int) }),
-            decreases self.armed.len() - i,
-        {
-            let e = &self.armed[i];
-            let ghost d0 = due.deep_view();
-            let ghost r0 = rest.deep_view();
-            if i < n {
-                due.push((e.0, copy_string(&e.1)));
-                proof {
-                    assert(due.deep_view() =~= d0.push(s[i as int]));
-                    assert(s.take(i as int + 1) =~= s.take(i as int).push(s[i as int]));
-                }
-            } else {
-                rest.push((e.0, copy_string(&e.1)));
-                proof {
-                    assert(rest.deep_view() =~= r0.push(s[i as int]));
-                    assert(s.subrange(n as int, i as int + 1) =~= s.subrange(n as int, i as int).push(s[i as int]));
-                    if i == n {
-                        assert(s.subrange(n as int, n as int) =~= Seq::<SlotSpec>::empty());
-                    }
-                }
-            }
-            i += 1;
-        }
-        proof {
-            assert(s.skip(n as int) =~= (if i <= n { Seq::<SlotSpec>::empty() } else { s.subrange(n as int, i as int) }));
-        }
-        self.armed = rest;
         due
     }
 
@@ -362,7 +470,13 @@ impl TimerWheel {
         ensures
             r == spec_nearest(self.deep_view().armed),
     {
-        if self.armed.len() == 0 { None } else { Some(self.armed[0].0) }
+        match self.armed.first() {
+            None => None,
+            Some(slot) => {
+                proof { first_is_minimum(self.armed@, slot.deep_view()); }
+                Some(slot.0)
+            },
+        }
     }
 
     pub fn len(&self) -> (r: usize)
@@ -385,7 +499,10 @@ pub enum Listing {
     /// The full load: the buckets there are.
     Prefixes { op: OpId, horizon: u64 },
     /// The full load: this node's share of each bucket at or before the horizon.
-    Buckets { pending: Table<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError> },
+    Scan { scan: TimerScan },
+    Bucket { op: OpId, bucket: u64, scan: TimerScan },
+    Applying { keys: Vec<String>, loaded: usize, after: AfterListing },
+    Retry { after: AfterListing },
     /// One more bucket, as the clock reached it.
     Extend { op: OpId, bucket: u64 },
     /// A bucket the clock has left, listed again: another node may have armed
@@ -393,7 +510,37 @@ pub enum Listing {
     Relist { op: OpId, bucket: u64 },
 }
 
+pub struct TimerScan {
+    pub prefixes: Vec<String>,
+    pub horizon: u64,
+    pub loaded: usize,
+}
 
+pub enum AfterListing {
+    Scan { bucket: u64, scan: TimerScan },
+    Extend { bucket: u64 },
+    Relist { bucket: u64 },
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TimerScan {
+    type V = TimerScanSpec;
+    open spec fn deep_view(&self) -> TimerScanSpec {
+        TimerScanSpec { prefixes: self.prefixes.deep_view(), horizon: self.horizon, loaded: self.loaded }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for AfterListing {
+    type V = AfterListingSpec;
+    open spec fn deep_view(&self) -> AfterListingSpec {
+        match self {
+            Self::Scan { bucket, scan } => AfterListingSpec::Scan { bucket: *bucket, scan: scan.deep_view() },
+            Self::Extend { bucket } => AfterListingSpec::Extend { bucket: *bucket },
+            Self::Relist { bucket } => AfterListingSpec::Relist { bucket: *bucket },
+        }
+    }
+}
 
 #[cfg(verus_keep_ghost)]
 impl DeepView for Listing {
@@ -401,7 +548,10 @@ impl DeepView for Listing {
     open spec fn deep_view(&self) -> ListingSpec {
         match self {
             Listing::Prefixes { op, horizon } => ListingSpec::Prefixes { op: *op, horizon: *horizon },
-            Listing::Buckets { pending, horizon, loaded, failed } => ListingSpec::Buckets { pending: pending.deep_view(), horizon: *horizon, loaded: *loaded, failed: failed.deep_view() },
+            Listing::Scan { scan } => ListingSpec::Scan { scan: scan.deep_view() },
+            Listing::Bucket { op, bucket, scan } => ListingSpec::Bucket { op: *op, bucket: *bucket, scan: scan.deep_view() },
+            Listing::Applying { keys, loaded, after } => ListingSpec::Applying { keys: keys.deep_view(), loaded: *loaded, after: after.deep_view() },
+            Listing::Retry { after } => ListingSpec::Retry { after: after.deep_view() },
             Listing::Extend { op, bucket } => ListingSpec::Extend { op: *op, bucket: *bucket },
             Listing::Relist { op, bucket } => ListingSpec::Relist { op: *op, bucket: *bucket },
         }
@@ -411,13 +561,19 @@ impl DeepView for Listing {
 
 
 impl Listing {
+    pub fn ready(&self) -> (r: bool)
+        ensures r == self.deep_view().ready(),
+    {
+        matches!(self, Self::Scan { .. } | Self::Applying { .. } | Self::Retry { .. })
+    }
+
     pub fn expects(&self, op: OpId) -> (r: bool)
         ensures
             r == self.deep_view().expects(op),
     {
         match self {
-            Listing::Prefixes { op: o, .. } | Listing::Extend { op: o, .. } | Listing::Relist { op: o, .. } => *o == op,
-            Listing::Buckets { pending, .. } => pending.contains(&op),
+            Listing::Prefixes { op: o, .. } | Listing::Bucket { op: o, .. } | Listing::Extend { op: o, .. } | Listing::Relist { op: o, .. } => *o == op,
+            _ => false,
         }
     }
 }
@@ -429,10 +585,8 @@ pub struct Timers {
     /// first full load succeeds; nothing fires before that.
     pub loaded_through: Option<u64>,
     /// The start of the last bucket listed again after the clock left it.
-    /// A key armed into a bucket by another node, for a target this node
-    /// owns, after this node listed the bucket ahead of the clock, is found
-    /// when the bucket closes: so a deadline is swept within a bucket or two
-    /// of falling due, whoever armed it.
+    /// Periodic discovery also revisits past buckets; closure relisting is
+    /// not the only way to find a key written by another node.
     pub closed_through: Option<u64>,
     pub bucket_ms: u64,
     pub reload_pending: bool,
@@ -440,7 +594,9 @@ pub struct Timers {
     pub backoff_until: Option<u64>,
     pub inflight: usize,
     /// Due keys waiting for a sweep to end, oldest first.
-    pub backlog: Vec<Slot>,
+    pub backlog: VecDeque<Slot>,
+    pub budget: usize,
+    pub rediscover_at: Option<u64>,
 }
 
 
@@ -469,7 +625,7 @@ impl Timers {
         ensures
             r.deep_view() == spec_timers_new(),
     {
-        let r = Timers { wheel: TimerWheel::new(), started: false, loaded_through: None, closed_through: None, bucket_ms: 0, reload_pending: false, listing: None, backoff_until: None, inflight: 0, backlog: Vec::new() };
+        let r = Timers { wheel: TimerWheel::new(), started: false, loaded_through: None, closed_through: None, bucket_ms: 0, reload_pending: false, listing: None, backoff_until: None, inflight: 0, backlog: VecDeque::new(), budget: 0, rediscover_at: None };
         proof {
             assert(r.backlog.deep_view() =~= Seq::<SlotSpec>::empty());
         }
@@ -483,11 +639,14 @@ impl Timers {
         if !self.started {
             return None;
         }
+        let due = if self.loaded_through.is_some() && self.inflight < CONCURRENCY {
+            if self.backlog.len() > 0 { Some(now) } else { self.wheel.nearest() }
+        } else { None };
         if let Some(b) = self.backoff_until {
-            return Some(b);
+            return min_opt(due, Some(b));
         }
-        if self.listing.is_some() {
-            return None;
+        if let Some(listing) = &self.listing {
+            return if listing.ready() { Some(now) } else { due };
         }
         if self.reload_pending {
             return Some(now);
@@ -504,7 +663,7 @@ impl Timers {
             Some(l) => Some(if l > now { l } else { now }),
             None => None,
         };
-        min_opt(min_opt(self.wheel.nearest(), loaded), closing)
+        min_opt(due, min_opt(self.rediscover_at, min_opt(loaded, closing)))
     }
 
     /// The next instant the wheel wants a physical wake. The keys stay here;
@@ -525,3 +684,62 @@ impl Timers {
 
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use super::{Listing, TimerWheel, Timers, CONCURRENCY};
+
+    #[test]
+    fn index_preserves_pair_identity_and_deadline_tie_order() {
+        let mut wheel = TimerWheel::new();
+        wheel.arm(20, "z".into());
+        wheel.arm(20, "a".into());
+        wheel.arm(10, "same".into());
+        wheel.arm(20, "same".into());
+        wheel.arm(20, "same".into());
+        assert_eq!(wheel.len(), 4);
+        wheel.disarm(10, "same");
+        assert_eq!(wheel.nearest(), Some(20));
+        assert!(wheel.take_due(19, 64).is_empty());
+        assert_eq!(wheel.take_due(20, 64), vec![(20, "a".into()), (20, "same".into()), (20, "z".into())]);
+        assert_eq!(wheel.nearest(), None);
+    }
+
+    #[test]
+    fn due_extraction_leaves_a_bounded_continuation() {
+        let mut wheel = TimerWheel::new();
+        for i in (0..130).rev() {
+            wheel.arm(i, format!("key-{i}"));
+        }
+        assert!(wheel.take_due(200, 0).is_empty());
+        assert_eq!(wheel.len(), 130);
+        let first = wheel.take_due(200, 64);
+        assert_eq!(first.len(), 64);
+        assert_eq!(first.front().unwrap().0, 0);
+        assert_eq!(first.back().unwrap().0, 63);
+        assert_eq!(wheel.nearest(), Some(64));
+        assert_eq!(wheel.take_due(200, 64).len(), 64);
+        assert_eq!(wheel.take_due(200, 64).len(), 2);
+        assert_eq!(wheel.len(), 0);
+    }
+
+    #[test]
+    fn rediscovery_and_known_due_work_have_independent_wakes() {
+        let mut timers = Timers::new();
+        timers.started = true;
+        timers.loaded_through = Some(7_200_000);
+        timers.closed_through = Some(0);
+        timers.bucket_ms = 3_600_000;
+        timers.rediscover_at = Some(3_900_000);
+        assert_eq!(timers.wake_at(3_600_000), Some(3_900_000));
+        timers.listing = Some(Listing::Prefixes { op: 1, horizon: 7_200_000 });
+        assert_eq!(timers.wake_at(4_000_000), None);
+        timers.wheel.arm(4_000_000, "due".into());
+        assert_eq!(timers.wake_at(4_000_000), Some(4_000_000));
+        timers.inflight = CONCURRENCY;
+        assert_eq!(timers.wake_at(4_000_000), None);
+        timers.inflight = 0;
+        timers.backoff_until = Some(4_001_000);
+        assert_eq!(timers.wake_at(4_000_000), Some(4_000_000));
+    }
+}
