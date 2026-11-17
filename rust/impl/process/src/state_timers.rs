@@ -5,12 +5,9 @@
 //! filed under the time bucket its deadline falls in. Every writer puts
 //! the key before the state that arms it and holds it in its wheel after.
 //!
-//! The wheel is where firing happens. A node lists the bucket in exactly
-//! three situations: when it starts, when the configuration changes
-//! (ownership is `hash mod n`, so every node's share moved), and when the
-//! clock reaches a bucket it has not loaded yet. Each listing takes the
-//! keys whose target this node owns and nothing else. Between listings no
-//! store call is made to find out what is due: the wheel knows.
+//! Discovery runs at startup, on membership changes, periodically, and as
+//! buckets enter or leave the loaded range. Listings retain this node's
+//! share, with bounded application steps continued by physical wakes.
 //!
 //! Firing a key sweeps its target, which is idempotent; the key is deleted
 //! only once the sweep has committed, since until then it is the only
@@ -588,10 +585,8 @@ pub struct Timers {
     /// first full load succeeds; nothing fires before that.
     pub loaded_through: Option<u64>,
     /// The start of the last bucket listed again after the clock left it.
-    /// A key armed into a bucket by another node, for a target this node
-    /// owns, after this node listed the bucket ahead of the clock, is found
-    /// when the bucket closes: so a deadline is swept within a bucket or two
-    /// of falling due, whoever armed it.
+    /// Periodic discovery also revisits past buckets; closure relisting is
+    /// not the only way to find a key written by another node.
     pub closed_through: Option<u64>,
     pub bucket_ms: u64,
     pub reload_pending: bool,

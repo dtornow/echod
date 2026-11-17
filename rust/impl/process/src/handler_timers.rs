@@ -89,9 +89,7 @@ verus! {
 /// Load what is owed, else fire what is due.
 
 
-/// The full load: every bucket at or before the horizon, this node's
-/// share. Keys for targets that are no longer this node's leave the wheel;
-/// their owner lists them.
+/// The full load: this node's share of every bucket through the horizon.
 
 
 /// Take this node's share of a listed bucket into the wheel; `n` counts
@@ -265,9 +263,7 @@ impl State {
         }
     }
 
-    /// The full load: every bucket at or before the horizon, this node's
-    /// share. Keys for targets that are no longer this node's leave the
-    /// wheel; their owner lists them.
+    /// Reload through the horizon. Existing slots are ownership-checked at firing.
     fn reload(&mut self, now: u64)
         ensures
             final(self).deep_view() == spec_reload(old(self).deep_view(), now),
@@ -686,20 +682,52 @@ mod tests {
             assert_eq!(delay, 1);
             clock += delay;
         };
-        let effects = state.on_event(Event::Wake { clock: clock + 1, armed: Armed::Wheel });
-        assert!(!effects.iter().any(|effect| matches!(effect, Effect::Store { .. })));
-        clock += 2;
-        state.on_event(Event::Store { clock, op, response: StoreRes::List { result: Err(StoreError::Unavailable("retry".into())) } });
+        clock += 400_000;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        assert!(!effects.iter().any(|effect| matches!(effect,
+            Effect::Store { request: StoreReq::List { prefix, .. } | StoreReq::ListPrefixes { prefix }, .. }
+                if prefix.starts_with(&state.keys.timer_prefix()))));
+        clock += 1;
+        let effects = state.on_event(Event::Store { clock, op, response: StoreRes::List { result: Err(StoreError::Unavailable("retry".into())) } });
         assert!(matches!(state.timers.listing, Some(Listing::Retry { .. })));
         assert_eq!(state.timers.loaded_through, Some(3_600_000));
         assert_eq!(state.timers.backoff_until, Some(clock + 1_000));
-        let effects = state.on_event(Event::Wake { clock: clock + 1_000, armed: Armed::Wheel });
-        let retried = effects.iter().find_map(|effect| match effect {
-            Effect::Store { request: StoreReq::List { prefix, .. }, .. } => Some(prefix),
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
             _ => None,
         }).unwrap();
-        assert_eq!(retried, &request);
+        assert_eq!(delay, 1_000);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        let (retry_op, retried) = effects.iter().find_map(|effect| match effect {
+            Effect::Store { op, request: StoreReq::List { prefix, .. } } => Some((*op, prefix.clone())),
+            _ => None,
+        }).unwrap();
+        assert_eq!(retried, request);
         assert!(matches!(state.timers.listing, Some(Listing::Bucket { ref scan, .. }) if scan.prefixes.len() == 1));
+        let effects = state.on_event(Event::Store { clock, op: retry_op, response: StoreRes::List { result: Ok(vec![]) } });
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+            _ => None,
+        }).unwrap();
+        assert_eq!(delay, 1);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        let past_op = effects.iter().find_map(|effect| match effect {
+            Effect::Store { op, request: StoreReq::List { prefix, .. } } if *prefix == state.keys.bucket_prefix(0) => Some(*op),
+            _ => None,
+        }).expect("the closed historical bucket must still be scanned");
+        let effects = state.on_event(Event::Store { clock, op: past_op, response: StoreRes::List { result: Ok(vec![]) } });
+        let delay = effects.iter().find_map(|effect| match effect {
+            Effect::Wake { after_ms, armed: Armed::Wheel } => Some(*after_ms),
+            _ => None,
+        }).unwrap();
+        assert_eq!(delay, 1);
+        clock += delay;
+        let effects = state.on_event(Event::Wake { clock, armed: Armed::Wheel });
+        assert_eq!(effects.iter().filter(|effect| matches!(effect,
+            Effect::Store { request: StoreReq::ListPrefixes { .. }, .. })).count(), 1);
+        assert_eq!(state.timers.rediscover_at, Some(clock + 300_000));
     }
 
     #[test]
