@@ -1000,9 +1000,26 @@ pub ghost struct ProductionTimersV {
 #[cfg(verus_keep_ghost)]
 pub ghost enum ProductionListingV {
     Prefixes { op: u64, horizon: u64 },
-    Buckets { pending: Map<u64, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec> },
+    Scan { scan: ProductionTimerScanV },
+    Bucket { op: u64, bucket: u64, scan: ProductionTimerScanV },
+    Applying { keys: Seq<Seq<char>>, loaded: usize, after: ProductionAfterListingV },
+    Retry { after: ProductionAfterListingV },
     Extend { op: u64, bucket: u64 },
     Relist { op: u64, bucket: u64 },
+}
+
+#[cfg(verus_keep_ghost)]
+pub ghost struct ProductionTimerScanV {
+    pub prefixes: Seq<Seq<char>>,
+    pub horizon: u64,
+    pub loaded: usize,
+}
+
+#[cfg(verus_keep_ghost)]
+pub ghost enum ProductionAfterListingV {
+    Scan { bucket: u64, scan: ProductionTimerScanV },
+    Extend { bucket: u64 },
+    Relist { bucket: u64 },
 }
 
 #[cfg(verus_keep_ghost)]

@@ -733,6 +733,14 @@ impl State {
             self.node.core.read_config(last_read, epoch, members);
         }
         self.timers.wheel = TimerWheel::new();
+        self.timers.listing = None;
+        self.timers.backlog = std::collections::VecDeque::new();
+        self.timers.loaded_through = None;
+        self.timers.closed_through = None;
+        self.timers.rediscover_at = None;
+        self.timers.backoff_until = None;
+        self.timers.reload_pending = self.timers.started;
+        proof { assert(self.timers.backlog.deep_view() =~= Seq::empty()); }
         self.debug_reply(id, kind, corr, 200, DebugBody::Object);
     }
 

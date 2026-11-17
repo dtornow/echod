@@ -38,13 +38,12 @@ use crate::concrete::store::before;
 
 use crate::types::*;
 use crate::verified::node::str_eq;
-use crate::verified::table::Table;
 use crate::verified::text::copy_string;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::handler::spec_before;
 #[cfg(verus_keep_ghost)]
-use echod_concrete_spec::state::StoreErrorSpec;
+pub use echod_concrete_spec::state::{ProductionTimerScanV as TimerScanSpec, ProductionAfterListingV as AfterListingSpec};
 
 #[cfg(verus_keep_ghost)]
 pub use echod_concrete_spec::state::ProductionTimerWheelV as TimerWheelSpec;
@@ -503,7 +502,10 @@ pub enum Listing {
     /// The full load: the buckets there are.
     Prefixes { op: OpId, horizon: u64 },
     /// The full load: this node's share of each bucket at or before the horizon.
-    Buckets { pending: Table<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreError> },
+    Scan { scan: TimerScan },
+    Bucket { op: OpId, bucket: u64, scan: TimerScan },
+    Applying { keys: Vec<String>, loaded: usize, after: AfterListing },
+    Retry { after: AfterListing },
     /// One more bucket, as the clock reached it.
     Extend { op: OpId, bucket: u64 },
     /// A bucket the clock has left, listed again: another node may have armed
@@ -511,7 +513,37 @@ pub enum Listing {
     Relist { op: OpId, bucket: u64 },
 }
 
+pub struct TimerScan {
+    pub prefixes: Vec<String>,
+    pub horizon: u64,
+    pub loaded: usize,
+}
 
+pub enum AfterListing {
+    Scan { bucket: u64, scan: TimerScan },
+    Extend { bucket: u64 },
+    Relist { bucket: u64 },
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for TimerScan {
+    type V = TimerScanSpec;
+    open spec fn deep_view(&self) -> TimerScanSpec {
+        TimerScanSpec { prefixes: self.prefixes.deep_view(), horizon: self.horizon, loaded: self.loaded }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for AfterListing {
+    type V = AfterListingSpec;
+    open spec fn deep_view(&self) -> AfterListingSpec {
+        match self {
+            Self::Scan { bucket, scan } => AfterListingSpec::Scan { bucket: *bucket, scan: scan.deep_view() },
+            Self::Extend { bucket } => AfterListingSpec::Extend { bucket: *bucket },
+            Self::Relist { bucket } => AfterListingSpec::Relist { bucket: *bucket },
+        }
+    }
+}
 
 #[cfg(verus_keep_ghost)]
 impl DeepView for Listing {
@@ -519,7 +551,10 @@ impl DeepView for Listing {
     open spec fn deep_view(&self) -> ListingSpec {
         match self {
             Listing::Prefixes { op, horizon } => ListingSpec::Prefixes { op: *op, horizon: *horizon },
-            Listing::Buckets { pending, horizon, loaded, failed } => ListingSpec::Buckets { pending: pending.deep_view(), horizon: *horizon, loaded: *loaded, failed: failed.deep_view() },
+            Listing::Scan { scan } => ListingSpec::Scan { scan: scan.deep_view() },
+            Listing::Bucket { op, bucket, scan } => ListingSpec::Bucket { op: *op, bucket: *bucket, scan: scan.deep_view() },
+            Listing::Applying { keys, loaded, after } => ListingSpec::Applying { keys: keys.deep_view(), loaded: *loaded, after: after.deep_view() },
+            Listing::Retry { after } => ListingSpec::Retry { after: after.deep_view() },
             Listing::Extend { op, bucket } => ListingSpec::Extend { op: *op, bucket: *bucket },
             Listing::Relist { op, bucket } => ListingSpec::Relist { op: *op, bucket: *bucket },
         }
@@ -529,13 +564,19 @@ impl DeepView for Listing {
 
 
 impl Listing {
+    pub fn ready(&self) -> (r: bool)
+        ensures r == self.deep_view().ready(),
+    {
+        matches!(self, Self::Scan { .. } | Self::Applying { .. } | Self::Retry { .. })
+    }
+
     pub fn expects(&self, op: OpId) -> (r: bool)
         ensures
             r == self.deep_view().expects(op),
     {
         match self {
-            Listing::Prefixes { op: o, .. } | Listing::Extend { op: o, .. } | Listing::Relist { op: o, .. } => *o == op,
-            Listing::Buckets { pending, .. } => pending.contains(&op),
+            Listing::Prefixes { op: o, .. } | Listing::Bucket { op: o, .. } | Listing::Extend { op: o, .. } | Listing::Relist { op: o, .. } => *o == op,
+            _ => false,
         }
     }
 }
@@ -609,8 +650,8 @@ impl Timers {
         if let Some(b) = self.backoff_until {
             return min_opt(due, Some(b));
         }
-        if self.listing.is_some() {
-            return due;
+        if let Some(listing) = &self.listing {
+            return if listing.ready() { Some(now) } else { due };
         }
         if self.reload_pending {
             return Some(now);

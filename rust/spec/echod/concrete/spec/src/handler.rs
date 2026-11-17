@@ -585,7 +585,7 @@ pub open spec fn production_state_timers_spec_wake_at(t: ProductionTimersV, now:
     } else if t.backoff_until is Some {
         production_state_timers_spec_min_opt(due, t.backoff_until)
     } else if t.listing is Some {
-        due
+        if t.listing->Some_0.ready() { Some(now) } else { due }
     } else if t.reload_pending {
         Some(now)
     } else {
@@ -1430,13 +1430,21 @@ pub open spec fn production_handler_timers_spec_timers_membership_changed(s: Pro
 pub open spec fn production_handler_timers_spec_timers_run(s: ProductionStateV, now: u64) -> ProductionStateV {
     if !s.timers.started {
         s
-    } else if s.timers.listing is Some {
-        if s.timers.loaded_through is Some { production_handler_timers_spec_fire_due(s, now) } else { s }
     } else if s.timers.backoff_until is Some && now < s.timers.backoff_until->Some_0 {
         if s.timers.loaded_through is Some { production_handler_timers_spec_fire_due(s, now) } else { s }
     } else {
         let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { backoff_until: None, ..s.timers });
-        if s.timers.reload_pending || (s.timers.rediscover_at is Some && s.timers.rediscover_at->Some_0 <= now) {
+        if s.timers.listing is Some {
+            let listing = s.timers.listing->Some_0;
+            let cleared = production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: None, ..s.timers });
+            let s = match listing {
+                ProductionListingV::Scan { scan } => production_handler_timers_spec_advance_scan(cleared, scan, now, 32),
+                ProductionListingV::Applying { keys, loaded, after } => production_handler_timers_spec_apply_listing(cleared, keys, loaded, after, now, 32),
+                ProductionListingV::Retry { after } => production_handler_timers_spec_start_bucket(cleared, after),
+                _ => s,
+            };
+            if s.timers.loaded_through is Some { production_handler_timers_spec_fire_due(s, now) } else { s }
+        } else if s.timers.reload_pending || (s.timers.rediscover_at is Some && s.timers.rediscover_at->Some_0 <= now) {
             production_handler_timers_spec_reload(s, now)
         } else if s.timers.loaded_through is Some && s.timers.loaded_through->Some_0 < production_handler_timers_spec_horizon(s, now) {
             let bucket = s.timers.loaded_through->Some_0.saturating_add(s.keys.bucket_ms);
@@ -1461,45 +1469,76 @@ pub open spec fn production_handler_timers_spec_reload(s: ProductionStateV, now:
     production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Prefixes { op, horizon }), ..s.timers })
 }
 
-pub open spec fn production_handler_timers_spec_take_bucket(s: ProductionStateV, keys: Seq<Seq<char>>, n: nat) -> (ProductionStateV, nat)
-    decreases keys.len(),
+pub open spec fn production_handler_timers_spec_start_bucket(s: ProductionStateV, after: ProductionAfterListingV) -> ProductionStateV {
+    let bucket = match after {
+        ProductionAfterListingV::Scan { bucket, .. } | ProductionAfterListingV::Extend { bucket } | ProductionAfterListingV::Relist { bucket } => bucket,
+    };
+    let (s, op) = production_state_spec_store(s, StoreReqSpec::List { prefix: production_keys_spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, ProductionOwner::Timers);
+    let listing = match after {
+        ProductionAfterListingV::Scan { bucket, scan } => ProductionListingV::Bucket { op, bucket, scan },
+        ProductionAfterListingV::Extend { bucket } => ProductionListingV::Extend { op, bucket },
+        ProductionAfterListingV::Relist { bucket } => ProductionListingV::Relist { op, bucket },
+    };
+    production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(listing), ..s.timers })
+}
+
+pub open spec fn production_handler_timers_spec_advance_scan(s: ProductionStateV, scan: ProductionTimerScanV, now: u64, fuel: nat) -> ProductionStateV
+    decreases fuel,
 {
-    if keys.len() == 0 {
-        (s, n)
+    if scan.prefixes.len() == 0 {
+        production_handler_timers_spec_reloaded(s, scan.horizon, scan.loaded, now)
+    } else if fuel == 0 || s.timers.budget == 0 {
+        production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Scan { scan }), ..s.timers })
     } else {
-        let key = keys[0];
-        let (s, n) = match production_keys_spec_parse_timer_key(key) {
-            Some(e) => {
-                if production_handler_timers_spec_owns_entry(s, e) {
-                    (production_handler_timers_spec_with_timers(s, ProductionTimersV { wheel: ProductionTimerWheelV { armed: production_state_timers_spec_arm(s.timers.wheel.armed, e.deadline(), key) }, ..s.timers }), n + 1)
-                } else {
-                    (s, n)
-                }
+        let prefix = scan.prefixes.last();
+        let scan = ProductionTimerScanV { prefixes: scan.prefixes.drop_last(), ..scan };
+        let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { budget: (s.timers.budget - 1) as usize, ..s.timers });
+        match production_keys_spec_parse_bucket_prefix(s.keys.prefix, prefix) {
+            Some(bucket) => if bucket <= scan.horizon {
+                production_handler_timers_spec_start_bucket(s, ProductionAfterListingV::Scan { bucket, scan })
+            } else {
+                production_handler_timers_spec_advance_scan(s, scan, now, (fuel - 1) as nat)
             },
-            None => (s, n),
-        };
-        production_handler_timers_spec_take_bucket(s, keys.drop_first(), n)
+            None => production_handler_timers_spec_advance_scan(s, scan, now, (fuel - 1) as nat),
+        }
     }
 }
 
-pub open spec fn production_handler_timers_spec_list_buckets(s: ProductionStateV, prefixes: Seq<Seq<char>>, horizon: u64, pending: Map<u64, u64>) -> (ProductionStateV, Map<u64, u64>)
-    decreases prefixes.len(),
+pub open spec fn production_handler_timers_spec_finish_listing(s: ProductionStateV, after: ProductionAfterListingV, loaded: usize, now: u64) -> ProductionStateV {
+    match after {
+        ProductionAfterListingV::Scan { scan, .. } => {
+            let scan = ProductionTimerScanV { loaded: scan.loaded.saturating_add(loaded), ..scan };
+            if scan.prefixes.len() == 0 { production_handler_timers_spec_reloaded(s, scan.horizon, scan.loaded, now) }
+            else { production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Scan { scan }), ..s.timers }) }
+        },
+        ProductionAfterListingV::Extend { bucket } | ProductionAfterListingV::Relist { bucket } => {
+            let s = production_state_spec_note(s, ProductionNoteV::BucketLoaded { bucket, deadlines: loaded });
+            let s = production_state_spec_note(s, ProductionNoteV::TimerListing { ok: true });
+            match after {
+                ProductionAfterListingV::Extend { .. } => production_handler_timers_spec_with_timers(s, ProductionTimersV { loaded_through: Some(bucket), ..s.timers }),
+                _ => production_handler_timers_spec_with_timers(s, ProductionTimersV { closed_through: Some(bucket), ..s.timers }),
+            }
+        },
+    }
+}
+
+pub open spec fn production_handler_timers_spec_apply_listing(s: ProductionStateV, keys: Seq<Seq<char>>, loaded: usize, after: ProductionAfterListingV, now: u64, fuel: nat) -> ProductionStateV
+    decreases fuel,
 {
-    if prefixes.len() == 0 {
-        (s, pending)
+    if keys.len() == 0 {
+        production_handler_timers_spec_finish_listing(s, after, loaded, now)
+    } else if fuel == 0 || s.timers.budget == 0 {
+        production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Applying { keys, loaded, after }), ..s.timers })
     } else {
-        let (s, pending) = match production_keys_spec_parse_bucket_prefix(s.keys.prefix, prefixes[0]) {
-            Some(bucket) => {
-                if bucket <= horizon {
-                    let (s, op) = production_state_spec_store(s, StoreReqSpec::List { prefix: production_keys_spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, ProductionOwner::Timers);
-                    (s, pending.insert(op, bucket))
-                } else {
-                    (s, pending)
-                }
-            },
-            None => (s, pending),
+        let key = keys.last();
+        let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { budget: (s.timers.budget - 1) as usize, ..s.timers });
+        let (s, loaded) = match production_keys_spec_parse_timer_key(key) {
+            Some(entry) => if production_handler_timers_spec_owns_entry(s, entry) {
+                (production_handler_timers_spec_with_timers(s, ProductionTimersV { wheel: ProductionTimerWheelV { armed: production_state_timers_spec_arm(s.timers.wheel.armed, entry.deadline(), key) }, ..s.timers }), loaded.saturating_add(1))
+            } else { (s, loaded) },
+            None => (s, loaded),
         };
-        production_handler_timers_spec_list_buckets(s, prefixes.drop_first(), horizon, pending)
+        production_handler_timers_spec_apply_listing(s, keys.drop_last(), loaded, after, now, (fuel - 1) as nat)
     }
 }
 
@@ -1515,9 +1554,10 @@ pub open spec fn production_handler_timers_spec_timers_completed(s: ProductionSt
                 let now = production_state_spec_now(s);
                 match listing {
                     ProductionListingV::Prefixes { horizon, .. } => production_handler_timers_spec_prefixes_listed(s, horizon, now, outcome),
-                    ProductionListingV::Buckets { pending, horizon, loaded, failed } => production_handler_timers_spec_bucket_listed(s, pending.remove(op), horizon, loaded, failed, now, outcome),
-                    ProductionListingV::Extend { bucket, .. } => production_handler_timers_spec_extended(s, bucket, now, outcome),
-                    ProductionListingV::Relist { bucket, .. } => production_handler_timers_spec_relisted(s, bucket, now, outcome),
+                    ProductionListingV::Bucket { bucket, scan, .. } => production_handler_timers_spec_bucket_listed(s, ProductionAfterListingV::Scan { bucket, scan }, now, outcome),
+                    ProductionListingV::Extend { bucket, .. } => production_handler_timers_spec_bucket_listed(s, ProductionAfterListingV::Extend { bucket }, now, outcome),
+                    ProductionListingV::Relist { bucket, .. } => production_handler_timers_spec_bucket_listed(s, ProductionAfterListingV::Relist { bucket }, now, outcome),
+                    _ => s,
                 }
             }
         },
@@ -1528,12 +1568,9 @@ pub open spec fn production_handler_timers_spec_timers_completed(s: ProductionSt
 pub open spec fn production_handler_timers_spec_prefixes_listed(s: ProductionStateV, horizon: u64, now: u64, outcome: StoreRes) -> ProductionStateV {
     match outcome {
         StoreRes::ListPrefixes { result: Ok(prefixes) } => {
-            let (s, pending) = production_handler_timers_spec_list_buckets(s, prefixes.deep_view(), horizon, Map::empty());
-            if pending =~= Map::<u64, u64>::empty() {
-                production_handler_timers_spec_reloaded(s, horizon, 0, now)
-            } else {
-                production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Buckets { pending, horizon, loaded: 0, failed: None }), ..s.timers })
-            }
+            let scan = ProductionTimerScanV { prefixes: prefixes.deep_view(), horizon, loaded: 0 };
+            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Scan { scan }), ..s.timers });
+            production_handler_timers_spec_timers_run(s, now)
         },
         StoreRes::ListPrefixes { result: Err(e) } => production_handler_timers_spec_listing_failed(s, e.deep_view(), now),
         _ => production_handler_timers_spec_listing_failed(s, production_types_spec_unexpected(), now),
@@ -1541,52 +1578,20 @@ pub open spec fn production_handler_timers_spec_prefixes_listed(s: ProductionSta
 }
 
 #[verifier::opaque]
-pub open spec fn production_handler_timers_spec_bucket_listed(s: ProductionStateV, pending: Map<u64, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec>, now: u64, outcome: StoreRes) -> ProductionStateV {
-    let (s, loaded, failed) = match outcome {
-        StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = production_handler_timers_spec_take_bucket(s, keys.deep_view(), 0);
-            (s, loaded.saturating_add(n as usize), failed)
-        },
-        StoreRes::List { result: Err(e) } => (s, loaded, Some(e.deep_view())),
-        _ => (s, loaded, Some(production_types_spec_unexpected())),
-    };
-    if !(pending =~= Map::<u64, u64>::empty()) {
-        production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Buckets { pending, horizon, loaded, failed }), ..s.timers })
-    } else {
-        match failed {
-            Some(e) => production_handler_timers_spec_listing_failed(s, e, now),
-            None => production_handler_timers_spec_reloaded(s, horizon, loaded, now),
-        }
-    }
-}
-
-#[verifier::opaque]
-pub open spec fn production_handler_timers_spec_extended(s: ProductionStateV, bucket: u64, now: u64, outcome: StoreRes) -> ProductionStateV {
+pub open spec fn production_handler_timers_spec_bucket_listed(s: ProductionStateV, after: ProductionAfterListingV, now: u64, outcome: StoreRes) -> ProductionStateV {
     match outcome {
         StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = production_handler_timers_spec_take_bucket(s, keys.deep_view(), 0);
-            let s = production_state_spec_note(s, ProductionNoteV::BucketLoaded { bucket, deadlines: n as usize });
-            let s = production_state_spec_note(s, ProductionNoteV::TimerListing { ok: true });
-            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { loaded_through: Some(bucket), ..s.timers });
+            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Applying { keys: keys.deep_view(), loaded: 0, after }), ..s.timers });
             production_handler_timers_spec_timers_run(s, now)
         },
-        StoreRes::List { result: Err(e) } => production_handler_timers_spec_listing_failed(s, e.deep_view(), now),
-        _ => production_handler_timers_spec_listing_failed(s, production_types_spec_unexpected(), now),
-    }
-}
-
-#[verifier::opaque]
-pub open spec fn production_handler_timers_spec_relisted(s: ProductionStateV, bucket: u64, now: u64, outcome: StoreRes) -> ProductionStateV {
-    match outcome {
-        StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = production_handler_timers_spec_take_bucket(s, keys.deep_view(), 0);
-            let s = production_state_spec_note(s, ProductionNoteV::BucketLoaded { bucket, deadlines: n as usize });
-            let s = production_state_spec_note(s, ProductionNoteV::TimerListing { ok: true });
-            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { closed_through: Some(bucket), ..s.timers });
-            production_handler_timers_spec_timers_run(s, now)
+        StoreRes::List { result: Err(e) } => {
+            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Retry { after }), ..s.timers });
+            production_handler_timers_spec_listing_failed(s, e.deep_view(), now)
         },
-        StoreRes::List { result: Err(e) } => production_handler_timers_spec_listing_failed(s, e.deep_view(), now),
-        _ => production_handler_timers_spec_listing_failed(s, production_types_spec_unexpected(), now),
+        _ => {
+            let s = production_handler_timers_spec_with_timers(s, ProductionTimersV { listing: Some(ProductionListingV::Retry { after }), ..s.timers });
+            production_handler_timers_spec_listing_failed(s, production_types_spec_unexpected(), now)
+        },
     }
 }
 
@@ -1599,8 +1604,7 @@ pub open spec fn production_handler_timers_spec_reloaded(s: ProductionStateV, ho
         ..s.timers
     });
     let s = production_state_spec_note(s, ProductionNoteV::TimerListing { ok: true });
-    let s = production_state_spec_note(s, ProductionNoteV::TimersLoaded { deadlines: loaded, wheel: s.timers.wheel.armed.len() as usize, epoch: s.node.core.epoch as u64 });
-    production_handler_timers_spec_timers_run(s, now)
+    production_state_spec_note(s, ProductionNoteV::TimersLoaded { deadlines: loaded, wheel: s.timers.wheel.armed.len() as usize, epoch: s.node.core.epoch as u64 })
 }
 
 #[verifier::opaque]
@@ -2275,7 +2279,17 @@ pub open spec fn production_debug_spec_debug_reset_done(s: ProductionStateV, id:
     let s = ProductionStateV {
         cache: spec_production_cache_new(s.cfg.cache_entries, s.cfg.cache_bytes),
         node: ProductionNodeStateV { core, ..s.node },
-        timers: ProductionTimersV { wheel: ProductionTimerWheelV { armed: Set::empty() }, ..s.timers },
+        timers: ProductionTimersV {
+            wheel: ProductionTimerWheelV { armed: Set::empty() },
+            listing: None,
+            backlog: Seq::empty(),
+            loaded_through: None,
+            closed_through: None,
+            rediscover_at: None,
+            backoff_until: None,
+            reload_pending: s.timers.started,
+            ..s.timers
+        },
         ..s
     };
     production_debug_spec_debug_reply(s, id, kind, corr, 200, ProductionDebugBodyV::Object)
@@ -2582,10 +2596,14 @@ impl ProductionMembersV {
 
 #[cfg(verus_keep_ghost)]
 impl ProductionListingV {
+    pub open spec fn ready(self) -> bool {
+        matches!(self, Self::Scan { .. } | Self::Applying { .. } | Self::Retry { .. })
+    }
+
     pub open spec fn expects(self, op: u64) -> bool {
         match self {
-            ProductionListingV::Prefixes { op: o, .. } | ProductionListingV::Extend { op: o, .. } | ProductionListingV::Relist { op: o, .. } => o == op,
-            ProductionListingV::Buckets { pending, .. } => pending.contains_key(op),
+            ProductionListingV::Prefixes { op: o, .. } | ProductionListingV::Bucket { op: o, .. } | ProductionListingV::Extend { op: o, .. } | ProductionListingV::Relist { op: o, .. } => o == op,
+            _ => false,
         }
     }
 }
