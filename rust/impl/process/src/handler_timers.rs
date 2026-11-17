@@ -214,16 +214,22 @@ impl State {
         proof {
             reveal(spec_timers_run);
         }
-        if !self.timers.started || self.timers.listing.is_some() {
+        if !self.timers.started {
+            return;
+        }
+        if self.timers.listing.is_some() {
+            if self.timers.loaded_through.is_some() { self.fire_due(now); }
             return;
         }
         if let Some(b) = self.timers.backoff_until {
             if now < b {
+                if self.timers.loaded_through.is_some() { self.fire_due(now); }
                 return;
             }
         }
         self.timers.backoff_until = None;
-        if self.timers.reload_pending {
+        let rediscover = match self.timers.rediscover_at { Some(at) => at <= now, None => false };
+        if self.timers.reload_pending || rediscover {
             self.reload(now);
             return;
         }
@@ -262,44 +268,8 @@ impl State {
             final(self).deep_view() == spec_reload(old(self).deep_view(), now),
     {
         let horizon = self.horizon(now);
-        let ghost s0 = self.deep_view();
-        let ghost armed = self.timers.wheel.armed.deep_view();
-        let mut kept: Vec<crate::state_timers::Slot> = Vec::new();
-        let mut i: usize = 0;
-        proof {
-            reveal(Seq::filter);
-            assert(kept.deep_view() =~= Seq::<SlotSpec>::empty());
-            assert(armed.take(0) =~= Seq::<SlotSpec>::empty());
-        }
-        while i < self.timers.wheel.armed.len()
-            invariant
-                i <= self.timers.wheel.armed.len(),
-                *self == *old(self),
-                s0 == self.deep_view(),
-                armed == self.timers.wheel.armed.deep_view(),
-                kept.deep_view() == armed.take(i as int).filter(|k: SlotSpec| spec_owns_key(s0, k.1)),
-            decreases self.timers.wheel.armed.len() - i,
-        {
-            let ghost k0 = kept.deep_view();
-            let at = self.timers.wheel.armed[i].0;
-            let key = copy_string(&self.timers.wheel.armed[i].1);
-            if self.owns_key(key.as_str()) {
-                kept.push((at, key));
-                proof {
-                    assert(kept.deep_view() =~= k0.push(armed[i as int]));
-                }
-            }
-            proof {
-                reveal(Seq::filter);
-                assert(armed.take(i as int + 1).drop_last() =~= armed.take(i as int));
-                assert(armed.take(i as int + 1).last() == armed[i as int]);
-            }
-            i += 1;
-        }
-        proof {
-            assert(armed.take(i as int) =~= armed);
-        }
-        self.timers.wheel.armed = kept;
+        self.timers.rediscover_at = Some(now.saturating_add(self.cfg.timer_rediscovery_ms));
+        self.timers.reload_pending = true;
         let prefix = self.keys.timer_prefix();
         let op = self.store(StoreReq::ListPrefixes { prefix }, Owner::Timers);
         self.timers.listing = Some(Listing::Prefixes { op, horizon });
@@ -539,8 +509,10 @@ impl State {
             reveal(spec_fire_due);
         }
         let ghost b0 = self.timers.backlog.deep_view();
-        let mut due = self.timers.wheel.take_due(now);
+        let limit = if self.timers.inflight < CONCURRENCY && self.timers.backlog.len() == 0 { self.timers.budget / 2 } else { 0 };
+        let mut due = self.timers.wheel.take_due(now, limit);
         let ghost d0 = due.deep_view();
+        self.timers.budget -= due.len();
         self.timers.backlog.append(&mut due);
         proof {
             assert(self.timers.backlog.deep_view() =~= b0 + d0);
@@ -555,7 +527,7 @@ impl State {
         let ghost s0 = old(self).deep_view();
         let fuel = self.timers.backlog.len();
         let mut k: usize = 0;
-        while k < fuel && self.timers.inflight < CONCURRENCY && self.timers.backlog.len() > 0
+        while k < fuel && self.timers.budget > 0 && self.timers.inflight < CONCURRENCY && self.timers.backlog.len() > 0
             invariant
                 k <= fuel,
                 spec_dispatch_due(s0, now, fuel as nat) == spec_dispatch_due(self.deep_view(), now, (fuel - k) as nat),
@@ -563,11 +535,12 @@ impl State {
         {
             let ghost s1 = self.deep_view();
             let ghost b0 = self.timers.backlog.deep_view();
-            let (at, key) = self.timers.backlog.remove(0);
+            let (at, key) = self.timers.backlog.pop_front().unwrap();
+            self.timers.budget -= 1;
             proof {
                 assert(b0[0] == (at, key@));
                 assert(self.timers.backlog.deep_view() =~= b0.drop_first());
-                assert(self.deep_view() == spec_with_timers(s1, TimersSpec { backlog: s1.timers.backlog.drop_first(), ..s1.timers }));
+                assert(self.deep_view() == spec_with_timers(s1, TimersSpec { backlog: s1.timers.backlog.drop_first(), budget: (s1.timers.budget - 1) as usize, ..s1.timers }));
             }
             self.timer_fire(key, at, now);
             k += 1;
@@ -651,3 +624,56 @@ impl State {
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use crate::{Config, State};
+    use crate::state_timers::TIMER_WORK_BUDGET;
+
+    #[test]
+    fn repeated_dispatch_shares_the_same_event_budget() {
+        let mut state = State::new(Config::memory("node"));
+        state.timers.budget = TIMER_WORK_BUDGET;
+        for i in 0..1_000 {
+            state.timers.backlog.push_back((0, format!("unparseable-{i}")));
+        }
+        state.dispatch_due(0);
+        assert_eq!(state.timers.backlog.len(), 1_000 - TIMER_WORK_BUDGET);
+        assert_eq!(state.timers.budget, 0);
+        state.dispatch_due(0);
+        assert_eq!(state.timers.backlog.len(), 1_000 - TIMER_WORK_BUDGET);
+    }
+
+    #[test]
+    fn saturated_concurrency_does_not_extract_more_due_keys() {
+        let mut state = State::new(Config::memory("node"));
+        state.timers.budget = TIMER_WORK_BUDGET;
+        state.timers.inflight = super::CONCURRENCY;
+        state.timers.wheel.arm(0, "unparseable".into());
+        state.fire_due(0);
+        assert_eq!(state.timers.wheel.len(), 1);
+        assert!(state.timers.backlog.is_empty());
+        assert_eq!(state.timers.budget, TIMER_WORK_BUDGET);
+    }
+
+    #[test]
+    fn rediscovery_coalesces_missed_start_intervals_without_overlap() {
+        let mut cfg = Config::memory("node");
+        cfg.timer_rediscovery_ms = 2_500;
+        let mut state = State::new(cfg);
+        state.timers.started = true;
+        state.timers.loaded_through = Some(7_200_000);
+        state.timers.rediscover_at = Some(3_600_000);
+        state.timers.budget = TIMER_WORK_BUDGET;
+        state.timers_run(3_600_000);
+        assert!(matches!(state.timers.listing, Some(super::Listing::Prefixes { .. })));
+        assert_eq!(state.timers.rediscover_at, Some(3_602_500));
+        let effects = state.out.len();
+        state.timers_run(3_610_000);
+        assert_eq!(state.out.len(), effects);
+        state.timers.listing = None;
+        state.reloaded(7_200_000, 0, 3_610_000);
+        assert!(matches!(state.timers.listing, Some(super::Listing::Prefixes { .. })));
+        assert_eq!(state.timers.rediscover_at, Some(3_612_500));
+    }
+}

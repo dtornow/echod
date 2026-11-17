@@ -60,6 +60,10 @@ pub struct Config {
     #[arg(long, env = "ECHOD_TIMER_BUCKET", default_value_t = 3_600_000)]
     pub timer_bucket_ms: u64,
 
+    /// Target interval between timer rediscovery scan starts, in ms.
+    #[arg(long, env = "ECHOD_TIMER_REDISCOVERY", default_value_t = 300_000)]
+    pub timer_rediscovery_ms: u64,
+
     /// How often this node refreshes its announcement, in ms.
     #[arg(long, env = "ECHOD_HEARTBEAT", default_value_t = 5_000)]
     pub heartbeat_ms: u64,
@@ -107,6 +111,7 @@ impl Config {
             node_id: None,
             retry_timeout: 60_000,
             timer_bucket_ms: 3_600_000,
+            timer_rediscovery_ms: 300_000,
             heartbeat_ms: 500,
             node_ttl_ms: 2_000,
             cache_entries: 1_000,
@@ -130,6 +135,7 @@ impl Config {
             appendable,
             retry_timeout: self.retry_timeout,
             timer_bucket_ms: self.timer_bucket_ms,
+            timer_rediscovery_ms: self.timer_rediscovery_ms,
             heartbeat_ms: self.heartbeat_ms,
             node_ttl_ms: self.node_ttl_ms,
             cache_entries: self.cache_entries,
@@ -142,6 +148,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use clap::Parser;
+
+    #[test]
+    fn timer_rediscovery_flag_reaches_the_core() {
+        let cfg = Config::try_parse_from(["echod", "--timer-rediscovery-ms", "2500"]).unwrap();
+        assert_eq!(cfg.logic("node".into(), false).timer_rediscovery_ms, 2_500);
+        assert!(cfg.validate().is_ok());
+        let cfg = Config::try_parse_from(["echod", "--timer-rediscovery-ms", "0"]).unwrap();
+        assert!(cfg.validate().is_err());
+    }
 
     #[test]
     fn retry_timeout_must_be_safe() {

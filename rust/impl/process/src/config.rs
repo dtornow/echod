@@ -26,6 +26,7 @@ pub struct Config {
     pub retry_timeout: u64,
     /// The width of a timer bucket, ms.
     pub timer_bucket_ms: u64,
+    pub timer_rediscovery_ms: u64,
     /// How often this node refreshes its announcement, ms.
     pub heartbeat_ms: u64,
     /// A node whose announcement is older than this is dead, ms.
@@ -51,6 +52,7 @@ impl DeepView for Config {
             appendable: self.appendable,
             retry_timeout: self.retry_timeout,
             timer_bucket_ms: self.timer_bucket_ms,
+            timer_rediscovery_ms: self.timer_rediscovery_ms,
             heartbeat_ms: self.heartbeat_ms,
             node_ttl_ms: self.node_ttl_ms,
             cache_entries: self.cache_entries,
@@ -73,6 +75,9 @@ impl View for Config {
 impl Config {
     /// Validate dials whose arithmetic is used by the protocol core.
     pub fn validate(&self) -> Result<(), String> {
+        if self.timer_rediscovery_ms == 0 || self.timer_rediscovery_ms > echod_types::MAX_TIME {
+            return Err(format!("timer rediscovery interval must be between 1 and {}", echod_types::MAX_TIME));
+        }
         if self.retry_timeout == 0 {
             return Err("retry timeout must be greater than zero".to_string());
         }
@@ -95,6 +100,7 @@ impl Config {
             appendable: false,
             retry_timeout: 60_000,
             timer_bucket_ms: 3_600_000,
+            timer_rediscovery_ms: 300_000,
             heartbeat_ms: 500,
             node_ttl_ms: 2_000,
             cache_entries: 1_000,
@@ -107,6 +113,20 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::Config;
+
+    #[test]
+    fn timer_rediscovery_interval_is_positive_and_bounded() {
+        let mut cfg = Config::memory("node");
+        assert_eq!(cfg.timer_rediscovery_ms, 300_000);
+        for interval in [0, echod_types::MAX_TIME + 1] {
+            cfg.timer_rediscovery_ms = interval;
+            assert!(cfg.validate().is_err());
+        }
+        for interval in [1, 2_500, echod_types::MAX_TIME] {
+            cfg.timer_rediscovery_ms = interval;
+            assert!(cfg.validate().is_ok());
+        }
+    }
 
     #[test]
     fn retry_timeout_respects_protocol_bounds() {

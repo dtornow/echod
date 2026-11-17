@@ -22,6 +22,7 @@ pub struct ProductionConfigData {
     pub appendable: bool,
     pub retry_timeout: u64,
     pub timer_bucket_ms: u64,
+    pub timer_rediscovery_ms: u64,
     pub heartbeat_ms: u64,
     pub node_ttl_ms: u64,
     pub cache_entries: usize,
@@ -36,6 +37,7 @@ impl DeepView for ProductionConfigData {
         ProductionConfigV {
             node_id: self.node_id@, url: self.url@, prefix: self.prefix@, compact: self.compact,
             appendable: self.appendable, retry_timeout: self.retry_timeout, timer_bucket_ms: self.timer_bucket_ms,
+            timer_rediscovery_ms: self.timer_rediscovery_ms,
             heartbeat_ms: self.heartbeat_ms, node_ttl_ms: self.node_ttl_ms, cache_entries: self.cache_entries,
             cache_bytes: self.cache_bytes, debug: self.debug,
         }
@@ -773,6 +775,7 @@ pub ghost struct ProductionConfigV {
     pub appendable: bool,
     pub retry_timeout: u64,
     pub timer_bucket_ms: u64,
+    pub timer_rediscovery_ms: u64,
     pub heartbeat_ms: u64,
     pub node_ttl_ms: u64,
     pub cache_entries: usize,
@@ -975,7 +978,7 @@ pub ghost enum ProductionRefreshV {
 
 #[cfg(verus_keep_ghost)]
 pub ghost struct ProductionTimerWheelV {
-    pub armed: Seq<(u64, Seq<char>)>,
+    pub armed: Set<(u64, Seq<char>)>,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -990,6 +993,8 @@ pub ghost struct ProductionTimersV {
     pub backoff_until: Option<u64>,
     pub inflight: usize,
     pub backlog: Seq<(u64, Seq<char>)>,
+    pub budget: usize,
+    pub rediscover_at: Option<u64>,
 }
 
 #[cfg(verus_keep_ghost)]
@@ -1170,6 +1175,7 @@ pub ghost struct ProductionStateV {
 pub const RETRY_AFTER_MS: u64 = 1_000;
 pub const RELIST_AFTER_MS: u64 = 1_000;
 pub const CONCURRENCY: usize = 16;
+pub const TIMER_WORK_BUDGET: usize = 64;
 
 pub struct NodeV {
     pub logic: LogicV,

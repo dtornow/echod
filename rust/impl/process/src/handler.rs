@@ -66,6 +66,7 @@ impl State {
             | Event::Wake { clock, .. } => *clock,
         };
         self.set_clock(clock);
+        self.timers.budget = crate::state_timers::TIMER_WORK_BUDGET;
         if self.node.members.next_heartbeat.is_none()
             && !self.node.members.refreshing()
         {
