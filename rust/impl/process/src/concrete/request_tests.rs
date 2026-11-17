@@ -12,11 +12,81 @@ use echod_types::{
 const NOW: u64 = 1_000;
 const RETRY: u64 = 100;
 
+#[test]
+fn raw_document_fence_is_not_the_public_detached_operation() {
+    let request = Request::TaskFence(echod_types::TaskFenceReq {
+        id: "a:missing".into(),
+        version: 0,
+        action: echod_types::TaskFenceAction::Create(PromiseCreateReq {
+            id: "d:first".into(),
+            timeout_at: NOW + 1_000,
+            param: Value::default(),
+            tags: Vec::new(),
+        }),
+    });
+    let original = empty_workflow();
+    let (after, response) = crate::concrete::document::handle(original.clone(), &request, NOW);
+    assert_eq!(after, original);
+    assert_eq!(response, Response::TaskFence(echod_types::TaskFenceRes { status: 400, action: None }));
+}
+
+#[test]
+fn phased_sweep_collects_all_timeout_offers_before_listeners() {
+    use crate::concrete::document::{bulk_workflow, handle};
+    let (doc, _) = handle(empty_workflow(), &create("wf:a", external()), NOW);
+    let listener = Request::PromiseRegisterListener(PromiseRegisterListenerReq {
+        awaited: "wf:a".into(),
+        address: "http://listener".into(),
+    });
+    let (doc, _) = handle(doc, &listener, NOW);
+    let (doc, _) = handle(doc, &settle("wf:a"), NOW);
+    let (doc, _) = handle(doc, &create("wf:z", target()), NOW);
+    let DocumentBody::Workflow(objects) = doc else { unreachable!() };
+    let (objects, notes) = bulk_workflow(objects, NOW, RETRY);
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0], Outbound::Execute { id: "wf:z".into(), version: 0 });
+    assert!(matches!(&notes[1], Outbound::Unblock { address, .. } if address == "http://listener"));
+    let (_, later) = bulk_workflow(objects, NOW, RETRY);
+    assert!(later.is_empty());
+}
+
 fn value(data: &str) -> Value {
     Value {
         headers: Vec::new(),
         data: Some(data.to_string()),
     }
+}
+
+#[test]
+fn one_snapshot_of_callbacks_offers_a_suspended_task_only_once() {
+    use crate::concrete::document::handle;
+    let (doc, _, _) = step(empty_workflow(), create("wf:task", target()), NOW);
+    let acquire = Request::TaskAcquire(TaskAcquireReq {
+        id: "wf:task".into(), version: 0, pid: "worker".into(), ttl: 500,
+    });
+    let (doc, _, _) = step(doc, acquire, NOW + 1);
+    let (doc, _, _) = step(doc, create("wf:b", external()), NOW + 2);
+    let (doc, _, _) = step(doc, create("wf:c", external()), NOW + 2);
+    let suspend = Request::TaskSuspend(TaskSuspendReq {
+        id: "wf:task".into(),
+        version: 1,
+        actions: vec![
+            PromiseRegisterCallbackReq { awaited: "wf:b".into(), awaiter: "wf:task".into() },
+            PromiseRegisterCallbackReq { awaited: "wf:c".into(), awaiter: "wf:task".into() },
+        ],
+    });
+    let (doc, response, _) = step(doc, suspend, NOW + 3);
+    assert_eq!(status(&response), 200);
+    let (doc, _) = handle(doc, &settle("wf:b"), NOW + 4);
+    let (doc, _) = handle(doc, &settle("wf:c"), NOW + 4);
+    let get = Request::PromiseGet(PromiseGetReq { id: "wf:task".into() });
+    let (doc, _, notes) = step(doc, get.clone(), NOW + 4);
+    assert_eq!(notes, vec![Outbound::Execute { id: "wf:task".into(), version: 1 }]);
+    let task = peek(&doc, &"wf:task".into()).unwrap().task.unwrap();
+    assert_eq!(task.resumes, vec!["wf:b".to_owned(), "wf:c".to_owned()]);
+    assert_eq!(task.retry_timeout_at, Some(NOW + 4 + RETRY));
+    let (_, _, notes) = step(doc, get, NOW + 4);
+    assert!(notes.is_empty());
 }
 
 fn target() -> Vec<(String, String)> {
@@ -63,19 +133,13 @@ fn status(response: &Response) -> u16 {
 }
 
 #[test]
-fn runnable_create_release_and_continue_dispatch_in_their_commit() {
+fn handler_enabled_work_waits_for_the_next_sweep() {
     let (doc, response, notes) = step(empty_workflow(), create("wf:task", target()), NOW);
     assert_eq!(status(&response), 200);
-    assert_eq!(
-        notes,
-        vec![Outbound::Execute {
-            id: "wf:task".into(),
-            version: 0
-        }]
-    );
+    assert!(notes.is_empty());
     let task = peek(&doc, &"wf:task".into()).unwrap().task.unwrap();
     assert_eq!(task.state, TaskState::Pending);
-    assert_eq!(task.retry_timeout_at, Some(NOW + RETRY));
+    assert_eq!(task.retry_timeout_at, Some(NOW));
 
     let acquire = Request::TaskAcquire(TaskAcquireReq {
         id: "wf:task".into(),
@@ -85,7 +149,7 @@ fn runnable_create_release_and_continue_dispatch_in_their_commit() {
     });
     let (doc, response, notes) = step(doc, acquire, NOW + 1);
     assert_eq!(status(&response), 200);
-    assert!(notes.is_empty());
+    assert_eq!(notes, vec![Outbound::Execute { id: "wf:task".into(), version: 0 }]);
 
     let release = Request::TaskRelease(TaskReleaseReq {
         id: "wf:task".into(),
@@ -93,6 +157,9 @@ fn runnable_create_release_and_continue_dispatch_in_their_commit() {
     });
     let (doc, response, notes) = step(doc, release, NOW + 2);
     assert_eq!(status(&response), 200);
+    assert!(notes.is_empty());
+    let get = Request::PromiseGet(PromiseGetReq { id: "wf:task".into() });
+    let (doc, _, notes) = step(doc, get.clone(), NOW + 2);
     assert_eq!(
         notes,
         vec![Outbound::Execute {
@@ -121,6 +188,8 @@ fn runnable_create_release_and_continue_dispatch_in_their_commit() {
     });
     let (doc, response, notes) = step(doc, cont, NOW + 4);
     assert_eq!(status(&response), 200);
+    assert!(notes.is_empty());
+    let (doc, _, notes) = step(doc, get, NOW + 4);
     assert_eq!(
         notes,
         vec![Outbound::Execute {
@@ -139,7 +208,7 @@ fn runnable_create_release_and_continue_dispatch_in_their_commit() {
 }
 
 #[test]
-fn settlement_drains_callbacks_and_listeners_before_returning_effects() {
+fn settlement_defers_callbacks_and_listeners_until_the_next_sweep() {
     let (doc, _, _) = step(empty_workflow(), create("wf:awaiter", target()), NOW);
     let acquire = Request::TaskAcquire(TaskAcquireReq {
         id: "wf:awaiter".into(),
@@ -174,6 +243,10 @@ fn settlement_drains_callbacks_and_listeners_before_returning_effects() {
         Response::Promise(r) => r.promise.clone().unwrap(),
         _ => unreachable!(),
     };
+    assert!(notes.is_empty());
+    assert!(!peek(&doc, &"wf:awaited".into()).unwrap().promise.callbacks.is_empty());
+    let get = Request::PromiseGet(PromiseGetReq { id: "wf:awaited".into() });
+    let (doc, _, notes) = step(doc, get, NOW + 5);
     assert_eq!(notes.len(), 2);
     assert!(notes.contains(&Outbound::Execute {
         id: "wf:awaiter".into(),
@@ -194,7 +267,7 @@ fn settlement_drains_callbacks_and_listeners_before_returning_effects() {
 }
 
 #[test]
-fn settlement_closes_more_than_256_obligations() {
+fn the_next_sweep_collects_all_300_settled_listeners() {
     let (mut doc, _, _) = step(empty_workflow(), create("wf:awaited", external()), NOW);
     for i in 0..300 {
         let listener = Request::PromiseRegisterListener(PromiseRegisterListenerReq {
@@ -209,6 +282,9 @@ fn settlement_closes_more_than_256_obligations() {
 
     let (doc, response, notes) = step(doc, settle("wf:awaited"), NOW + 2);
     assert_eq!(status(&response), 200);
+    assert!(notes.is_empty());
+    let get = Request::PromiseGet(PromiseGetReq { id: "wf:awaited".into() });
+    let (doc, _, notes) = step(doc, get, NOW + 2);
     assert_eq!(notes.len(), 300);
     assert!(peek(&doc, &"wf:awaited".into())
         .unwrap()
@@ -229,6 +305,9 @@ fn callbacks_only_record_resumes_on_tasks_that_are_already_running_or_queued() {
     assert_eq!(status(&response), 200);
 
     let (doc, _, notes) = step(doc, settle("wf:awaited"), NOW + 3);
+    assert!(notes.is_empty());
+    let get = Request::PromiseGet(PromiseGetReq { id: "wf:awaited".into() });
+    let (doc, _, notes) = step(doc, get, NOW + 3);
     assert!(
         notes.is_empty(),
         "a pending awaiter only records the resume"
@@ -239,7 +318,7 @@ fn callbacks_only_record_resumes_on_tasks_that_are_already_running_or_queued() {
 }
 
 #[test]
-fn an_effect_consumed_by_the_handler_does_not_escape_the_commit() {
+fn a_collected_execute_survives_acquisition_by_the_handler() {
     let (doc, _, _) = step(empty_workflow(), create("wf:task", target()), NOW);
     let acquire = Request::TaskAcquire(TaskAcquireReq {
         id: "wf:task".into(),
@@ -253,10 +332,7 @@ fn an_effect_consumed_by_the_handler_does_not_escape_the_commit() {
 
     assert_eq!(status(&response), 200);
     assert!(born.is_empty());
-    assert!(
-        notes.is_empty(),
-        "the pre-sweep retry was consumed by the acquire in the same commit"
-    );
+    assert_eq!(notes, vec![Outbound::Execute { id: "wf:task".into(), version: 0 }]);
     assert_eq!(
         peek(&doc, &"wf:task".into()).unwrap().task.unwrap().state,
         TaskState::Acquired,

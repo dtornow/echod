@@ -1,6 +1,6 @@
 [package]
 name = "echod-refinement"
-description = "Verified refinement from the Echod concrete model to the abstract specification."
+description = "Echod refinement claims, verified components, and open global proof obligations."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

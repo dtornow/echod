@@ -41,6 +41,293 @@ use crate::state::{
 verus! {
 
 impl<'cfg> Handlers<'cfg> {
+    pub(crate) fn bulk_timed_origin(&self, s: &Store, document: &Id, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_bulk_timed_origin(*self.0, s@, document@, now),
+    {
+        let keys = self.timed_origin_keys(s, document);
+        let (projected, mut send) = self.project_timed_keys(s, &keys, now);
+        let (resumed, mut callbacks) = self.drain_timed_callback_keys(&projected, &keys, now);
+        let (next, mut listeners) = self.drain_timed_listener_keys(&resumed, &keys, now);
+        let ghost offers = send@;
+        let ghost callback_sends = callbacks@;
+        let ghost listener_sends = listeners@;
+        send.append(&mut callbacks);
+        proof { assert(sends(send@) =~= sends(offers) + sends(callback_sends)); }
+        let ghost before_listeners = send@;
+        send.append(&mut listeners);
+        proof { assert(sends(send@) =~= sends(before_listeners) + sends(listener_sends)); }
+        (next, send)
+    }
+
+    pub(crate) fn drain_timed_callback_keys(&self, s: &Store, keys: &Vec<Id>, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_callback_keys(*self.0, s@, strs(keys@), keys.len() as nat, now),
+    {
+        let mut current = copy_store(s);
+        let mut send: Vec<Dispatch> = Vec::new();
+        let mut i = 0;
+        while i < keys.len()
+            invariant
+                i <= keys.len(),
+                (current@, sends(send@)) == spec_drain_timed_callback_keys(*self.0, s@, strs(keys@), i as nat, now),
+            decreases keys.len() - i,
+        {
+            let (next, mut more) = self.drain_timed_callbacks(&current, &keys[i], now);
+            let ghost before = send@;
+            let ghost added = more@;
+            send.append(&mut more);
+            proof { assert(sends(send@) =~= sends(before) + sends(added)); }
+            current = next;
+            i += 1;
+        }
+        (current, send)
+    }
+
+    pub(crate) fn drain_timed_listener_keys(&self, s: &Store, keys: &Vec<Id>, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_listener_keys(s@, strs(keys@), keys.len() as nat, now),
+    {
+        let mut current = copy_store(s);
+        let mut send: Vec<Dispatch> = Vec::new();
+        let mut i = 0;
+        while i < keys.len()
+            invariant
+                i <= keys.len(),
+                (current@, sends(send@)) == spec_drain_timed_listener_keys(s@, strs(keys@), i as nat, now),
+            decreases keys.len() - i,
+        {
+            let (next, mut more) = self.drain_timed_listeners(&current, &keys[i], now);
+            let ghost before = send@;
+            let ghost added = more@;
+            send.append(&mut more);
+            proof { assert(sends(send@) =~= sends(before) + sends(added)); }
+            current = next;
+            i += 1;
+        }
+        (current, send)
+    }
+
+    pub(crate) fn drain_timed_callbacks(&self, s: &Store, awaited: &Id, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_callbacks(*self.0, s@, awaited@, now),
+    {
+        broadcast use group_exec_views;
+        match s.promises.get(awaited) {
+            Some(promise) if promise.state != PromiseState::Pending => {
+                let plan = promise.callbacks.to_vec();
+                self.drain_timed_callback_plan(s, awaited, &plan, now)
+            },
+            _ => (copy_store(s), Vec::new()),
+        }
+    }
+
+    pub(crate) fn drain_timed_listeners(&self, s: &Store, awaited: &Id, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_listeners(s@, awaited@, now),
+    {
+        broadcast use group_exec_views;
+        match s.promises.get(awaited) {
+            Some(promise) if promise.state != PromiseState::Pending => {
+                let plan = promise.listeners.to_vec();
+                self.drain_timed_listener_plan(s, awaited, &plan, now)
+            },
+            _ => (copy_store(s), Vec::new()),
+        }
+    }
+
+    pub(crate) fn drain_timed_callback_plan(
+        &self, s: &Store, awaited: &Id, awaiters: &Vec<Id>, now: Time,
+    ) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_callback_plan(*self.0, s@, awaited@, strs(awaiters@), awaiters.len() as nat, now),
+    {
+        let mut current = copy_store(s);
+        let mut send: Vec<Dispatch> = Vec::new();
+        let mut i = 0;
+        while i < awaiters.len()
+            invariant
+                i <= awaiters.len(),
+                (current@, sends(send@)) == spec_drain_timed_callback_plan(*self.0, s@, awaited@, strs(awaiters@), i as nat, now),
+            decreases awaiters.len() - i,
+        {
+            let (next, mut more) = self.drain_timed_callback(&current, awaited, &awaiters[i], now);
+            let ghost prior_sends = send@;
+            let ghost more_sends = more@;
+            send.append(&mut more);
+            proof { assert(sends(send@) =~= sends(prior_sends) + sends(more_sends)); }
+            current = next;
+            i += 1;
+        }
+        (current, send)
+    }
+
+    pub(crate) fn drain_timed_listener_plan(
+        &self, s: &Store, awaited: &Id, addresses: &Vec<String>, now: Time,
+    ) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_listener_plan(s@, awaited@, strs(addresses@), addresses.len() as nat, now),
+    {
+        let mut current = copy_store(s);
+        let mut send: Vec<Dispatch> = Vec::new();
+        let mut i = 0;
+        while i < addresses.len()
+            invariant
+                i <= addresses.len(),
+                (current@, sends(send@)) == spec_drain_timed_listener_plan(s@, awaited@, strs(addresses@), i as nat, now),
+            decreases addresses.len() - i,
+        {
+            let mut next = self.process_listener(awaited, addresses[i].as_str(), &current, now);
+            let ghost prior_sends = send@;
+            let ghost more_sends = next.send@;
+            send.append(&mut next.send);
+            proof { assert(sends(send@) =~= sends(prior_sends) + sends(more_sends)); }
+            current = next.next;
+            i += 1;
+        }
+        (current, send)
+    }
+
+    pub(crate) fn drain_timed_callback(&self, s: &Store, awaited: &Id, awaiter: &Id, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_drain_timed_callback(*self.0, s@, awaited@, awaiter@, now),
+    {
+        broadcast use group_exec_views;
+        let suspended = match s.tasks.get(awaiter) {
+            Some(task) => task.state == TaskState::Suspended,
+            None => false,
+        };
+        let callback = self.process_callback(awaited, awaiter, s, now);
+        if suspended {
+            let retry = self.process_retry_timeout(awaiter, &callback.next, now);
+            (retry.next, retry.send)
+        } else {
+            (callback.next, callback.send)
+        }
+    }
+
+    pub(crate) fn timed_origin_keys(&self, s: &Store, document: &Id) -> (result: Vec<Id>)
+        ensures strs(result@) == spec_timed_origin_keys(s@, document@),
+    {
+        broadcast use group_exec_views;
+        let keys = s.promises.keys();
+        proof {
+            assert forall|id: Seq<char>| strs(keys@).contains(id) == #[trigger] s.promises@.contains_key(id) by {
+                if strs(keys@).contains(id) {
+                    let j = choose|j: int| 0 <= j < strs(keys@).len() && strs(keys@)[j] == id;
+                    assert(keys@[j]@ == id);
+                } else if s.promises@.contains_key(id) {
+                    let j = choose|j: int| 0 <= j < keys.len() && keys@[j]@ == id;
+                    assert(strs(keys@)[j] == id);
+                }
+            };
+            assert(strs(keys@).to_set() =~= s@.promises.dom());
+        }
+        let mut selected: PMap<u8> = PMap::empty();
+        let mut i = 0;
+        while i < keys.len()
+            invariant
+                i <= keys.len(),
+                strs(keys@).to_set() == s@.promises.dom(),
+                forall|id: Seq<char>| #[trigger] selected@.contains_key(id)
+                    == (strs(keys@).take(i as int).contains(id) && origin(id) == origin(document@)),
+            decreases keys.len() - i,
+        {
+            proof { assert(strs(keys@).take(i as int + 1) =~= strs(keys@).take(i as int).push(keys@[i as int]@)); }
+            let ghost previous = selected@;
+            let matches = echod_types::same_origin(&keys[i], document);
+            assert(matches == (origin(keys@[i as int]@) == origin(document@)));
+            if matches {
+                selected.insert(keys[i].clone(), 0);
+            }
+            proof {
+                assert forall|id: Seq<char>| #[trigger] selected@.contains_key(id)
+                    == (strs(keys@).take(i as int + 1).contains(id) && origin(id) == origin(document@)) by {
+                    assert(previous.contains_key(id)
+                        == (strs(keys@).take(i as int).contains(id) && origin(id) == origin(document@)));
+                    if strs(keys@).take(i as int + 1).contains(id) {
+                        let j = choose|j: int| 0 <= j < i + 1 && #[trigger] strs(keys@).take(i as int + 1)[j] == id;
+                        if j < i {
+                            assert(strs(keys@).take(i as int)[j] == id);
+                        } else {
+                            assert(id == keys@[i as int]@);
+                        }
+                    }
+                    if strs(keys@).take(i as int).contains(id) {
+                        let j = choose|j: int| 0 <= j < i && #[trigger] strs(keys@).take(i as int)[j] == id;
+                        assert(strs(keys@).take(i as int + 1)[j] == id);
+                    } else if id == keys@[i as int]@ {
+                        assert(strs(keys@).take(i as int + 1)[i as int] == id);
+                    }
+                    assert(strs(keys@).take(i as int + 1).contains(id)
+                        == (strs(keys@).take(i as int).contains(id) || id == keys@[i as int]@));
+                    if id != keys@[i as int]@ {
+                        assert(selected@.contains_key(id) == previous.contains_key(id));
+                    } else {
+                        assert(selected@.contains_key(id) == (previous.contains_key(id) || matches));
+                    }
+                };
+            }
+            i += 1;
+        }
+        proof {
+            assert(strs(keys@).take(i as int) =~= strs(keys@));
+            assert(selected@.dom() =~= s@.promises.dom().filter(|id: Seq<char>| origin(id) == origin(document@)));
+        }
+        selected.keys()
+    }
+
+    pub(crate) fn project_timed_origin(&self, s: &Store, document: &Id, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_project_timed_origin(*self.0, s@, document@, now),
+    {
+        let keys = self.timed_origin_keys(s, document);
+        self.project_timed_keys(s, &keys, now)
+    }
+
+    pub(crate) fn project_timed_keys(&self, s: &Store, keys: &Vec<Id>, now: Time) -> (result: (Store, Vec<Dispatch>))
+        ensures (result.0@, sends(result.1@)) == spec_project_timed_keys(*self.0, s@, strs(keys@), keys.len() as nat, now),
+    {
+        broadcast use group_exec_views;
+        let mut current = copy_store(s);
+        let mut send: Vec<Dispatch> = Vec::new();
+        let mut i = 0;
+        while i < keys.len()
+            invariant
+                i <= keys.len(),
+                (current@, sends(send@)) == spec_project_timed_keys(*self.0, s@, strs(keys@), i as nat, now),
+            decreases keys.len() - i,
+        {
+            let mut next = self.project_timed_key(&current, &keys[i], now);
+            let ghost prior_sends = send@;
+            let ghost more_sends = next.send@;
+            send.append(&mut next.send);
+            proof { assert(sends(send@) =~= sends(prior_sends) + sends(more_sends)); }
+            current = next.next;
+            i += 1;
+        }
+        (current, send)
+    }
+
+    pub(crate) fn project_timed_key(&self, s: &Store, id: &Id, now: Time) -> (result: InOut)
+        ensures result@ == spec_project_timed_key(*self.0, s@, id@, now),
+    {
+        broadcast use group_exec_views;
+        let promise = match s.promises.get(id) {
+            Some(promise) => promise,
+            None => return self.noop(s),
+        };
+        if promise.state != PromiseState::Pending {
+            return self.noop(s);
+        }
+        if promise.timeout_at <= now {
+            return self.process_promise_timeout(id, s, now);
+        }
+        let task = match s.tasks.get(id) {
+            Some(task) => task,
+            None => return self.noop(s),
+        };
+        if task.state == TaskState::Acquired && task.lease_timeout_at() <= now {
+            let released = self.process_lease_timeout(id, s, now);
+            self.process_retry_timeout(id, &released.next, now)
+        } else if task.state == TaskState::Pending && match task.retry_timeout_at { Some(at) => at <= now, None => false } {
+            self.process_retry_timeout(id, s, now)
+        } else {
+            self.noop(s)
+        }
+    }
+
     /// Not due. `pending` keeps the checker from treating it as a step that
     /// ran and changed nothing, which a derived item would otherwise repeat.
     fn noop(&self, s: &Store) -> (r: InOut)

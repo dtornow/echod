@@ -28,3 +28,7 @@ validator = { version = "0.18", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 prometheus-client = "0.25"
+
+[dev-dependencies]
+rover-exec = { path = "../../spec/rover/exec" }
+rover-spec = { path = "../../spec/rover/spec" }

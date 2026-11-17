@@ -18,35 +18,67 @@
 //! functions is stated once, as the characters it produces, and `KeySpace`
 //! computes those statements. Which bucket an instant falls in is proved.
 
-use vstd::contrib::make_spec_type;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::{
+    ProductionKeySpaceV as KeySpaceSpec, ProductionTimerEntryV as TimerEntrySpec,
+};
 use vstd::prelude::*;
 
 use crate::verified::text::copy_string;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_keys_spec_encode_key as spec_encode_key,
+    production_keys_spec_decode_key as spec_decode_key,
+    production_keys_spec_normalize_prefix as spec_normalize_prefix,
+    production_keys_spec_class_of as spec_class_of,
+    production_keys_spec_doc_key as spec_doc_key,
+    production_keys_spec_sched_key as spec_sched_key,
+    production_keys_spec_members_key as spec_members_key,
+    production_keys_spec_node_prefix as spec_node_prefix,
+    production_keys_spec_node_key as spec_node_key,
+    production_keys_spec_node_of_key as spec_node_of_key,
+    production_keys_spec_timer_prefix as spec_timer_prefix,
+    production_keys_spec_bucket_prefix as spec_bucket_prefix,
+    production_keys_spec_parse_bucket_prefix as spec_parse_bucket_prefix,
+    production_keys_spec_timer_key as spec_timer_key,
+    production_keys_spec_sched_timer_key as spec_sched_timer_key,
+    production_keys_spec_parse_timer_key as spec_parse_timer_key,
+    production_keys_spec_last_segment as spec_last_segment,
+    production_keys_spec_bucket_of as spec_bucket_of,
+};
+
 verus! {
 
 pub const DEADLINE_WIDTH: usize = 20;
-
-#[make_spec_type]
 #[derive(Debug, Clone)]
 #[verifier::allow(autoderive_clone_without_spec)]
+
 pub struct KeySpace {
     pub prefix: String,
     /// The width of a timer bucket, ms. At least 1.
     pub bucket_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[verifier::allow(autoderive_clone_without_spec)]
-pub enum TimerEntry {
-    Origin { deadline: u64, origin: String, token: u64, by: String },
-    Schedule { deadline: u64, id: String, token: u64, by: String },
+#[cfg(verus_keep_ghost)]
+impl DeepView for KeySpace {
+    type V = KeySpaceSpec;
+    open spec fn deep_view(&self) -> KeySpaceSpec {
+        KeySpaceSpec { prefix: self.prefix@, bucket_ms: self.bucket_ms }
+    }
 }
 
 #[cfg(verus_keep_ghost)]
-pub ghost enum TimerEntrySpec {
-    Origin { deadline: u64, origin: Seq<char>, token: u64, by: Seq<char> },
-    Schedule { deadline: u64, id: Seq<char>, token: u64, by: Seq<char> },
+impl View for KeySpace {
+    type V = KeySpaceSpec;
+    open spec fn view(&self) -> KeySpaceSpec { self.deep_view() }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+
+pub enum TimerEntry {
+    Origin { deadline: u64, origin: String, token: u64, by: String },
+    Schedule { deadline: u64, id: String, token: u64, by: String },
 }
 
 #[cfg(verus_keep_ghost)]
@@ -60,33 +92,6 @@ impl DeepView for TimerEntry {
     }
 }
 
-#[cfg(verus_keep_ghost)]
-impl TimerEntrySpec {
-    pub open spec fn deadline(self) -> u64 {
-        match self {
-            TimerEntrySpec::Origin { deadline, .. } | TimerEntrySpec::Schedule { deadline, .. } => deadline,
-        }
-    }
-
-    pub open spec fn target(self) -> Seq<char> {
-        match self {
-            TimerEntrySpec::Origin { origin, .. } => origin,
-            TimerEntrySpec::Schedule { id, .. } => id,
-        }
-    }
-
-    pub open spec fn token(self) -> u64 {
-        match self {
-            TimerEntrySpec::Origin { token, .. } | TimerEntrySpec::Schedule { token, .. } => token,
-        }
-    }
-
-    pub open spec fn by(self) -> Seq<char> {
-        match self {
-            TimerEntrySpec::Origin { by, .. } | TimerEntrySpec::Schedule { by, .. } => by,
-        }
-    }
-}
 
 impl TimerEntry {
     pub fn deadline(&self) -> (r: u64)
@@ -132,23 +137,23 @@ impl TimerEntry {
 // The text of a key, stated
 // ---------------------------------------------------------------------------
 
-pub uninterp spec fn spec_encode_key(s: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_decode_key(s: Seq<char>) -> Option<Seq<char>>;
-pub uninterp spec fn spec_normalize_prefix(s: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_class_of(prefix: Seq<char>, key: Seq<char>) -> Option<Seq<char>>;
-pub uninterp spec fn spec_doc_key(prefix: Seq<char>, origin: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_sched_key(prefix: Seq<char>, id: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_members_key(prefix: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_node_prefix(prefix: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_node_key(prefix: Seq<char>, id: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_node_of_key(prefix: Seq<char>, key: Seq<char>) -> Option<Seq<char>>;
-pub uninterp spec fn spec_timer_prefix(prefix: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_bucket_prefix(prefix: Seq<char>, bucket: u64) -> Seq<char>;
-pub uninterp spec fn spec_parse_bucket_prefix(prefix: Seq<char>, p: Seq<char>) -> Option<u64>;
-pub uninterp spec fn spec_timer_key(prefix: Seq<char>, bucket_ms: u64, origin: Seq<char>, at: u64, token: u64, by: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_sched_timer_key(prefix: Seq<char>, bucket_ms: u64, id: Seq<char>, at: u64, token: u64, by: Seq<char>) -> Seq<char>;
-pub uninterp spec fn spec_parse_timer_key(key: Seq<char>) -> Option<TimerEntrySpec>;
-pub uninterp spec fn spec_last_segment(key: Seq<char>) -> Seq<char>;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 pub assume_specification [text::encode_key](s: &str) -> (r: String)
     ensures
@@ -250,10 +255,7 @@ pub fn fnv1a(s: &str) -> (r: u64)
 }
 
 /// The start of the bucket `at` falls in.
-pub open spec fn spec_bucket_of(at: u64, bucket_ms: u64) -> u64 {
-    let width = if bucket_ms < 1 { 1u64 } else { bucket_ms };
-    ((at / width) * width) as u64
-}
+
 
 /// The start of the bucket `at` falls in. `bucket_ms` is at least 1, as
 /// `KeySpace::new` stores it.

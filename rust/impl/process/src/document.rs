@@ -28,22 +28,31 @@ use crate::concrete::lemma_doc_view;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::document::{DocumentBodyV, LoadedDocumentV};
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_document_spec_loaded_body as spec_loaded_body,
+    production_document_spec_loaded_version as spec_loaded_version,
+    production_document_spec_loaded_committed_at as spec_loaded_committed_at,
+    production_document_spec_empty_workflow as spec_empty_workflow,
+    production_document_spec_empty_schedule as spec_empty_schedule,
+    production_document_spec_clamp_now as spec_clamp_now,
+    production_document_spec_removed_any as spec_removed_any,
+    production_document_spec_decode_workflow as spec_decode_workflow,
+    production_document_spec_decode_schedule as spec_decode_schedule,
+    production_document_spec_encode_body as spec_encode_body,
+    production_document_spec_encode_delta as spec_encode_delta,
+};
+
 verus! {
 
 #[cfg(verus_keep_ghost)]
 pub type LoadedSpec = LoadedDocumentV;
 
-pub open spec fn spec_loaded_body(loaded: LoadedSpec) -> DocumentBodyV {
-    crate::concrete::document::spec_stored_body(loaded.document)
-}
 
-pub open spec fn spec_loaded_version(loaded: LoadedSpec) -> u64 {
-    crate::concrete::document::spec_stored_version(loaded.document)
-}
 
-pub open spec fn spec_loaded_committed_at(loaded: LoadedSpec) -> u64 {
-    crate::concrete::document::spec_stored_committed_at(loaded.document)
-}
+
+
+
 
 pub fn loaded_body(loaded: &Loaded) -> (r: DocumentBody)
     ensures r@ == spec_loaded_body(loaded.deep_view()),
@@ -63,21 +72,9 @@ pub fn loaded_committed_at(loaded: &Loaded) -> (r: u64)
     stored_committed_at(&loaded.document)
 }
 
-pub open spec fn spec_empty_workflow(document: Seq<char>) -> LoadedSpec {
-    LoadedSpec {
-        document: crate::concrete::document::spec_empty_stored_workflow(document),
-        change_count: 0,
-        bytes: 0,
-    }
-}
 
-pub open spec fn spec_empty_schedule(document: Seq<char>) -> LoadedSpec {
-    LoadedSpec {
-        document: crate::concrete::document::spec_empty_stored_schedule(document),
-        change_count: 0,
-        bytes: 0,
-    }
-}
+
+
 
 /// The nearest deadline of a document.
 pub fn deadline(doc: &DocumentBody) -> (r: Option<u64>)
@@ -90,9 +87,7 @@ pub fn deadline(doc: &DocumentBody) -> (r: Option<u64>)
 /// The instant a step on a document is decided at: the node's clock, or the
 /// document's committed instant, whichever is later, so no step is decided
 /// before the one that wrote what it read.
-pub open spec fn spec_clamp_now(committed_at: u64, now: u64) -> u64 {
-    if committed_at > now { committed_at } else { now }
-}
+
 
 pub fn clamp_now(committed_at: u64, now: u64) -> (r: u64)
     ensures
@@ -111,14 +106,7 @@ pub fn changed(before: &DocumentBody, after: &DocumentBody) -> (r: bool)
 
 /// A row of `before` is gone from `after`: an object removed, or the
 /// schedule deleted. Such a document cannot be appended to.
-pub open spec fn spec_removed_any(before: DocumentBodyV, after: DocumentBodyV) -> bool {
-    match (before, after) {
-        (DocumentBodyV::Workflow(b), DocumentBodyV::Workflow(a)) => !b.dom().subset_of(a.dom()),
-        (DocumentBodyV::Schedule(Some(_)), DocumentBodyV::Schedule(None)) => true,
-        (DocumentBodyV::Schedule(_), DocumentBodyV::Schedule(_)) => false,
-        _ => true,
-    }
-}
+
 
 pub fn removed_any(before: &DocumentBody, after: &DocumentBody) -> (r: bool)
     ensures
@@ -142,17 +130,14 @@ pub fn removed_any(before: &DocumentBody, after: &DocumentBody) -> (r: bool)
 
 /// What the bytes of a workflow object say: the folded partials as a
 /// document, or why they cannot be read.
-pub uninterp spec fn spec_decode_workflow(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
+
 /// What the bytes of a schedule's object say.
-pub uninterp spec fn spec_decode_schedule(bytes: Seq<u8>) -> Result<LoadedSpec, Seq<char>>;
+
 /// One compacted partial containing the complete document.
-pub uninterp spec fn spec_encode_body(document: crate::concrete::document::StoredDocumentV) -> Seq<u8>;
+
 /// One partial containing the changes from `before` to `after`, and how many
 /// changes that is.
-pub uninterp spec fn spec_encode_delta(
-    before: crate::concrete::document::StoredDocumentV,
-    after: crate::concrete::document::StoredDocumentV,
-) -> (Seq<u8>, usize);
+
 
 pub assume_specification [codec::decode_workflow](bytes: &[u8]) -> (r: Result<Loaded, String>)
     ensures
@@ -332,5 +317,29 @@ mod tests {
         };
         assert_eq!(loaded.schedule, Some(schedule(20)));
         assert_eq!(loaded.version, 7);
+    }
+
+    #[test]
+    fn decodable_snapshot_without_newline_is_not_an_append_base() {
+        let before = document(1, 10, 20);
+        let after = document(2, 20, 30);
+        let mut bytes = codec::encode(&before);
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        assert!(codec::decode_schedule(&bytes).is_ok());
+        let (delta, _) = codec::encode_delta(&before, &after);
+        bytes.extend(delta);
+        assert!(codec::decode_schedule(&bytes).is_err());
+    }
+
+    #[test]
+    fn seeded_saturated_version_delta_cannot_be_folded() {
+        let before = document(u64::MAX, 10, 20);
+        let after = document(u64::MAX, 20, 30);
+        let mut bytes = codec::encode(&before);
+        assert!(codec::decode_schedule(&bytes).is_ok());
+        let (delta, _) = codec::encode_delta(&before, &after);
+        bytes.extend(delta);
+        assert!(codec::decode_schedule(&bytes).is_err());
+        assert!(codec::decode_schedule(&codec::encode(&after)).is_ok());
     }
 }

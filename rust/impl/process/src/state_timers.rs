@@ -24,7 +24,7 @@
 //! by key. Each operation ensures it computes its `spec_*` over that
 //! sequence.
 
-use vstd::contrib::make_spec_type;
+
 use vstd::prelude::*;
 
 use crate::concrete::store::before;
@@ -39,64 +39,95 @@ use echod_concrete_spec::handler::spec_before;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::state::StoreErrorSpec;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionTimerWheelV as TimerWheelSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionTimersV as TimersSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionListingV as ListingSpec;
+
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_state_timers_spec_slot_before as spec_slot_before,
+    production_state_timers_spec_arm as spec_arm,
+    production_state_timers_spec_disarm as spec_disarm,
+    production_state_timers_spec_due_count as spec_due_count,
+    production_state_timers_spec_take_due as spec_take_due,
+    production_state_timers_spec_nearest as spec_nearest,
+    production_state_timers_spec_min_opt as spec_min_opt,
+    production_state_timers_spec_max as spec_max,
+    production_state_timers_spec_wake_at as spec_wake_at,
+    production_state_timers_spec_timers_new as spec_timers_new,
+    production_state_timers_spec_next_wake as spec_next_wake,
+};
+
+pub use echod_concrete_spec::state::{RETRY_AFTER_MS, RELIST_AFTER_MS, CONCURRENCY};
 verus! {
+#[cfg(verus_keep_ghost)]
+impl DeepView for TimerWheel {
+    type V = TimerWheelSpec;
+    open spec fn deep_view(&self) -> TimerWheelSpec {
+        TimerWheelSpec {
+            armed: self.armed.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for TimerWheel {
+    type V = TimerWheelSpec;
+    open spec fn view(&self) -> TimerWheelSpec { self.deep_view() }
+}
+#[cfg(verus_keep_ghost)]
+impl DeepView for Timers {
+    type V = TimersSpec;
+    open spec fn deep_view(&self) -> TimersSpec {
+        TimersSpec {
+            wheel: self.wheel.deep_view(),
+            started: self.started.deep_view(),
+            loaded_through: self.loaded_through.deep_view(),
+            closed_through: self.closed_through.deep_view(),
+            bucket_ms: self.bucket_ms.deep_view(),
+            reload_pending: self.reload_pending.deep_view(),
+            listing: self.listing.deep_view(),
+            backoff_until: self.backoff_until.deep_view(),
+            inflight: self.inflight.deep_view(),
+            backlog: self.backlog.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Timers {
+    type V = TimersSpec;
+    open spec fn view(&self) -> TimersSpec { self.deep_view() }
+}
+
 
 /// One armed key: when it falls due, and its name in the bucket.
 pub type Slot = (u64, String);
 pub type SlotSpec = (u64, Seq<char>);
 
 /// Armed keys by deadline.
-#[make_spec_type]
 pub struct TimerWheel {
     pub armed: Vec<Slot>,
 }
 
 /// `a` comes before `b`: an earlier deadline, or the same deadline and an
 /// earlier key.
-pub open spec fn spec_slot_before(a: SlotSpec, b: SlotSpec) -> bool {
-    a.0 < b.0 || (a.0 == b.0 && spec_before(a.1, b.1))
-}
+
 
 /// `at, key` filed in order; the same key twice is one key.
-pub open spec fn spec_arm(s: Seq<SlotSpec>, at: u64, key: Seq<char>) -> Seq<SlotSpec>
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        seq![(at, key)]
-    } else if s[0] == (at, key) {
-        s
-    } else if spec_slot_before((at, key), s[0]) {
-        seq![(at, key)] + s
-    } else {
-        seq![s[0]] + spec_arm(s.drop_first(), at, key)
-    }
-}
+
 
 /// Everything that is `at, key`, gone.
-pub open spec fn spec_disarm(s: Seq<SlotSpec>, at: u64, key: Seq<char>) -> Seq<SlotSpec> {
-    s.filter(|e: SlotSpec| e != (at, key))
-}
+
 
 /// How many slots at the front are due at `now`.
-pub open spec fn spec_due_count(s: Seq<SlotSpec>, now: u64) -> int
-    decreases s.len(),
-{
-    if s.len() == 0 || s[0].0 > now {
-        0
-    } else {
-        1 + spec_due_count(s.drop_first(), now)
-    }
-}
+
 
 /// What is due at `now`, and the wheel without it.
-pub open spec fn spec_take_due(s: Seq<SlotSpec>, now: u64) -> (Seq<SlotSpec>, Seq<SlotSpec>) {
-    let n = spec_due_count(s, now);
-    (s.take(n), s.skip(n))
-}
 
-pub open spec fn spec_nearest(s: Seq<SlotSpec>) -> Option<u64> {
-    if s.len() == 0 { None } else { Some(s[0].0) }
-}
+
+
 
 proof fn lemma_due_count_bound(s: Seq<SlotSpec>, now: u64)
     ensures
@@ -343,11 +374,11 @@ impl TimerWheel {
 }
 
 /// How long a deadline waits after its sweep failed to commit.
-pub const RETRY_AFTER_MS: u64 = 1_000;
+
 /// How long a failed listing waits before it is tried again.
-pub const RELIST_AFTER_MS: u64 = 1_000;
+
 /// How many sweeps run at once, at most.
-pub const CONCURRENCY: usize = 16;
+
 
 /// A listing in progress.
 pub enum Listing {
@@ -362,13 +393,7 @@ pub enum Listing {
     Relist { op: OpId, bucket: u64 },
 }
 
-#[cfg(verus_keep_ghost)]
-pub ghost enum ListingSpec {
-    Prefixes { op: OpId, horizon: u64 },
-    Buckets { pending: Map<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec> },
-    Extend { op: OpId, bucket: u64 },
-    Relist { op: OpId, bucket: u64 },
-}
+
 
 #[cfg(verus_keep_ghost)]
 impl DeepView for Listing {
@@ -383,15 +408,7 @@ impl DeepView for Listing {
     }
 }
 
-#[cfg(verus_keep_ghost)]
-impl ListingSpec {
-    pub open spec fn expects(self, op: OpId) -> bool {
-        match self {
-            ListingSpec::Prefixes { op: o, .. } | ListingSpec::Extend { op: o, .. } | ListingSpec::Relist { op: o, .. } => o == op,
-            ListingSpec::Buckets { pending, .. } => pending.contains_key(op),
-        }
-    }
-}
+
 
 impl Listing {
     pub fn expects(&self, op: OpId) -> (r: bool)
@@ -405,7 +422,6 @@ impl Listing {
     }
 }
 
-#[make_spec_type]
 pub struct Timers {
     pub wheel: TimerWheel,
     pub started: bool,
@@ -427,14 +443,7 @@ pub struct Timers {
     pub backlog: Vec<Slot>,
 }
 
-pub open spec fn spec_min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(if x < y { x } else { y }),
-        (Some(x), None) => Some(x),
-        (None, Some(y)) => Some(y),
-        (None, None) => None,
-    }
-}
+
 
 fn min_opt(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
     ensures
@@ -448,34 +457,12 @@ fn min_opt(a: Option<u64>, b: Option<u64>) -> (r: Option<u64>)
     }
 }
 
-pub open spec fn spec_max(a: u64, b: u64) -> u64 {
-    if a > b { a } else { b }
-}
+
 
 /// The earliest instant the timers want to look at the clock: a backoff's
 /// end, a reload owed, the nearest deadline, or the clock reaching the
 /// last bucket loaded.
-pub open spec fn spec_wake_at(t: TimersSpec, now: u64) -> Option<u64> {
-    if !t.started {
-        None
-    } else if t.backoff_until is Some {
-        t.backoff_until
-    } else if t.listing is Some {
-        None
-    } else if t.reload_pending {
-        Some(now)
-    } else {
-        let closing = match t.closed_through {
-            Some(c) => Some(spec_max(c.saturating_add((2 as u64).saturating_mul(t.bucket_ms)), now)),
-            None => None,
-        };
-        let loaded = match t.loaded_through {
-            Some(l) => Some(spec_max(l, now)),
-            None => None,
-        };
-        spec_min_opt(spec_min_opt(spec_nearest(t.wheel.armed), loaded), closing)
-    }
-}
+
 
 impl Timers {
     pub fn new() -> (r: Timers)
@@ -533,26 +520,8 @@ impl Timers {
     }
 }
 
-pub open spec fn spec_timers_new() -> TimersSpec {
-    TimersSpec {
-        wheel: TimerWheelSpec { armed: Seq::empty() },
-        started: false,
-        loaded_through: None,
-        closed_through: None,
-        bucket_ms: 0,
-        reload_pending: false,
-        listing: None,
-        backoff_until: None,
-        inflight: 0,
-        backlog: Seq::empty(),
-    }
-}
 
-pub open spec fn spec_next_wake(t: TimersSpec, now: u64) -> Option<(u64, Armed)> {
-    match spec_wake_at(t, now) {
-        Some(at) => Some((at, Armed::Wheel)),
-        None => None,
-    }
-}
+
+
 
 } // verus!

@@ -11,6 +11,8 @@ use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
 use crate::state::{Time, Chars, PromiseV, TaskV, StoreV, InternalV, OutV, SpecHeld, Proc};
 use crate::rover::{Config};
 #[cfg(verus_keep_ghost)]
+use crate::handler::{spec_listener, spec_promise_record, spec_drain_timed_callback};
+#[cfg(verus_keep_ghost)]
 use crate::handler::{on_event, strs, schedule_v, sat_add, distinct, all_in_origin, lift_dispatch, spec_before, spec_min_key, spec_sorted, least, spec_keys, spec_is_timer, spec_has_target, spec_delay, spec_external, spec_string, spec_empty_value, spec_acquire, spec_schedule_value, spec_new_object, spec_status_res, spec_held, spec_promise_create, spec_promise_settle, spec_task_create, spec_awaited, spec_callbacks, spec_any_settled, spec_refs_one_origin, spec_extend, spec_handler, spec_body, spec_process_work, spec_send, spec_request_outcome, spec_shed, spec_lose, spec_losses, spec_ready, spec_internal_result, spec_idle, spec_run, spec_due_result, spec_queue, spec_keep, spec_over_callbacks, spec_over_listeners, spec_over_promises, spec_over_tasks, spec_over_schedules, spec_derived, spec_run_timeout, spec_service};
 use crate::rover::{Pid, empty_store};
 #[cfg(verus_keep_ghost)]
@@ -18,7 +20,471 @@ use crate::property_claim::{well_formed_promise_created_at_lte_timeout_at_at, we
 #[cfg(verus_keep_ghost)]
 use crate::axioms::*;
 
+#[cfg(verus_keep_ghost)]
+mod drain_permutation {
+use vstd::prelude::*;
+use crate::state::StoreV;
+use echod_types::DispatchV;
+
 verus! {
+pub(super) type Step = spec_fn(StoreV, Seq<char>) -> (StoreV, Seq<DispatchV>);
+pub(super) type Ready = spec_fn(StoreV) -> bool;
+pub(super) type Eligible = spec_fn(StoreV) -> Set<Seq<char>>;
+
+broadcast use
+    vstd::seq::group_seq_lemmas,
+    vstd::seq::Seq::to_set_ensures,
+    vstd::seq_lib::group_to_multiset_ensures,
+    vstd::seq_lib::lemma_multiset_commutative,
+    vstd::multiset::group_multiset_axioms;
+
+pub(super) open spec fn fold(step: Step, s: StoreV, plan: Seq<Seq<char>>) -> (StoreV, Seq<DispatchV>)
+    decreases plan.len(),
+{
+    if plan.len() == 0 { (s, Seq::empty()) } else {
+        let head = step(s, plan[0]);
+        let tail = fold(step, head.0, plan.drop_first());
+        (tail.0, head.1 + tail.1)
+    }
+}
+
+pub(super) open spec fn diamond(step: Step, s: StoreV, a: Seq<char>, b: Seq<char>) -> bool {
+    let aa = step(s, a);
+    let bb = step(s, b);
+    let ab = step(aa.0, b);
+    let ba = step(bb.0, a);
+    ab.0 == ba.0 && aa.1 == ba.1 && bb.1 == ab.1
+}
+
+pub(super) open spec fn laws(step: Step, ready: Ready, eligible: Eligible) -> bool {
+    &&& forall|s: StoreV, a: Seq<char>| ready(s) && eligible(s).contains(a) ==>
+        ready(#[trigger] step(s, a).0) && eligible(step(s, a).0) == eligible(s).remove(a)
+    &&& forall|s: StoreV, a: Seq<char>, b: Seq<char>|
+        ready(s) && eligible(s).contains(a) && eligible(s).contains(b) && a != b ==>
+            #[trigger] diamond(step, s, a, b)
+}
+
+pub(super) proof fn lemma_append(step: Step, s: StoreV, a: Seq<Seq<char>>, b: Seq<Seq<char>>)
+    ensures ({
+        let first = fold(step, s, a);
+        let second = fold(step, first.0, b);
+        fold(step, s, a + b) == (second.0, first.1 + second.1)
+    }),
+    decreases a.len(),
+{
+    if a.len() == 0 {
+        assert(a + b =~= b);
+    } else {
+        assert((a + b).drop_first() =~= a.drop_first() + b);
+        lemma_append(step, step(s, a[0]).0, a.drop_first(), b);
+        let one = step(s, a[0]);
+        let rest = fold(step, one.0, a.drop_first());
+        let last = fold(step, rest.0, b);
+        assert(one.1 + (rest.1 + last.1) =~= (one.1 + rest.1) + last.1);
+    }
+}
+
+pub(super) proof fn lemma_singleton(step: Step, s: StoreV, target: Seq<char>)
+    ensures fold(step, s, seq![target]) == step(s, target),
+{
+    reveal_with_fuel(fold, 2);
+    assert(seq![target].drop_first() =~= Seq::<Seq<char>>::empty());
+}
+
+proof fn lemma_remove(plan: Seq<Seq<char>>, index: int)
+    requires plan.no_duplicates(), 0 <= index < plan.len(),
+    ensures
+        plan.remove(index).no_duplicates(),
+        plan.remove(index).to_set() == plan.to_set().remove(plan[index]),
+{
+    plan.lemma_multiset_has_no_duplicates();
+    let rest = plan.remove(index);
+    plan.to_set_ensures();
+    rest.to_set_ensures();
+    vstd::seq_lib::to_multiset_remove(plan, index);
+    assert forall|x: Seq<char>| #[trigger] rest.to_multiset().contains(x) implies rest.to_multiset().count(x) == 1 by {
+        assert(plan.to_multiset().contains(x));
+    };
+    rest.lemma_multiset_has_no_duplicates_conv();
+    assert forall|x: Seq<char>| #[trigger] rest.to_set().contains(x) == plan.to_set().remove(plan[index]).contains(x) by {
+        assert(rest.to_set().contains(x) == rest.contains(x));
+        assert(plan.to_set().contains(x) == plan.contains(x));
+        assert(rest.contains(x) == (rest.to_multiset().count(x) > 0));
+        assert(plan.contains(x) == (plan.to_multiset().count(x) > 0));
+        if x == plan[index] { assert(plan.to_multiset().count(x) == 1); }
+    };
+    assert(rest.to_set() =~= plan.to_set().remove(plan[index]));
+}
+
+proof fn lemma_move_front(
+    step: Step, ready: Ready, eligible: Eligible,
+    s: StoreV, plan: Seq<Seq<char>>, index: int,
+)
+    requires
+        laws(step, ready, eligible), ready(s), plan.no_duplicates(),
+        plan.to_set().subset_of(eligible(s)), 0 <= index < plan.len(),
+    ensures
+        fold(step, s, plan).0 == fold(step, s, seq![plan[index]] + plan.remove(index)).0,
+        fold(step, s, plan).1.to_multiset() == fold(step, s, seq![plan[index]] + plan.remove(index)).1.to_multiset(),
+    decreases index,
+{
+    if index == 0 {
+        assert(seq![plan[0]] + plan.remove(0) =~= plan);
+    } else {
+        let a = plan[0];
+        let b = plan[index];
+        let aa = step(s, a);
+        let bb = step(s, b);
+        lemma_remove(plan, 0);
+        assert(plan.drop_first() =~= plan.remove(0));
+        assert(eligible(s).contains(a));
+        assert(eligible(s).contains(b));
+        assert(ready(aa.0));
+        assert(plan.drop_first().to_set().subset_of(eligible(aa.0)));
+        lemma_move_front(step, ready, eligible, aa.0, plan.drop_first(), index - 1);
+        assert(diamond(step, s, a, b));
+        let rest = plan.drop_first().remove(index - 1);
+        assert(plan.drop_first()[index - 1] == b);
+        assert(plan.remove(index) =~= seq![a] + rest);
+        let ab = step(aa.0, b);
+        let ba = step(bb.0, a);
+        let final_tail = fold(step, ab.0, rest);
+        let moved_tail = seq![b] + rest;
+        assert(moved_tail.drop_first() =~= rest);
+        assert(fold(step, aa.0, moved_tail) == (final_tail.0, ab.1 + final_tail.1));
+        let moved = seq![b] + plan.remove(index);
+        assert(moved.drop_first() =~= plan.remove(index));
+        assert(plan.remove(index).drop_first() =~= rest);
+        assert(fold(step, bb.0, plan.remove(index)) == (final_tail.0, ba.1 + final_tail.1));
+        assert(fold(step, s, moved) == (final_tail.0, bb.1 + (ba.1 + final_tail.1)));
+        assert(fold(step, s, plan).1.to_multiset()
+            =~= aa.1.to_multiset().add(ab.1.to_multiset()).add(final_tail.1.to_multiset()));
+        assert(fold(step, s, moved).1.to_multiset()
+            =~= bb.1.to_multiset().add(ba.1.to_multiset()).add(final_tail.1.to_multiset()));
+    }
+}
+
+pub(super) proof fn lemma_permutation(
+    step: Step, ready: Ready, eligible: Eligible,
+    s: StoreV, a: Seq<Seq<char>>, b: Seq<Seq<char>>,
+)
+    requires
+        laws(step, ready, eligible), ready(s), a.no_duplicates(), b.no_duplicates(),
+        a.to_set() == b.to_set(), a.to_set().subset_of(eligible(s)),
+    ensures
+        fold(step, s, a).0 == fold(step, s, b).0,
+        fold(step, s, a).1.to_multiset() == fold(step, s, b).1.to_multiset(),
+    decreases a.len(),
+{
+    if a.len() == 0 {
+        if b.len() > 0 { assert(b.to_set().contains(b[0])); assert(false); }
+    } else {
+        a.to_set_ensures();
+        b.to_set_ensures();
+        assert(a.to_set().contains(a[0]));
+        assert(b.to_set().contains(a[0]));
+        assert(b.contains(a[0]));
+        let index = choose|i: int| 0 <= i < b.len() && #[trigger] b[i] == a[0];
+        lemma_move_front(step, ready, eligible, s, b, index);
+        lemma_remove(a, 0);
+        lemma_remove(b, index);
+        assert(a.drop_first() =~= a.remove(0));
+        let next = step(s, a[0]);
+        assert(ready(next.0));
+        lemma_permutation(step, ready, eligible, next.0, a.drop_first(), b.remove(index));
+        let moved = seq![a[0]] + b.remove(index);
+        assert(moved.drop_first() =~= b.remove(index));
+        assert(fold(step, s, a).1.to_multiset() =~= fold(step, s, moved).1.to_multiset());
+    }
+}
+}
+}
+
+verus! {
+pub proof fn lemma_install_origin_frame(live: crate::state::StoreV, evaluated: crate::state::StoreV, workflow: Seq<char>)
+    ensures crate::property_claim::installed_origin_frame(live, evaluated, workflow),
+{
+}
+
+pub proof fn lemma_install_schedule_frame(live: crate::state::StoreV, evaluated: crate::state::StoreV, schedule: Seq<char>)
+    ensures crate::property_claim::installed_schedule_frame(live, evaluated, schedule),
+{
+}
+
+spec fn callback_step(config: Config, source: Seq<char>, now: u64) -> drain_permutation::Step {
+    |s: StoreV, target: Seq<char>| spec_drain_timed_callback(config, s, source, target, now)
+}
+
+spec fn listener_step(source: Seq<char>, now: u64) -> drain_permutation::Step {
+    |s: StoreV, address: Seq<char>| {
+        let outcome = spec_listener(s, source, address, now);
+        (outcome.next, outcome.send)
+    }
+}
+
+proof fn lemma_plans_are_folds(
+    config: Config, s: StoreV, source: Seq<char>, plan: Seq<Seq<char>>, count: nat, now: u64,
+)
+    requires count <= plan.len(),
+    ensures
+        crate::handler::spec_drain_timed_callback_plan(config, s, source, plan, count, now)
+            == drain_permutation::fold(callback_step(config, source, now), s, plan.take(count as int)),
+        crate::handler::spec_drain_timed_listener_plan(s, source, plan, count, now)
+            == drain_permutation::fold(listener_step(source, now), s, plan.take(count as int)),
+    decreases count,
+{
+    if count == 0 {
+        assert(plan.take(0) =~= Seq::<Seq<char>>::empty());
+    } else {
+        let prefix = plan.take(count as int - 1);
+        let last = seq![plan[count as int - 1]];
+        assert(plan.take(count as int) =~= prefix + last);
+        lemma_plans_are_folds(config, s, source, plan, (count - 1) as nat, now);
+        drain_permutation::lemma_append(callback_step(config, source, now), s, prefix, last);
+        drain_permutation::lemma_append(listener_step(source, now), s, prefix, last);
+        assert(last.drop_first() =~= Seq::<Seq<char>>::empty());
+        let cb_prefix = crate::handler::spec_drain_timed_callback_plan(config, s, source, plan, (count - 1) as nat, now);
+        let ls_prefix = crate::handler::spec_drain_timed_listener_plan(s, source, plan, (count - 1) as nat, now);
+        drain_permutation::lemma_singleton(callback_step(config, source, now), cb_prefix.0, plan[count as int - 1]);
+        drain_permutation::lemma_singleton(listener_step(source, now), ls_prefix.0, plan[count as int - 1]);
+    }
+}
+
+pub proof fn lemma_callback_plans_permute(
+    config: Config, s: StoreV, source: Seq<char>, a: Seq<Seq<char>>, b: Seq<Seq<char>>, now: u64,
+)
+    requires
+        crate::property_claim::callback_drain_ready(s, source, now),
+        a.no_duplicates(), b.no_duplicates(),
+        a.to_set() == s.promises[source].callbacks, b.to_set() == s.promises[source].callbacks,
+    ensures crate::property_claim::callback_plans_permute(config, s, source, a, b, now),
+{
+    let step = callback_step(config, source, now);
+    let ready = |s: StoreV| crate::property_claim::callback_drain_ready(s, source, now);
+    let eligible = |s: StoreV| s.promises[source].callbacks;
+    assert forall|s: StoreV, target: Seq<char>| ready(s) && eligible(s).contains(target)
+        implies ready(#[trigger] step(s, target).0) && eligible(step(s, target).0) == eligible(s).remove(target) by {
+        lemma_callback_preserves_drain_ready(config, s, source, target, now);
+    };
+    assert forall|s: StoreV, a: Seq<char>, b: Seq<char>|
+        ready(s) && eligible(s).contains(a) && eligible(s).contains(b) && a != b
+        implies #[trigger] drain_permutation::diamond(step, s, a, b) by {
+        lemma_same_source_callbacks_commute(config, s, source, a, b, now);
+    };
+    drain_permutation::lemma_permutation(step, ready, eligible, s, a, b);
+    lemma_plans_are_folds(config, s, source, a, a.len(), now);
+    lemma_plans_are_folds(config, s, source, b, b.len(), now);
+    assert(a.take(a.len() as int) =~= a);
+    assert(b.take(b.len() as int) =~= b);
+}
+
+pub proof fn lemma_listener_plans_permute(
+    s: StoreV, source: Seq<char>, a: Seq<Seq<char>>, b: Seq<Seq<char>>, now: u64,
+)
+    requires
+        crate::property_claim::listener_drain_ready(s, source, now),
+        a.no_duplicates(), b.no_duplicates(),
+        a.to_set() == s.promises[source].listeners, b.to_set() == s.promises[source].listeners,
+    ensures crate::property_claim::listener_plans_permute(s, source, a, b, now),
+{
+    let step = listener_step(source, now);
+    let ready = |s: StoreV| crate::property_claim::listener_drain_ready(s, source, now);
+    let eligible = |s: StoreV| s.promises[source].listeners;
+    assert forall|s: StoreV, address: Seq<char>| ready(s) && eligible(s).contains(address)
+        implies ready(#[trigger] step(s, address).0) && eligible(step(s, address).0) == eligible(s).remove(address) by {
+        lemma_listener_preserves_drain_ready(s, source, address, now);
+    };
+    assert forall|s: StoreV, a: Seq<char>, b: Seq<char>|
+        ready(s) && eligible(s).contains(a) && eligible(s).contains(b) && a != b
+        implies #[trigger] drain_permutation::diamond(step, s, a, b) by {
+        lemma_same_source_listeners_commute(s, source, a, b, now);
+    };
+    drain_permutation::lemma_permutation(step, ready, eligible, s, a, b);
+    let config = Config { retry_timeout: 0 };
+    lemma_plans_are_folds(config, s, source, a, a.len(), now);
+    lemma_plans_are_folds(config, s, source, b, b.len(), now);
+    assert(a.take(a.len() as int) =~= a);
+    assert(b.take(b.len() as int) =~= b);
+}
+
+pub proof fn lemma_callback_preserves_drain_ready(
+    config: Config, s: StoreV, source: Seq<char>, target: Seq<char>, now: u64,
+)
+    requires
+        crate::property_claim::callback_drain_ready(s, source, now),
+        s.promises[source].callbacks.contains(target),
+    ensures ({
+        let after = spec_drain_timed_callback(config, s, source, target, now).0;
+        &&& crate::property_claim::callback_drain_ready(after, source, now)
+        &&& after.promises[source].callbacks == s.promises[source].callbacks.remove(target)
+    }),
+{
+    let after = spec_drain_timed_callback(config, s, source, target, now).0;
+    let p = s.promises[source];
+    let next_p = PromiseV { callbacks: p.callbacks.remove(target), ..p };
+    if s.tasks.contains_key(source) {
+        assert(s.tasks[source].state == TaskState::Fulfilled);
+        assert(s.tasks.insert(source, s.tasks[source]) =~= s.tasks);
+        assert(after.tasks[source] == s.tasks[source]);
+    }
+    assert(after.promises == s.promises.insert(source, next_p));
+    assert forall|id: Seq<char>| #[trigger] after.promises[source].callbacks.contains(id)
+        implies crate::property_claim::drain_target_ready(after, id, now) by {
+        assert(id != target);
+        assert(crate::property_claim::drain_target_ready(s, id, now));
+        assert(after.tasks.contains_key(id) == s.tasks.contains_key(id));
+        if s.tasks.contains_key(id) { assert(after.tasks[id] == s.tasks[id]); }
+        if id != source {
+            assert(after.promises.contains_key(id) == s.promises.contains_key(id));
+            if s.promises.contains_key(id) { assert(after.promises[id] == s.promises[id]); }
+        }
+    };
+}
+
+pub proof fn lemma_listener_preserves_drain_ready(s: StoreV, source: Seq<char>, address: Seq<char>, now: u64)
+    requires
+        crate::property_claim::listener_drain_ready(s, source, now),
+        s.promises[source].listeners.contains(address),
+    ensures ({
+        let after = spec_listener(s, source, address, now).next;
+        &&& crate::property_claim::listener_drain_ready(after, source, now)
+        &&& after.promises[source].listeners == s.promises[source].listeners.remove(address)
+    }),
+{
+    if s.tasks.contains_key(source) {
+        assert(s.tasks.insert(source, s.tasks[source]) =~= s.tasks);
+    }
+}
+
+pub proof fn lemma_same_source_callbacks_commute(
+    config: crate::rover::Config, s: StoreV, source: Seq<char>, a: Seq<char>, b: Seq<char>, now: u64,
+)
+    requires
+        s.promises.contains_key(source),
+        s.promises[source].state != echod_types::PromiseState::Pending,
+        s.promises[source].callbacks.contains(a),
+        s.promises[source].callbacks.contains(b),
+        crate::property_claim::drain_target_ready(s, source, now),
+        crate::property_claim::drain_target_ready(s, a, now),
+        crate::property_claim::drain_target_ready(s, b, now),
+    ensures crate::property_claim::same_source_callbacks_commute(config, s, source, a, b, now),
+{
+    if a != b {
+        let p = s.promises[source];
+        let pa = PromiseV { callbacks: p.callbacks.remove(a), ..p };
+        let pb = PromiseV { callbacks: p.callbacks.remove(b), ..p };
+        if s.tasks.contains_key(source) {
+            assert(s.tasks[source].state == echod_types::TaskState::Fulfilled);
+            assert(s.tasks.insert(source, s.tasks[source]) =~= s.tasks);
+        }
+        let aa = spec_drain_timed_callback(config, s, source, a, now);
+        let bb = spec_drain_timed_callback(config, s, source, b, now);
+        assert(aa.0.promises == s.promises.insert(source, pa));
+        assert(bb.0.promises == s.promises.insert(source, pb));
+        assert(pa.callbacks.contains(b));
+        assert(pb.callbacks.contains(a));
+        assert(aa.0.tasks.contains_key(b) == s.tasks.contains_key(b));
+        assert(bb.0.tasks.contains_key(a) == s.tasks.contains_key(a));
+        if s.tasks.contains_key(b) { assert(aa.0.tasks[b] == s.tasks[b]); }
+        if s.tasks.contains_key(a) { assert(bb.0.tasks[a] == s.tasks[a]); }
+        if s.tasks.contains_key(source) {
+            assert(aa.0.tasks[source] == s.tasks[source]);
+            assert(bb.0.tasks[source] == s.tasks[source]);
+        }
+        let ab = spec_drain_timed_callback(config, aa.0, source, b, now);
+        let ba = spec_drain_timed_callback(config, bb.0, source, a, now);
+        assert(p.callbacks.remove(a).remove(b) =~= p.callbacks.remove(b).remove(a));
+        let final_promise = PromiseV { callbacks: p.callbacks.remove(a).remove(b), ..p };
+        assert(ab.0.promises =~= s.promises.insert(source, final_promise));
+        assert(ba.0.promises =~= s.promises.insert(source, final_promise));
+        assert forall|id: Seq<char>| #[trigger] ab.0.tasks.contains_key(id) == ba.0.tasks.contains_key(id)
+            && (ab.0.tasks.contains_key(id) ==> ab.0.tasks[id] == ba.0.tasks[id]) by {
+            assert(ab.0.tasks.contains_key(id) == s.tasks.contains_key(id));
+            assert(ba.0.tasks.contains_key(id) == s.tasks.contains_key(id));
+            if s.tasks.contains_key(id) {
+                if id == a {
+                    assert(ab.0.tasks[id] == aa.0.tasks[id]);
+                    assert(ba.0.tasks[id] == aa.0.tasks[id]);
+                } else if id == b {
+                    assert(ab.0.tasks[id] == bb.0.tasks[id]);
+                    assert(ba.0.tasks[id] == bb.0.tasks[id]);
+                } else {
+                    assert(ab.0.tasks[id] == s.tasks[id]);
+                    assert(ba.0.tasks[id] == s.tasks[id]);
+                }
+            }
+        };
+        assert(ab.0.tasks =~= ba.0.tasks);
+        assert(ab.0 == ba.0);
+        assert(aa.1 == ba.1);
+        assert(bb.1 == ab.1);
+    }
+}
+
+pub proof fn lemma_same_source_listeners_commute(
+    s: StoreV, source: Seq<char>, a: Seq<char>, b: Seq<char>, now: u64,
+)
+    requires
+        s.promises.contains_key(source),
+        s.promises[source].state != echod_types::PromiseState::Pending,
+        s.promises[source].listeners.contains(a),
+        s.promises[source].listeners.contains(b),
+        crate::property_claim::drain_target_ready(s, source, now),
+    ensures crate::property_claim::same_source_listeners_commute(s, source, a, b, now),
+{
+    if a != b {
+        let p = s.promises[source];
+        let pa = PromiseV { listeners: p.listeners.remove(a), ..p };
+        let pb = PromiseV { listeners: p.listeners.remove(b), ..p };
+        if s.tasks.contains_key(source) {
+            assert(s.tasks[source].state == echod_types::TaskState::Fulfilled);
+            assert(s.tasks.insert(source, s.tasks[source]) =~= s.tasks);
+        }
+        let aa = spec_listener(s, source, a, now);
+        let bb = spec_listener(s, source, b, now);
+        assert(aa.next == StoreV { promises: s.promises.insert(source, pa), ..s });
+        assert(bb.next == StoreV { promises: s.promises.insert(source, pb), ..s });
+        assert(pa.listeners.contains(b));
+        assert(pb.listeners.contains(a));
+        assert(p.listeners.remove(a).remove(b) =~= p.listeners.remove(b).remove(a));
+        assert(spec_promise_record(spec_string(source), pa) == spec_promise_record(spec_string(source), p));
+        assert(spec_promise_record(spec_string(source), pb) == spec_promise_record(spec_string(source), p));
+        let ab = spec_listener(aa.next, source, b, now);
+        let ba = spec_listener(bb.next, source, a, now);
+        let final_promise = PromiseV { listeners: p.listeners.remove(a).remove(b), ..p };
+        assert(ab.next.promises =~= s.promises.insert(source, final_promise));
+        assert(ba.next.promises =~= s.promises.insert(source, final_promise));
+        assert(ab.next.tasks == s.tasks);
+        assert(ba.next.tasks == s.tasks);
+        assert(ab.next == ba.next);
+        assert(aa.send == ba.send);
+        assert(bb.send == ab.send);
+    }
+}
+
+pub proof fn lemma_timed_continuation_preserves_admission(work: crate::state::TimedWorkV, response: echod_types::Response)
+    ensures crate::property_claim::timed_continuation_preserves_admission(work, response),
+{}
+
+pub proof fn lemma_timed_handler_singleton(config: Config, work: crate::state::TimedWorkV, current: StoreV, read_committed_at: u64)
+    ensures crate::handler::spec_timed_handler_outcomes(config, work, current, read_committed_at).len() == 1,
+{}
+
+pub proof fn lemma_timed_check_preserves_current_store(
+    config: crate::rover::Config, work: crate::state::TimedWorkV, current: StoreV, read_committed_at: u64,
+)
+    ensures crate::property_claim::timed_check_preserves_current_store(config, work, current, read_committed_at),
+{}
+
+pub proof fn lemma_detached_fence_preserves_committed_store(
+    pending: crate::state::DetachedFenceV,
+    store: StoreV,
+)
+    ensures
+        crate::property_claim::detached_fence_preserves_committed_store(pending, store),
+{
+}
+
 pub broadcast proof fn lemma_mv_empty<A, B>(f: spec_fn(A) -> B)
     ensures
         #[trigger] Seq::<A>::empty().map_values(f) == Seq::<B>::empty(),
@@ -308,8 +774,13 @@ pub proof fn lemma_shed_is_last(
         message: Message::Request(call),
     };
     let outcomes = state.on_event(config, now, event);
-    let served = spec_run(config, state, call, now);
-    let lost = spec_losses(state, call, spec_handler(config, call.request, state.store, now));
+    let (served, lost) = match crate::handler::spec_detached_admission(call.request) {
+        Some((create, check)) => {
+            let outs = spec_handler(config, Request::PromiseCreate(create), state.store, now);
+            (crate::handler::spec_detached_starts(state, call, check, now, outs), spec_losses(state, call, outs))
+        },
+        None => (spec_run(config, state, call, now), spec_losses(state, call, spec_handler(config, call.request, state.store, now))),
+    };
     let shed = seq![spec_shed(state, call)];
     assert(outcomes == served + lost + shed);
     let prefix = served + lost;
@@ -391,6 +862,7 @@ proof fn initial_state_properties()
             Proc {
                 store: empty_store(),
                 pending: Seq::empty(),
+                detached: Seq::empty(),
             },
         ),
 {
@@ -821,6 +1293,7 @@ proof fn lemma_handler_integrity(
             let after = Proc {
                 store: outcome.next,
                 pending: before.pending + outcome.work,
+                detached: before.detached,
             };
             &&& state_properties(now, after)
             &&& transition_properties(now, before, after)
@@ -836,6 +1309,7 @@ proof fn lemma_handler_integrity(
     let after = Proc {
         store: outcome.next,
         pending: before.pending + outcome.work,
+        detached: before.detached,
     };
     reveal(state_properties);
     reveal(well_formed_promise_created_at_lte_timeout_at);
@@ -1051,6 +1525,7 @@ proof fn lemma_work_integrity(
             let after = Proc {
                 store: outcome.next,
                 pending: before.pending + outcome.work,
+                detached: before.detached,
             };
             &&& state_properties(now, after)
             &&& transition_properties(now, before, after)
@@ -1060,6 +1535,7 @@ proof fn lemma_work_integrity(
     let after = Proc {
         store: outcome.next,
         pending: before.pending + outcome.work,
+        detached: before.detached,
     };
     reveal(state_properties);
     reveal(well_formed_promise_created_at_lte_timeout_at);
@@ -1731,6 +2207,40 @@ proof fn lemma_run_timeout_integrity(
     lemma_concat_integrity(now, before, queued, derived);
 }
 
+proof fn lemma_properties_store_frame(now: Time, before: Proc, a: Proc, b: Proc)
+    requires a.store == b.store,
+    ensures
+        state_properties(now, a) == state_properties(now, b),
+        transition_properties(now, before, a) == transition_properties(now, before, b),
+{
+}
+
+proof fn lemma_detached_queue_integrity(before: Proc, now: Time, i: int)
+    requires state_properties(now, before),
+    ensures results_integrity(now, before, crate::handler::spec_detached_queue(before, i)),
+    decreases before.detached.len() - i,
+{
+    if 0 <= i < before.detached.len() {
+        let outcomes = crate::handler::spec_detached_fence(before.detached[i], before.store);
+        let completed = crate::handler::spec_detached_completed(before, i, outcomes[0]);
+        let failed = crate::handler::spec_detached_failed(before, i);
+        lemma_detached_fence_preserves_committed_store(before.detached[i], before.store);
+        lemma_properties_store_frame(now, before, before, completed.state);
+        lemma_properties_store_frame(now, before, before, failed.state);
+        lemma_unchanged_result_integrity(now, before, spec_shed(before, before.detached[i].call));
+        reveal(result_integrity);
+        reveal(results_integrity);
+        let head = seq![completed, failed];
+        assert(results_integrity(now, before, head));
+        lemma_detached_queue_integrity(before, now, i + 1);
+        let tail = crate::handler::spec_detached_queue(before, i + 1);
+        assert(crate::handler::spec_detached_queue(before, i) =~= head + tail);
+        lemma_concat_integrity(now, before, head, tail);
+    } else {
+        reveal(results_integrity);
+    }
+}
+
 proof fn lemma_request_service_integrity(
     config: Config,
     before: Proc,
@@ -1755,6 +2265,28 @@ proof fn lemma_request_service_integrity(
             ),
         ),
 {
+    if let Some((create, check)) = crate::handler::spec_detached_admission(call.request) {
+        let request = Request::PromiseCreate(create);
+        let outcomes = spec_handler(config, request, before.store, now);
+        let served = crate::handler::spec_detached_starts(before, call, check, now, outcomes);
+        let lost = spec_losses(before, call, outcomes);
+        lemma_losses_map(before, call, outcomes);
+        reveal(results_integrity);
+        assert forall|i: int| 0 <= i < outcomes.len() implies
+            result_integrity(now, before, #[trigger] served[i])
+                && result_integrity(now, before, #[trigger] lost[i]) by {
+            lemma_handler_integrity(config, request, before, now, i);
+            let normal = Proc { store: outcomes[i].next, pending: before.pending + outcomes[i].work, detached: before.detached };
+            lemma_properties_store_frame(now, before, normal, served[i].state);
+            lemma_properties_store_frame(now, before, normal, lost[i].state);
+            reveal(result_integrity);
+        }
+        let shed = seq![spec_shed(before, call)];
+        lemma_unchanged_result_integrity(now, before, spec_shed(before, call));
+        lemma_concat_integrity(now, before, served, lost);
+        lemma_concat_integrity(now, before, served + lost, shed);
+        return;
+    }
     let served = spec_run(config, before, call, now);
     let lost = spec_losses(
         before,
@@ -1795,8 +2327,12 @@ proof fn lemma_service_integrity(
             lemma_request_service_integrity(config, before, call, now);
         },
         ProcessEvent::Timeout => {
-            let results = spec_run_timeout(config, before, now);
+            let regular = spec_run_timeout(config, before, now);
+            let detached = crate::handler::spec_detached_queue(before, 0);
+            let results = regular + detached;
             lemma_run_timeout_integrity(config, before, now);
+            lemma_detached_queue_integrity(before, now, 0);
+            lemma_concat_integrity(now, before, regular, detached);
             if results.len() == 0 {
                 let idle = spec_idle(before);
                 let result = idle[0];

@@ -49,6 +49,23 @@ pub enum Message {
     Output(Output),
 }
 
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct TimedCall {
+    pub call: Call,
+    pub offered_at: u64,
+    pub pinned: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum TimedMessage {
+    Request(TimedCall),
+    Output(Output),
+}
+
+pub type TimedBoundaryEvent = rover_spec::rover::comm::BoundaryEvent<(), TimedMessage>;
+
 /// Both models erase internal routing identities and emit only request inputs
 /// and output messages; Rover's Clock variant is absent from their projections.
 pub type BoundaryEvent = rover_spec::rover::comm::BoundaryEvent<(), Message>;

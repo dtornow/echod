@@ -73,6 +73,27 @@ pub struct OutV {
     pub send: Seq<DispatchV>,
 }
 
+pub struct DetachedFenceV {
+    pub call: Call,
+    pub check: TaskFenceCheckReq,
+    pub inner: PromiseRes,
+    pub now: Time,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub enum TimedStage {
+    Whole,
+    DetachedCreate { create: PromiseCreateReq, check: TaskFenceCheckReq },
+    DetachedCheck { check: TaskFenceCheckReq, inner: PromiseRes },
+}
+
+pub struct TimedWorkV {
+    pub call: echod_types::protocol::TimedCall,
+    pub admitted_at: Time,
+    pub stage: TimedStage,
+}
+
 pub struct InOutV {
     pub next: StoreV,
     pub work: Seq<Sched<InternalV>>,
@@ -94,5 +115,6 @@ pub enum SpecHeld {
 pub struct Proc {
     pub store: StoreV,
     pub pending: Seq<Sched<InternalV>>,
+    pub detached: Seq<DetachedFenceV>,
 }
 }

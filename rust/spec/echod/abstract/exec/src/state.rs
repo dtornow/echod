@@ -24,6 +24,19 @@ use echod_abstract_spec::property_proof::*;
 use echod_types::common::{lemma_tags_ext, lemma_value_ext};
 
 verus! {
+pub struct TimedWork {
+    pub call: echod_types::protocol::TimedCall,
+    pub admitted_at: Time,
+    pub stage: echod_abstract_spec::state::TimedStage,
+}
+
+impl View for TimedWork {
+    type V = echod_abstract_spec::state::TimedWorkV;
+    open spec fn view(&self) -> Self::V {
+        echod_abstract_spec::state::TimedWorkV { call: self.call, admitted_at: self.admitted_at, stage: self.stage }
+    }
+}
+
 /// Executable handlers bound to a passive specification configuration.
 pub(crate) struct Handlers<'a>(pub(crate) &'a Config);
 
@@ -365,6 +378,28 @@ pub struct Store {
     pub promises: PMap<Promise>,
     pub tasks: PMap<Task>,
     pub schedules: PMap<Schedule>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+#[verifier::allow(autoderive_clone_without_spec)]
+pub struct DetachedFence {
+    pub call: echod_types::Call,
+    pub check: echod_types::TaskFenceCheckReq,
+    pub inner: echod_types::PromiseRes,
+    pub now: Time,
+}
+
+impl View for DetachedFence {
+    type V = echod_abstract_spec::state::DetachedFenceV;
+
+    open spec fn view(&self) -> Self::V {
+        echod_abstract_spec::state::DetachedFenceV {
+            call: self.call,
+            check: self.check,
+            inner: self.inner,
+            now: self.now,
+        }
+    }
 }
 
 pub open spec fn exec_promise_ok(p: Promise) -> bool {

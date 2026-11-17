@@ -40,6 +40,7 @@ verus! {
 pub struct Proc {
     pub store: Store,
     pub pending: Vec<Work>,
+    pub detached: Vec<crate::state::DetachedFence>,
 }
 
 pub struct ProcessResult {
@@ -55,6 +56,7 @@ impl View for Proc {
         SpecProc {
             store: self.store@,
             pending: self.pending@.map_values(|work: Work| crate::projection::as_sched(work)),
+            detached: self.detached@.map_values(|f: crate::state::DetachedFence| f@),
         }
     }
 }
@@ -230,6 +232,7 @@ fn request_outcome(
         state: Proc {
             store: next,
             pending: append_work(&before.pending, work),
+            detached: copy(&before.detached),
         },
         send: send(call, resp, dispatches),
         marks,
@@ -258,6 +261,7 @@ fn lose_outcome(
         state: Proc {
             store: next,
             pending: append_work(&before.pending, work),
+            detached: copy(&before.detached),
         },
         send: send(call, unavailable(&call.request), dispatches),
         marks,
@@ -444,6 +448,7 @@ fn internal_result(
         state: Proc {
             store: next,
             pending,
+            detached: copy(&before.detached),
         },
         send,
         marks,
@@ -533,7 +538,7 @@ fn due_result(before: &Proc, outcome: InOut) -> (result: ProcessResult)
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
         )));
     }
-    ProcessResult { state: Proc { store: next, pending }, send, marks }
+    ProcessResult { state: Proc { store: next, pending, detached: copy(&before.detached) }, send, marks }
 }
 
 /// One derived step, kept when its handler would do something: `spec_keep`.
@@ -870,15 +875,161 @@ impl Proc {
     {
         match event {
             ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-                run(config, self, call, now)
+                match detached_admission(&call.request) {
+                    Some((create, check)) => {
+                        let request = Request::PromiseCreate(create);
+                        let outcomes = Handlers(config).handler(&request, &self.store, now);
+                        let mut results = detached_start_results(self, call, &check, now, outcomes);
+                        let outcomes = Handlers(config).handler(&request, &self.store, now);
+                        let mut losses = request_results(self, call, outcomes, true);
+                        let ghost served = results_v(results@);
+                        let ghost lost = results_v(losses@);
+                        results.append(&mut losses);
+                        results.push(shed_outcome(self, call));
+                        proof { assert(results_v(results@) =~= served + lost + seq![spec_shed(self@, *call)]); }
+                        results
+                    },
+                    None => run(config, self, call, now),
+                }
             }
             ProcessEvent::Timeout => {
-                let results = run_timeout(config, self, now);
+                let mut results = run_timeout(config, self, now);
+                let mut detached = detached_queue(config, self, 0);
+                let ghost regular = results_v(results@);
+                let ghost staged = results_v(detached@);
+                results.append(&mut detached);
+                proof { assert(results_v(results@) =~= regular + staged); }
                 if results.is_empty() { idle(self) } else { results }
             }
             _ => idle(self),
         }
     }
+}
+
+pub(crate) fn detached_admission(request: &Request) -> (result: Option<(echod_types::PromiseCreateReq, echod_types::TaskFenceCheckReq)>)
+    ensures result == spec_detached_admission(*request),
+{
+    match request {
+        Request::TaskFence(req) => match &req.action {
+            echod_types::TaskFenceAction::Create(c) if !echod_types::same_origin(&c.id, &req.id) && c.timeout_at <= echod_types::MAX_TIME => {
+                Some((copy(c), echod_types::TaskFenceCheckReq { id: copy(&req.id), version: req.version }))
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn detached_start_results(
+    before: &Proc, call: &Call, check: &echod_types::TaskFenceCheckReq, now: Time, mut outcomes: Vec<Out>,
+) -> (results: Vec<ProcessResult>)
+    ensures results_v(results@) == spec_detached_starts(before@, *call, *check, now, crate::projection::outs_v(outcomes@)),
+    decreases outcomes.len(),
+{
+    let ghost all = outcomes@;
+    let mut results = Vec::new();
+    if !outcomes.is_empty() {
+        let outcome = outcomes.remove(0);
+        proof { assert(outcomes@ =~= all.skip(1)); }
+        results.push(detached_started(before, call, check, now, outcome));
+        let mut tail = detached_start_results(before, call, check, now, outcomes);
+        let ghost head_v = results_v(results@);
+        let ghost tail_v = results_v(tail@);
+        results.append(&mut tail);
+        proof {
+            assert(results_v(results@) =~= head_v + tail_v);
+            assert(crate::projection::outs_v(all).skip(1)
+                =~= crate::projection::outs_v(all.skip(1)));
+            assert(spec_detached_starts(before@, *call, *check, now, crate::projection::outs_v(all))
+                =~= head_v + tail_v);
+        }
+    }
+    proof {
+        assert(results_v(results@) =~= spec_detached_starts(before@, *call, *check, now, crate::projection::outs_v(all)));
+    }
+    results
+}
+
+fn detached_queue(config: &Config, before: &Proc, i: usize) -> (results: Vec<ProcessResult>)
+    ensures results_v(results@) == spec_detached_queue(before@, i as int),
+    decreases before.detached.len() - i,
+{
+    let mut results = Vec::new();
+    if i < before.detached.len() {
+        let mut outcomes = Handlers(config).detached_fence(&before.detached[i], &before.store);
+        let ghost all = crate::projection::outs_v(outcomes@);
+        assert(outcomes.len() == 1);
+        let outcome = outcomes.remove(0);
+        results.push(detached_completed(before, i, outcome));
+        results.push(detached_failed(before, i));
+        let mut tail = detached_queue(config, before, i + 1);
+        let ghost suffix = results_v(tail@);
+        results.append(&mut tail);
+        proof {
+            assert(results_v(results@) =~= all.map_values(|o: OutV| spec_detached_completed(before@, i as int, o))
+                + seq![spec_detached_failed(before@, i as int)] + suffix);
+        }
+    }
+    results
+}
+
+fn detached_started(
+    before: &Proc, call: &Call, check: &echod_types::TaskFenceCheckReq, now: Time, outcome: Out,
+) -> (result: ProcessResult)
+    ensures (StepResultV { state: result.state@, send: result.send@ })
+        == spec_detached_started(before@, *call, *check, now, outcome@),
+{
+    let ghost outv = outcome@;
+    let Out { resp, next, work, send: dispatches, marks } = outcome;
+    match resp {
+        Response::Promise(inner) => {
+            let mut messages = send(call, Response::Promise(copy(&inner)), dispatches);
+            messages.remove(0);
+            let mut detached = copy(&before.detached);
+            detached.push(crate::state::DetachedFence { call: copy(call), check: copy(check), inner, now });
+            let pending = append_work(&before.pending, work);
+            proof {
+                assert(detached@.map_values(|f: crate::state::DetachedFence| f@)
+                    =~= before@.detached.push(echod_abstract_spec::state::DetachedFenceV { call: *call, check: *check, inner, now }));
+                assert(messages@ =~= outv.send.map_values(|d: DispatchV| (
+                    Pid::Outside, Message::Output(Output::Dispatch(lift_dispatch(d))),
+                )));
+            }
+            ProcessResult { state: Proc { store: next, pending, detached }, send: messages, marks }
+        },
+        resp => request_outcome(before, call, Out { resp, next, work, send: dispatches, marks }),
+    }
+}
+
+fn detached_removed(before: &Proc, i: usize) -> (after: Proc)
+    requires i < before.detached.len(),
+    ensures after@ == (SpecProc { detached: remove_at(before@.detached, i as int), ..before@ }),
+{
+    let mut after = copy(before);
+    after.detached.remove(i);
+    proof {
+        assert(after.detached@.map_values(|f: crate::state::DetachedFence| f@)
+            =~= remove_at(before@.detached, i as int));
+    }
+    after
+}
+
+fn detached_completed(before: &Proc, i: usize, outcome: Out) -> (result: ProcessResult)
+    requires i < before.detached.len(),
+    ensures (StepResultV { state: result.state@, send: result.send@ })
+        == spec_detached_completed(before@, i as int, outcome@),
+{
+    let after = detached_removed(before, i);
+    request_outcome(&after, &before.detached[i].call, outcome)
+}
+
+fn detached_failed(before: &Proc, i: usize) -> (result: ProcessResult)
+    requires i < before.detached.len(),
+    ensures (StepResultV { state: result.state@, send: result.send@ })
+        == spec_detached_failed(before@, i as int),
+{
+    let after = detached_removed(before, i);
+    shed_outcome(&after, &before.detached[i].call)
 }
 
 pub fn initial(_config: &Config) -> (states: Vec<(Pid, Proc)>)
@@ -893,13 +1044,16 @@ pub fn initial(_config: &Config) -> (states: Vec<(Pid, Proc)>)
         let state = Proc {
             store: server,
             pending,
+            detached: Vec::new(),
         };
         proof {
             assert(server@ == empty_store());
             assert(pending@.map_values(|work: Work| crate::projection::as_sched(work)) =~= Seq::empty());
+            assert(state.detached@.map_values(|f: crate::state::DetachedFence| f@) =~= Seq::empty());
             assert(state@ == SpecProc {
                 store: empty_store(),
                 pending: Seq::empty(),
+                detached: Seq::empty(),
             });
         }
         let mut states = Vec::new();
@@ -911,6 +1065,7 @@ pub fn initial(_config: &Config) -> (states: Vec<(Pid, Proc)>)
                     SpecProc {
                         store: empty_store(),
                         pending: Seq::empty(),
+                        detached: Seq::empty(),
                     },
                 )]);
         }
