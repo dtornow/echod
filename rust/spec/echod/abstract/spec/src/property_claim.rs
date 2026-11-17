@@ -17,6 +17,115 @@ use crate::rover::{Pid, empty_store};
 use crate::axioms::*;
 
 verus! {
+pub open spec fn installed_origin_frame(live: crate::state::StoreV, evaluated: crate::state::StoreV, workflow: Chars) -> bool {
+    let installed = crate::handler::spec_install_origin(live, evaluated, workflow);
+    &&& installed.schedules == live.schedules
+    &&& forall|id: Chars| {
+        let source = if origin(id) == workflow { evaluated } else { live };
+        &&& #[trigger] installed.promises.contains_key(id) == source.promises.contains_key(id)
+        &&& #[trigger] installed.tasks.contains_key(id) == source.tasks.contains_key(id)
+        &&& (installed.promises.contains_key(id) ==> installed.promises[id] == source.promises[id])
+        &&& (installed.tasks.contains_key(id) ==> installed.tasks[id] == source.tasks[id])
+    }
+}
+
+pub open spec fn installed_schedule_frame(live: crate::state::StoreV, evaluated: crate::state::StoreV, schedule: Chars) -> bool {
+    let installed = crate::handler::spec_install_schedule(live, evaluated, schedule);
+    &&& installed.promises == live.promises
+    &&& installed.tasks == live.tasks
+    &&& forall|id: Chars| {
+        let source = if id == schedule { evaluated } else { live };
+        &&& #[trigger] installed.schedules.contains_key(id) == source.schedules.contains_key(id)
+        &&& (installed.schedules.contains_key(id) ==> installed.schedules[id] == source.schedules[id])
+    }
+}
+
+pub open spec fn callback_plans_permute(
+    config: crate::rover::Config, s: crate::state::StoreV, source: Seq<char>,
+    a: Seq<Seq<char>>, b: Seq<Seq<char>>, now: u64,
+) -> bool {
+    let aa = crate::handler::spec_drain_timed_callback_plan(config, s, source, a, a.len(), now);
+    let bb = crate::handler::spec_drain_timed_callback_plan(config, s, source, b, b.len(), now);
+    aa.0 == bb.0 && aa.1.to_multiset() == bb.1.to_multiset()
+}
+
+pub open spec fn listener_plans_permute(
+    s: crate::state::StoreV, source: Seq<char>, a: Seq<Seq<char>>, b: Seq<Seq<char>>, now: u64,
+) -> bool {
+    let aa = crate::handler::spec_drain_timed_listener_plan(s, source, a, a.len(), now);
+    let bb = crate::handler::spec_drain_timed_listener_plan(s, source, b, b.len(), now);
+    aa.0 == bb.0 && aa.1.to_multiset() == bb.1.to_multiset()
+}
+
+pub open spec fn callback_drain_ready(s: crate::state::StoreV, source: Seq<char>, now: u64) -> bool {
+    &&& s.promises.contains_key(source)
+    &&& s.promises[source].state != echod_types::PromiseState::Pending
+    &&& drain_target_ready(s, source, now)
+    &&& forall|target: Seq<char>| #[trigger] s.promises[source].callbacks.contains(target) ==> drain_target_ready(s, target, now)
+}
+
+pub open spec fn listener_drain_ready(s: crate::state::StoreV, source: Seq<char>, now: u64) -> bool {
+    s.promises.contains_key(source) && s.promises[source].state != echod_types::PromiseState::Pending
+        && drain_target_ready(s, source, now)
+}
+
+pub open spec fn drain_target_ready(s: crate::state::StoreV, target: Seq<char>, now: u64) -> bool {
+    &&& (s.tasks.contains_key(target) ==> s.promises.contains_key(target))
+    &&& (s.promises.contains_key(target) ==> {
+        &&& (s.promises[target].state == echod_types::PromiseState::Pending ==> now < s.promises[target].timeout_at)
+        &&& (s.tasks.contains_key(target) && s.promises[target].state != echod_types::PromiseState::Pending
+            ==> s.tasks[target].state == echod_types::TaskState::Fulfilled)
+    })
+}
+
+pub open spec fn same_source_callbacks_commute(
+    config: crate::rover::Config, s: crate::state::StoreV, source: Seq<char>,
+    a: Seq<char>, b: Seq<char>, now: u64,
+) -> bool {
+    let (after_a, send_a) = crate::handler::spec_drain_timed_callback(config, s, source, a, now);
+    let (after_ab, send_b_after_a) = crate::handler::spec_drain_timed_callback(config, after_a, source, b, now);
+    let (after_b, send_b) = crate::handler::spec_drain_timed_callback(config, s, source, b, now);
+    let (after_ba, send_a_after_b) = crate::handler::spec_drain_timed_callback(config, after_b, source, a, now);
+    a != b ==> after_ab == after_ba && send_a == send_a_after_b && send_b == send_b_after_a
+}
+
+pub open spec fn same_source_listeners_commute(
+    s: crate::state::StoreV, source: Seq<char>, a: Seq<char>, b: Seq<char>, now: u64,
+) -> bool {
+    let after_a = crate::handler::spec_listener(s, source, a, now);
+    let after_ab = crate::handler::spec_listener(after_a.next, source, b, now);
+    let after_b = crate::handler::spec_listener(s, source, b, now);
+    let after_ba = crate::handler::spec_listener(after_b.next, source, a, now);
+    a != b ==> after_ab.next == after_ba.next && after_a.send == after_ba.send && after_b.send == after_ab.send
+}
+
+pub open spec fn timed_continuation_preserves_admission(work: crate::state::TimedWorkV, response: echod_types::Response) -> bool {
+    match crate::handler::spec_continue_timed(work, response) {
+        None => true,
+        Some(next) => next.call == work.call && next.admitted_at == work.admitted_at,
+    }
+}
+
+pub open spec fn timed_check_preserves_current_store(
+    config: crate::rover::Config, work: crate::state::TimedWorkV, current: crate::state::StoreV, read_committed_at: u64,
+) -> bool {
+    work.stage is DetachedCheck ==> {
+        let outcomes = crate::handler::spec_timed_handler_outcomes(config, work, current, read_committed_at);
+        outcomes.len() == 1 && outcomes[0].next == current
+    }
+}
+
+pub open spec fn detached_fence_preserves_committed_store(
+    pending: crate::state::DetachedFenceV,
+    store: crate::state::StoreV,
+) -> bool {
+    let outcomes = crate::handler::spec_detached_fence(pending, store);
+    &&& outcomes.len() == 1
+    &&& outcomes[0].next == store
+    &&& outcomes[0].work.len() == 0
+    &&& outcomes[0].send.len() == 0
+}
+
 pub open spec fn well_formed_promise_created_at_lte_timeout_at_at(
     promise: PromiseV,
 ) -> bool {
@@ -495,6 +604,7 @@ pub open spec fn property_claim(config: Config) -> bool {
         Proc {
             store: super::rover::empty_store(),
             pending: Seq::empty(),
+            detached: Seq::empty(),
         },
     )
     &&& forall|before: Proc, now: Time, event: ProcessEvent<Pid, Message>, i: int|

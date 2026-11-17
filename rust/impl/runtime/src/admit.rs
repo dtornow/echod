@@ -48,6 +48,16 @@ pub struct Decoded {
 /// Admit `req` at `now`. Debug operations are accepted only in debug mode;
 /// a request in that mode may name its own instant.
 pub fn admit(req: &RequestEnvelope, now: u64, debug: bool) -> Admission {
+    match admit_before_staging(req, now, debug) {
+        Admission::Request(d) => {
+            let (target, request, then) = echod_logic::admission::normalize(d.target, d.request);
+            Admission::Request(Decoded { target, request, then, ..d })
+        }
+        other => other,
+    }
+}
+
+pub fn admit_before_staging(req: &RequestEnvelope, now: u64, debug: bool) -> Admission {
     if debug && req.kind.starts_with("debug.") {
         return admit_debug(req);
     }
@@ -154,7 +164,8 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
     let kind = req.kind.clone();
     let corr = req.head.corr_id.clone();
     let err = |status: u16, msg: &str| Err(ResponseEnvelope::error(kind.clone(), corr.clone(), status as i32, msg));
-    let origin = match origin_of_request(req) {
+    // Preserve envelope error precedence; final routing uses the typed request.
+    let _origin = match origin_of_request(req) {
         Ok(o) => o,
         Err(e) => return err(400, &e),
     };
@@ -168,8 +179,7 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
     }
     // A fence whose create targets another origin: the create goes first,
     // on its own document, then the fence's check on the task's.
-    let mut detached: Option<(String, rows::Request)> = None;
-    let (q, schedule, action_kind): (rows::Request, Option<String>, Option<String>) = match kind.as_str() {
+    let (q, _schedule, action_kind): (rows::Request, Option<String>, Option<String>) = match kind.as_str() {
         "promise.get" => {
             let d = parsed!(w::PromiseGetData);
             (rows::Request::PromiseGet(rows::PromiseGetReq { id: d.id }), None, None)
@@ -281,10 +291,6 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
             // origin is a detached workflow: it commits first, on its own
             // document, and the fence's check follows on the task's.
             match action {
-                rows::TaskFenceAction::Create(c) if origin_of(&c.id) != origin_of(&d.id) => {
-                    detached = Some((origin_of(&c.id).to_string(), rows::Request::TaskFenceCheck(rows::TaskFenceCheckReq { id: d.id.clone(), version })));
-                    (rows::Request::PromiseCreate(c), None, Some(d.action.kind))
-                }
                 rows::TaskFenceAction::Settle(st) if origin_of(&st.id) != origin_of(&d.id) => {
                     return err(400, "Action must belong to the task's origin");
                 }
@@ -357,11 +363,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
     };
     // A request about a schedule is served on its document; the rest on
     // their id's origin.
-    let (target, then) = match (schedule, origin, detached) {
-        (Some(id), _, _) => (Target::Schedule(id), None),
-        (None, Some(task_origin), Some((create_origin, check))) => (Target::Origin(create_origin), Some((Target::Origin(task_origin), check))),
-        (None, Some(o), None) => (Target::Origin(o), None),
-        (None, None, _) => return err(400, "Request data does not name an id"),
+    let target = match echod_logic::admission::route(&q) {
+        Some(target) => target,
+        None => return err(400, "Request data does not name an id"),
     };
-    Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned, then })
+    Ok(Decoded { kind, corr, target, request: q, action_kind, now, pinned, then: None })
 }

@@ -7,7 +7,7 @@
 //! at the end, eviction takes from the front. Each operation ensures it
 //! computes its `spec_*` over that sequence.
 
-use vstd::contrib::make_spec_type;
+
 use vstd::prelude::*;
 
 use crate::document::Loaded;
@@ -20,10 +20,100 @@ use crate::document::LoadedSpec;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::store::EtagSpec;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionCachedV as CachedSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionCacheStatsV as CacheStatsSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionCacheEntryV as EntrySpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionCacheV as CacheSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{spec_production_cache_find as spec_find, spec_production_cache_new as spec_new, spec_production_cache_get as spec_get, spec_production_cache_remove as spec_remove, spec_production_cache_trim as spec_trim, spec_production_cache_put as spec_put, spec_production_cache_stats as spec_stats};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::property_proof::lemma_production_cache_find_step as lemma_find_step;
+
 verus! {
+#[cfg(verus_keep_ghost)]
+impl DeepView for Cached {
+    type V = CachedSpec;
+    open spec fn deep_view(&self) -> CachedSpec {
+        CachedSpec {
+            loaded: self.loaded.deep_view(),
+            etag: self.etag.deep_view(),
+            filled_at: self.filled_at.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Cached {
+    type V = CachedSpec;
+    open spec fn view(&self) -> CachedSpec { self.deep_view() }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for CacheStats {
+    type V = CacheStatsSpec;
+    open spec fn deep_view(&self) -> CacheStatsSpec {
+        CacheStatsSpec {
+            entries: self.entries.deep_view(),
+            bytes: self.bytes.deep_view(),
+            hits: self.hits.deep_view(),
+            misses: self.misses.deep_view(),
+            evictions: self.evictions.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for CacheStats {
+    type V = CacheStatsSpec;
+    open spec fn view(&self) -> CacheStatsSpec { self.deep_view() }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Entry {
+    type V = EntrySpec;
+    open spec fn deep_view(&self) -> EntrySpec {
+        EntrySpec {
+            origin: self.origin.deep_view(),
+            cached: self.cached.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Entry {
+    type V = EntrySpec;
+    open spec fn view(&self) -> EntrySpec { self.deep_view() }
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Cache {
+    type V = CacheSpec;
+    open spec fn deep_view(&self) -> CacheSpec {
+        CacheSpec {
+            entries: self.entries.deep_view(),
+            bytes: self.bytes.deep_view(),
+            max_entries: self.max_entries.deep_view(),
+            max_bytes: self.max_bytes.deep_view(),
+            hits: self.hits.deep_view(),
+            misses: self.misses.deep_view(),
+            evictions: self.evictions.deep_view(),
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Cache {
+    type V = CacheSpec;
+    open spec fn view(&self) -> CacheSpec { self.deep_view() }
+}
+
+
 
 /// A document this node has seen, and the version it saw.
-#[make_spec_type]
 pub struct Cached {
     pub loaded: Loaded,
     pub etag: Etag,
@@ -32,13 +122,6 @@ pub struct Cached {
     pub filled_at: u64,
 }
 
-#[cfg(verus_keep_ghost)]
-impl CachedSpec {
-    /// What the entry weighs against the byte budget: the object's size.
-    pub open spec fn weight(self) -> u64 {
-        if self.loaded.bytes < 1 { 1u64 } else { self.loaded.bytes }
-    }
-}
 
 impl Cached {
     pub fn weight(&self) -> (r: u64)
@@ -55,10 +138,9 @@ impl Cached {
         Cached { loaded: self.loaded.copy(), etag: Etag(copy_string(&self.etag.0)), filled_at: self.filled_at }
     }
 }
-
-#[make_spec_type]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
+
 pub struct CacheStats {
     pub entries: usize,
     pub bytes: u64,
@@ -68,14 +150,12 @@ pub struct CacheStats {
 }
 
 /// One remembered document, under its origin.
-#[make_spec_type]
 pub struct Entry {
     pub origin: String,
     pub cached: Cached,
 }
 
 /// The cache: entries least recently used first.
-#[make_spec_type]
 pub struct Cache {
     pub entries: Vec<Entry>,
     pub bytes: u64,
@@ -91,117 +171,6 @@ pub struct Cache {
 // ---------------------------------------------------------------------------
 
 /// The index of `origin`'s entry, the first if several.
-pub open spec fn spec_find(entries: Seq<EntrySpec>, origin: Seq<char>) -> Option<int>
-    decreases entries.len(),
-{
-    if entries.len() == 0 {
-        None
-    } else if entries[0].origin == origin {
-        Some(0int)
-    } else {
-        match spec_find(entries.drop_first(), origin) {
-            Some(i) => Some(i + 1),
-            None => None,
-        }
-    }
-}
-
-pub open spec fn spec_new(max_entries: usize, max_bytes: u64) -> CacheSpec {
-    CacheSpec {
-        entries: Seq::empty(),
-        bytes: 0,
-        max_entries: if max_entries < 1 { 1usize } else { max_entries },
-        max_bytes: if max_bytes < 1 { 1u64 } else { max_bytes },
-        hits: 0,
-        misses: 0,
-        evictions: 0,
-    }
-}
-
-/// A hit moves the entry to the end and counts; a miss counts.
-pub open spec fn spec_get(c: CacheSpec, origin: Seq<char>) -> (CacheSpec, Option<CachedSpec>) {
-    match spec_find(c.entries, origin) {
-        Some(i) => {
-            let e = c.entries[i];
-            (CacheSpec { entries: c.entries.remove(i).push(e), hits: c.hits.wrapping_add(1), ..c }, Some(e.cached))
-        },
-        None => (CacheSpec { misses: c.misses.wrapping_add(1), ..c }, None),
-    }
-}
-
-/// The entry of `origin` taken out, its weight returned to the budget.
-pub open spec fn spec_remove(c: CacheSpec, origin: Seq<char>) -> CacheSpec {
-    match spec_find(c.entries, origin) {
-        Some(i) => CacheSpec {
-            entries: c.entries.remove(i),
-            bytes: c.bytes.wrapping_sub(c.entries[i].cached.weight()),
-            ..c
-        },
-        None => c,
-    }
-}
-
-/// Evict, least recent first, until the bounds hold, keeping `keep`: the
-/// entries evicted, in order, and the cache after.
-pub open spec fn spec_trim(c: CacheSpec, keep: Seq<char>) -> (Seq<Seq<char>>, CacheSpec)
-    decreases c.entries.len(),
-{
-    if (c.entries.len() > c.max_entries || c.bytes > c.max_bytes) && c.entries.len() > 0 && c.entries[0].origin != keep {
-        let e = c.entries[0];
-        let next = CacheSpec {
-            entries: c.entries.drop_first(),
-            bytes: c.bytes.wrapping_sub(e.cached.weight()),
-            evictions: c.evictions.wrapping_add(1),
-            ..c
-        };
-        let (rest, after) = spec_trim(next, keep);
-        (seq![e.origin] + rest, after)
-    } else {
-        (Seq::empty(), c)
-    }
-}
-
-/// Remember `cached` for `origin` in place of what was there, as the most
-/// recent entry; then trim. The entry just put is never evicted, however
-/// heavy: the request that committed it reads it next.
-pub open spec fn spec_put(c: CacheSpec, origin: Seq<char>, cached: CachedSpec) -> (Seq<Seq<char>>, CacheSpec) {
-    let c = spec_remove(c, origin);
-    let c = CacheSpec {
-        entries: c.entries.push(EntrySpec { origin, cached }),
-        bytes: c.bytes.wrapping_add(cached.weight()),
-        ..c
-    };
-    spec_trim(c, origin)
-}
-
-pub open spec fn spec_stats(c: CacheSpec) -> CacheStatsSpec {
-    CacheStatsSpec { entries: c.entries.len() as usize, bytes: c.bytes, hits: c.hits, misses: c.misses, evictions: c.evictions }
-}
-
-// ---------------------------------------------------------------------------
-// The cache, step for step
-// ---------------------------------------------------------------------------
-
-proof fn lemma_find_step(entries: Seq<EntrySpec>, origin: Seq<char>, i: int)
-    requires
-        0 <= i <= entries.len(),
-        forall|j: int| 0 <= j < i ==> entries[j].origin != origin,
-    ensures
-        spec_find(entries, origin) == match spec_find(entries.skip(i), origin) {
-            Some(k) => Some(k + i),
-            None => None::<int>,
-        },
-    decreases i,
-{
-    if i == 0 {
-        assert(entries.skip(0) =~= entries);
-    } else {
-        lemma_find_step(entries, origin, i - 1);
-        assert(entries.skip(i - 1).drop_first() =~= entries.skip(i));
-        assert(entries.skip(i - 1)[0] == entries[i - 1]);
-    }
-}
-
 impl Cache {
     /// A cache of at most `max_entries` documents weighing at most
     /// `max_bytes` together.

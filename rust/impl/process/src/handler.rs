@@ -25,6 +25,13 @@ use crate::state::*;
 #[cfg(verus_keep_ghost)]
 use crate::state_timers::spec_next_wake;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_handler_spec_on_event as spec_on_event,
+    production_handler_spec_request as spec_request,
+    production_handler_spec_schedule_wake as spec_schedule_wake,
+};
+
 verus! {
 
 // ---------------------------------------------------------------------------
@@ -32,98 +39,13 @@ verus! {
 // ---------------------------------------------------------------------------
 
 /// An event in, the effects it calls for out: the step of the process.
-#[verifier::opaque]
-pub open spec fn spec_on_event(s: S, event: EventSpec) -> (S, Seq<EffectSpec>) {
-    let clock = match event {
-        EventSpec::Request { clock, .. }
-        | EventSpec::Store { clock, .. }
-        | EventSpec::Wake { clock, .. } => clock,
-    };
-    let s = S { clock, ..s };
-    let s = if s.node.members.next_heartbeat is None
-        && !s.node.members.refreshing()
-    {
-        spec_members_tick(s, spec_now(s))
-    } else {
-        s
-    };
-    let s = match event {
-        EventSpec::Request { clock, request } => match request {
-            RequestEventSpec::Protocol(call) => spec_request(s, call),
-            RequestEventSpec::Debug(call) => spec_debug_begin(s, call),
-        },
-        EventSpec::Store { op, response, .. } => {
-            let owner = if s.ops.contains_key(op) { Some(s.ops[op]) } else { None };
-            let s = S { ops: s.ops.remove(op), ..s };
-            match owner {
-                Some(Owner::Flight(f)) => spec_flight_completed(s, f, op, response),
-                Some(Owner::Members) => spec_members_completed(s, op, response),
-                Some(Owner::Timers) => spec_timers_completed(s, op, response),
-                Some(Owner::Debug) => spec_debug_completed(s, op, response),
-                _ => s,
-            }
-        },
-        EventSpec::Wake { armed, .. } => {
-            let s = S { last_wake: None, ..s };
-            if s.loops {
-                let now = spec_now(s);
-                match armed {
-                    Armed::Heartbeat => spec_timers_run(spec_members_tick(s, now), now),
-                    Armed::Wheel => spec_members_tick(spec_timers_run(s, now), now),
-                }
-            } else {
-                s
-            }
-        },
-    };
-    let s = spec_schedule_wake(s);
-    (S { out: Seq::empty(), ..s }, s.out)
-}
 
-#[verifier::opaque]
-pub open spec fn spec_request(s: S, call: CallSpec) -> S {
-    let now = if call.pinned || call.now > s.node.fleet_at { call.now } else { s.node.fleet_at };
-    let stage = match call.then {
-        Some((then, check)) => StageSpec::Detached { then, check: Some(check) },
-        None => StageSpec::Whole,
-    };
-    let work = WorkSpec::Request { id: call.id, kind: call.kind, corr: call.corr, req: call.request, action_kind: call.action_kind, now, stage };
-    spec_submit(s, call.target, work, None, false)
-}
+
+
 
 /// Ask the runtime to sleep until the next heartbeat or the next time the
 /// wheel wants to look, whichever comes first, and to say which.
-#[verifier::opaque]
-pub open spec fn spec_schedule_wake(s: S) -> S {
-    if !s.loops {
-        s
-    } else {
-        let now = spec_now(s);
-        let heartbeat = match s.node.members.wake_at() {
-            Some(at) => Some((at, Armed::Heartbeat)),
-            None => None,
-        };
-        let timers = spec_next_wake(s.timers, now);
-        let next = match (heartbeat, timers) {
-            (Some((ha, hb)), Some((ta, tb))) => Some(if ha < ta { (ha, hb) } else { (ta, tb) }),
-            (Some(h), None) => Some(h),
-            (None, Some(t)) => Some(t),
-            (None, None) => None,
-        };
-        let (s, moved) = spec_wake_moved(s, next);
-        if moved {
-            match next {
-                Some((at, armed)) => {
-                    let after = at.saturating_sub(now);
-                    spec_emit(s, EffectSpec::Wake { after_ms: if after > 1 { after } else { 1 }, armed })
-                },
-                None => s,
-            }
-        } else {
-            s
-        }
-    }
-}
+
 
 // ---------------------------------------------------------------------------
 // Run

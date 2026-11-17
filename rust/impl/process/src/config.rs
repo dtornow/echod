@@ -1,14 +1,14 @@
 //! The dials the core decides with. No flags, no environment: the
 //! executor fills these in from wherever it takes its configuration.
 
-use vstd::contrib::make_spec_type;
 use vstd::prelude::*;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionConfigV as ConfigSpec;
 
 verus! {
-
-#[make_spec_type]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
+
 pub struct Config {
     /// This node's id, as the other nodes and the bucket know it.
     pub node_id: String,
@@ -37,6 +37,35 @@ pub struct Config {
     /// Debug mode, as the runtime reads it: it admits debug operations,
     /// and a request may name the instant it is decided at.
     pub debug: bool,
+}
+
+#[cfg(verus_keep_ghost)]
+impl DeepView for Config {
+    type V = ConfigSpec;
+    open spec fn deep_view(&self) -> ConfigSpec {
+        ConfigSpec {
+            node_id: self.node_id@,
+            url: self.url@,
+            prefix: self.prefix@,
+            compact: self.compact,
+            appendable: self.appendable,
+            retry_timeout: self.retry_timeout,
+            timer_bucket_ms: self.timer_bucket_ms,
+            heartbeat_ms: self.heartbeat_ms,
+            node_ttl_ms: self.node_ttl_ms,
+            cache_entries: self.cache_entries,
+            cache_bytes: self.cache_bytes,
+            debug: self.debug,
+        }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+impl View for Config {
+    type V = ConfigSpec;
+    open spec fn view(&self) -> ConfigSpec {
+        self.deep_view()
+    }
 }
 
 } // verus!

@@ -1,6 +1,7 @@
 //! property_proof definitions for the concrete model.
 #![allow(unused_imports)]
 use vstd::prelude::*;
+use crate::state::ProductionTargetData;
 use vstd::contrib::make_spec_type;
 use echod_types::*;
 #[cfg(verus_keep_ghost)]
@@ -9,6 +10,7 @@ use rover_spec::rover::comm::{Sched, ProcessEvent};
 use rover_spec::rover::RoverSpec;
 use RoverSpec::{Label, Proc as _, Spec as _, StepResultV};
 use crate::state::{ChangeV, PartialV, FoldedV, DocumentBodyV, Message, Proc, NoteV, JobV, FlightV, CachedV, NodeV, Etag, StoreReq, StoreRes, EntryV, StoreV};
+use crate::state::{ProductionPromiseData, ProductionTaskData, ProductionObjectData, ProductionDocumentData, ProductionDebugData, ProductionAnswerData, ProductionDispatchData, ProductionEffectData, ProductionNoteData};
 #[cfg(verus_keep_ghost)]
 use crate::handler::{on_event, spec_apply_changes, spec_apply_document, spec_compose, spec_string, spec_bytes, spec_node, spec_store, spec_note_key, spec_note_relevant, spec_keyed_notes, spec_encode_body, spec_read, spec_owns, spec_cached, spec_body_is_empty, spec_keep, spec_remember, spec_forget, spec_request, spec_timeout, spec_store_reply, spec_flight, spec_begin, spec_decide, spec_commit, spec_origin_key, spec_empty_body, spec_key, spec_handle, spec_run_due, spec_occurrence, spec_min_key, least_key, spec_sorted, spec_earliest_key, spec_earliest_from, spec_earliest_in, spec_utf8_ok, spec_prefix, spec_etag, spec_find, spec_insert_at, spec_before, spec_put, spec_remove_at, spec_bump, spec_apply};
 use crate::rover::{Pid, Config, spec_nodes, spec_initial_node, spec_world};
@@ -16,7 +18,1061 @@ use crate::rover::{Pid, Config, spec_nodes, spec_initial_node, spec_world};
 use crate::property_claim::{keys_strictly_sorted, document_object_order, document_keys_unique, document_key_ownership, store_entries_ordered, store_entries_unique, store_versions_positive, process_layout, state_properties, transition_properties, step_properties, property_claim};
 use rover_spec::rover::comm::Time;
 
+use crate::state::{AKey, AArmed, AEntry, ANode, ACommit, AJob, AFired, AStep, ASequence, AAct, AAnswer, AOutcome};
+use crate::handler::{spec_production_owner, spec_production_fresh, spec_production_acts, spec_production_read_config, spec_production_filled, spec_production_forget, spec_production_set_armed, spec_production_collected, spec_production_prepare, spec_production_armed, spec_production_to_disarm, spec_production_keep, spec_production_finish, production_opt_nat, production_opt_str, spec_production_step, production_job_of, production_answer_v, spec_production_new, spec_production_collect, spec_production_advance, spec_production_served, spec_production_run, spec_production_arms, spec_production_plan_after, spec_production_calls, spec_production_node_after};
+use crate::state::ProductionCacheEntryV;
+use crate::handler::spec_production_cache_find;
 verus! {
+pub proof fn lemma_production_lift_target_actual(data: ProductionTargetData)
+    ensures crate::handler::production_lift_target(data.deep_view()) == data,
+{
+    assert(exists|x: ProductionTargetData| x.deep_view() == data.deep_view());
+    let chosen = crate::handler::production_lift_target(data.deep_view());
+    match (chosen, data) {
+        (ProductionTargetData::Origin(a), ProductionTargetData::Origin(b)) |
+        (ProductionTargetData::Schedule(a), ProductionTargetData::Schedule(b)) => axiom_string_ext(a, b),
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_opt_string_ext(a: Option<String>, b: Option<String>)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    if let (Some(x), Some(y)) = (a, b) { axiom_string_ext(x, y); }
+}
+
+pub proof fn lemma_production_strings_ext(a: Vec<String>, b: Vec<String>)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    assert(a.deep_view().len() == a@.len());
+    assert(b.deep_view().len() == b@.len());
+    assert forall|i: int| 0 <= i < a.len() implies #[trigger] a[i] == b[i] by {
+        assert(a.deep_view()[i] == a[i]@);
+        assert(b.deep_view()[i] == b[i]@);
+        axiom_string_ext(a[i], b[i]);
+    }
+    assert(a@ =~= b@);
+    axiom_vec_ext(a, b);
+}
+
+pub proof fn lemma_production_schedule_ext(a: Schedule, b: Schedule)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    axiom_string_ext(a.cron, b.cron);
+    axiom_string_ext(a.promise_id, b.promise_id);
+    lemma_value_ext(a.promise_param, b.promise_param);
+    lemma_tags_ext(a.promise_tags, b.promise_tags);
+}
+
+pub proof fn lemma_production_record_ext(a: PromiseRecord, b: PromiseRecord)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    axiom_string_ext(a.id, b.id);
+    lemma_value_ext(a.param, b.param);
+    lemma_value_ext(a.value, b.value);
+    lemma_tags_ext(a.tags, b.tags);
+}
+
+pub proof fn lemma_production_opt_record_ext(a: Option<PromiseRecord>, b: Option<PromiseRecord>)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    if let (Some(x), Some(y)) = (a, b) { lemma_production_record_ext(x, y); }
+}
+
+pub proof fn lemma_production_opt_task_ext(a: Option<TaskRecord>, b: Option<TaskRecord>)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    if let (Some(x), Some(y)) = (a, b) {
+        axiom_string_ext(x.id, y.id);
+        lemma_production_opt_string_ext(x.pid, y.pid);
+    }
+}
+
+pub proof fn lemma_production_response_ext(a: Response, b: Response)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    match (a, b) {
+        (Response::Promise(x), Response::Promise(y)) => lemma_production_opt_record_ext(x.promise, y.promise),
+        (Response::Schedule(x), Response::Schedule(y)) => {
+            if let (Some(x), Some(y)) = (x.schedule, y.schedule) { lemma_production_schedule_ext(x, y); }
+        },
+        (Response::TaskGet(x), Response::TaskGet(y)) => lemma_production_opt_task_ext(x.task, y.task),
+        (Response::TaskClaim(x), Response::TaskClaim(y)) => {
+            lemma_production_opt_task_ext(x.task, y.task);
+            lemma_production_opt_record_ext(x.promise, y.promise);
+        },
+        (Response::TaskFence(x), Response::TaskFence(y)) => {
+            match (x.action, y.action) {
+                (Some(TaskFenceInnerRes::Create(p)), Some(TaskFenceInnerRes::Create(q))) |
+                (Some(TaskFenceInnerRes::Settle(p)), Some(TaskFenceInnerRes::Settle(q))) =>
+                    lemma_production_opt_record_ext(p.promise, q.promise),
+                _ => {},
+            }
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_object_ext(a: ProductionObjectData, b: ProductionObjectData)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    lemma_production_strings_ext(a.promise.callbacks, b.promise.callbacks);
+    lemma_production_strings_ext(a.promise.listeners, b.promise.listeners);
+    if let (Some(x), Some(y)) = (a.task, b.task) {
+        lemma_production_opt_string_ext(x.pid, y.pid);
+        lemma_production_strings_ext(x.resumes, y.resumes);
+    }
+}
+
+pub proof fn lemma_production_document_ext(a: ProductionDocumentData, b: ProductionDocumentData)
+    requires
+        a.deep_view() == b.deep_view(),
+        crate::property_claim::production_document_canonical(a),
+        crate::property_claim::production_document_canonical(b),
+    ensures a == b,
+{
+    match (a, b) {
+        (ProductionDocumentData::Workflow(x), ProductionDocumentData::Workflow(y)) => {
+            let xm = crate::handler::production_document_data_rows(x.deep_view());
+            let ym = crate::handler::production_document_data_rows(y.deep_view());
+            assert(xm == ym);
+            let xk = x@.map_values(|e: (String, ProductionObjectData)| e.0@);
+            let yk = y@.map_values(|e: (String, ProductionObjectData)| e.0@);
+            assert(xk == crate::handler::spec_sorted_present(xm));
+            assert(yk == crate::handler::spec_sorted_present(ym));
+            assert(xk == yk);
+            assert(x.len() == y.len());
+            assert forall|i: int| 0 <= i < x.len() implies #[trigger] x[i] == y[i] by {
+                assert(xk[i] == x[i].0@);
+                assert(yk[i] == y[i].0@);
+                assert(xm[x[i].0@] == x[i].1.deep_view());
+                assert(ym[y[i].0@] == y[i].1.deep_view());
+                axiom_string_ext(x[i].0, y[i].0);
+                lemma_production_object_ext(x[i].1, y[i].1);
+            }
+            assert(x@ =~= y@);
+            axiom_vec_ext(x, y);
+        },
+        (ProductionDocumentData::Schedule(x), ProductionDocumentData::Schedule(y)) => {},
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_debug_ext(a: ProductionDebugData, b: ProductionDebugData)
+    requires
+        a.deep_view() == b.deep_view(),
+        crate::property_claim::production_debug_canonical(a),
+        crate::property_claim::production_debug_canonical(b),
+    ensures a == b,
+{
+    match (a, b) {
+        (ProductionDebugData::Message(x), ProductionDebugData::Message(y)) => axiom_string_ext(x, y),
+        (ProductionDebugData::Snap { origins: x, schedules: s }, ProductionDebugData::Snap { origins: y, schedules: t }) => {
+            assert(x.deep_view() == y.deep_view());
+            assert(x.deep_view().len() == x.len());
+            assert(y.deep_view().len() == y.len());
+            assert forall|i: int| 0 <= i < x.len() implies #[trigger] x[i] == y[i] by {
+                assert(x.deep_view()[i] == x[i].deep_view());
+                assert(y.deep_view()[i] == y[i].deep_view());
+                lemma_production_document_ext(x[i], y[i]);
+            }
+            assert(x@ =~= y@);
+            axiom_vec_ext(x, y);
+            assert(s.deep_view() == t.deep_view());
+            assert(s.deep_view().len() == s.len());
+            assert(t.deep_view().len() == t.len());
+            assert forall|i: int| 0 <= i < s.len() implies #[trigger] s[i] == t[i] by {
+                assert(s.deep_view()[i] == s[i].deep_view());
+                assert(t.deep_view()[i] == t[i].deep_view());
+                lemma_production_schedule_ext(s[i], t[i]);
+            }
+            assert(s@ =~= t@);
+            axiom_vec_ext(s, t);
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_store_request_ext(a: StoreReq, b: StoreReq)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    match (a, b) {
+        (StoreReq::GetIfNoneMatch { etag: x, .. }, StoreReq::GetIfNoneMatch { etag: y, .. }) |
+        (StoreReq::PutIfMatch { etag: x, .. }, StoreReq::PutIfMatch { etag: y, .. }) |
+        (StoreReq::AppIfMatch { etag: x, .. }, StoreReq::AppIfMatch { etag: y, .. }) =>
+            axiom_string_ext(x.0, y.0),
+        _ => {},
+    }
+    match (a, b) {
+        (StoreReq::Get { key: x }, StoreReq::Get { key: y }) |
+        (StoreReq::Del { key: x }, StoreReq::Del { key: y }) |
+        (StoreReq::GetIfNoneMatch { key: x, .. }, StoreReq::GetIfNoneMatch { key: y, .. }) |
+        (StoreReq::List { prefix: x, .. }, StoreReq::List { prefix: y, .. }) |
+        (StoreReq::ListPrefixes { prefix: x }, StoreReq::ListPrefixes { prefix: y }) => axiom_string_ext(x, y),
+        (StoreReq::Put { key: x, body: p }, StoreReq::Put { key: y, body: q }) |
+        (StoreReq::PutIfMatch { key: x, body: p, .. }, StoreReq::PutIfMatch { key: y, body: q, .. }) |
+        (StoreReq::PutIfNoneMatch { key: x, body: p }, StoreReq::PutIfNoneMatch { key: y, body: q }) |
+        (StoreReq::AppIfMatch { key: x, body: p, .. }, StoreReq::AppIfMatch { key: y, body: q, .. }) => {
+            axiom_string_ext(x, y);
+            axiom_vec_ext(p, q);
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_note_ext(a: ProductionNoteData, b: ProductionNoteData)
+    requires a.deep_view() == b.deep_view(),
+    ensures a == b,
+{
+    match (a, b) {
+        (ProductionNoteData::SweepBegin { target: x, .. }, ProductionNoteData::SweepBegin { target: y, .. }) |
+        (ProductionNoteData::AdvanceBegin { schedule: x, .. }, ProductionNoteData::AdvanceBegin { schedule: y, .. }) |
+        (ProductionNoteData::Raced { target: x, .. }, ProductionNoteData::Raced { target: y, .. }) |
+        (ProductionNoteData::KeyUnparseable { key: x }, ProductionNoteData::KeyUnparseable { key: y }) |
+        (ProductionNoteData::RefreshFailed { error: x }, ProductionNoteData::RefreshFailed { error: y }) |
+        (ProductionNoteData::ListingFailed { error: x }, ProductionNoteData::ListingFailed { error: y }) |
+        (ProductionNoteData::MessageUndeliverable { address: x }, ProductionNoteData::MessageUndeliverable { address: y }) =>
+            axiom_string_ext(x, y),
+        (ProductionNoteData::FireBegin { origin: x, promise_id: p, row: r, .. }, ProductionNoteData::FireBegin { origin: y, promise_id: q, row: s, .. }) => {
+            axiom_string_ext(x, y);
+            axiom_string_ext(p, q);
+            lemma_production_schedule_ext(*r, *s);
+        },
+        (ProductionNoteData::ConfigurationRead { members: x, .. }, ProductionNoteData::ConfigurationRead { members: y, .. }) |
+        (ProductionNoteData::ConfigurationWritten { members: x, .. }, ProductionNoteData::ConfigurationWritten { members: y, .. }) =>
+            lemma_production_strings_ext(x, y),
+        (ProductionNoteData::KeyNotDeleted { key: x, error: p }, ProductionNoteData::KeyNotDeleted { key: y, error: q }) |
+        (ProductionNoteData::FireFailed { key: x, error: p }, ProductionNoteData::FireFailed { key: y, error: q }) => {
+            axiom_string_ext(x, y);
+            axiom_string_ext(p, q);
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_effect_ext(a: ProductionEffectData, b: ProductionEffectData)
+    requires
+        a.deep_view() == b.deep_view(),
+        crate::property_claim::production_effect_canonical(a),
+        crate::property_claim::production_effect_canonical(b),
+    ensures a == b,
+{
+    match (a, b) {
+        (ProductionEffectData::Reply { response: x, .. }, ProductionEffectData::Reply { response: y, .. }) => {
+            match (x, y) {
+                (Err(x), Err(y)) => axiom_string_ext(x, y),
+                (Ok(ProductionAnswerData::Step { kind: k, corr: c, action_kind: a, response: r, why: w }),
+                 Ok(ProductionAnswerData::Step { kind: l, corr: d, action_kind: b, response: s, why: z })) => {
+                    axiom_string_ext(k, l); axiom_string_ext(c, d);
+                    lemma_production_opt_string_ext(a, b); lemma_production_opt_string_ext(w, z);
+                    lemma_production_response_ext(r, s);
+                },
+                (Ok(ProductionAnswerData::Debug { kind: k, corr: c, body: r, .. }),
+                 Ok(ProductionAnswerData::Debug { kind: l, corr: d, body: s, .. })) => {
+                    axiom_string_ext(k, l); axiom_string_ext(c, d);
+                    lemma_production_debug_ext(r, s);
+                },
+                _ => {},
+            }
+        },
+        (ProductionEffectData::Store { request: x, .. }, ProductionEffectData::Store { request: y, .. }) =>
+            lemma_production_store_request_ext(x, y),
+        (ProductionEffectData::Send { address: x, message: p }, ProductionEffectData::Send { address: y, message: q }) => {
+            axiom_string_ext(x, y);
+            match (p, q) {
+                (ProductionDispatchData::Execute { task_id: x, .. }, ProductionDispatchData::Execute { task_id: y, .. }) => axiom_string_ext(x, y),
+                (ProductionDispatchData::Unblock(x), ProductionDispatchData::Unblock(y)) => lemma_production_record_ext(x, y),
+                _ => {},
+            }
+        },
+        (ProductionEffectData::Note(x), ProductionEffectData::Note(y)) => lemma_production_note_ext(x, y),
+        _ => {},
+    }
+}
+
+pub proof fn lemma_production_lift_actual(data: ProductionEffectData)
+    requires crate::property_claim::production_effect_canonical(data),
+    ensures crate::handler::production_lift_effect(data.deep_view()) == data,
+{
+    assert(exists|x: ProductionEffectData| x.deep_view() == data.deep_view()
+        && crate::property_claim::production_effect_canonical(x));
+    let chosen = crate::handler::production_lift_effect(data.deep_view());
+    lemma_production_effect_ext(chosen, data);
+}
+
+pub proof fn lemma_production_replay_prefix(
+    config: crate::state::ProductionConfigV,
+    loops: bool,
+    left: Seq<crate::state::ProductionEventV>,
+    right: Seq<crate::state::ProductionEventV>,
+    count: nat,
+)
+    requires count <= left.len(), count <= right.len(), left.take(count as int) == right.take(count as int),
+    ensures crate::handler::production_replay_state(config, loops, left, count)
+        == crate::handler::production_replay_state(config, loops, right, count),
+    decreases count,
+{
+    if count > 0 {
+        assert(left.take((count - 1) as int) =~= right.take((count - 1) as int));
+        assert(left.take(count as int)[count - 1] == left[count - 1]);
+        assert(right.take(count as int)[count - 1] == right[count - 1]);
+        assert(left[count - 1] == right[count - 1]);
+        lemma_production_replay_prefix(config, loops, left, right, (count - 1) as nat);
+    }
+}
+
+pub proof fn lemma_production_cache_find_step(entries: Seq<ProductionCacheEntryV>, origin: Seq<char>, i: int)
+    requires
+        0 <= i <= entries.len(),
+        forall|j: int| 0 <= j < i ==> entries[j].origin != origin,
+    ensures
+        spec_production_cache_find(entries, origin) == match spec_production_cache_find(entries.skip(i), origin) {
+            Some(k) => Some(k + i),
+            None => None::<int>,
+        },
+    decreases i,
+{
+    if i == 0 {
+        assert(entries.skip(0) =~= entries);
+    } else {
+        lemma_production_cache_find_step(entries, origin, i - 1);
+        assert(entries.skip(i - 1).drop_first() =~= entries.skip(i));
+        assert(entries.skip(i - 1)[0] == entries[i - 1]);
+    }
+}
+
+
+pub proof fn lemma_production_step_is_decide(node: NodeV, flight: FlightV, doc: DocumentBodyV, limit: nat)
+    requires
+        !(flight.job is External),
+    ensures
+        ({
+            let (next, reply, born, notify) = spec_production_step(production_job_of(flight.job), doc, flight.now, node.retry_timeout, limit);
+            let (after, sent) = spec_decide(node, flight, doc);
+            match after.flight {
+                Some(open) => {
+                    &&& open.writing
+                    &&& open.decided == Some(spec_encode_body(next))
+                    &&& sent.len() == 1
+                    &&& match sent[0].1 {
+                        Message::StoreReq { request, .. } => match flight.etag {
+                            Some(chars) => request matches StoreReq::PutIfMatch { etag, .. } && etag.0@ == chars,
+                            None => request is PutIfNoneMatch,
+                        },
+                        _ => false,
+                    }
+                },
+                None => after.flight is None,
+            }
+        }),
+{
+    let (after, sent) = spec_decide(node, flight, doc);
+    match after.flight {
+        Some(open) => {
+            match flight.etag {
+                Some(chars) => crate::property_proof::lemma_string_realised(chars),
+                None => {},
+            }
+        },
+        None => {},
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The commit: the sequence of store calls
+// ---------------------------------------------------------------------------
+
+/// The key that fired the flight, and the node that armed it.
+
+pub proof fn lemma_production_sequence(s: ASequence, n: ANode, tag: Seq<char>)
+    requires
+        s.step is Start,
+    ensures
+        ({
+            let (acts, last, after) = spec_production_run(s, n, tag, 6);
+            &&& acts == spec_production_calls(s, n)
+            &&& last.step is Over
+            &&& after == spec_production_node_after(s, n, tag)
+        }),
+{
+    let (acts, last, after) = spec_production_run(s, n, tag, 6);
+    lemma_production_sequence_cases(s, n, tag);
+}
+
+
+#[verifier::rlimit(20)]
+proof fn lemma_production_sequence_cases(s: ASequence, n: ANode, tag: Seq<char>)
+    requires
+        s.step is Start,
+    ensures
+        spec_production_run(s, n, tag, 6).0 == spec_production_calls(s, n),
+        spec_production_run(s, n, tag, 6).1.step is Over,
+        spec_production_run(s, n, tag, 6).2 == spec_production_node_after(s, n, tag),
+{
+    reveal_with_fuel(spec_production_run, 7);
+    let e = Seq::<AAct>::empty();
+    if s.changed {
+        let (s1, n1, o1) = spec_production_advance(s, n, AAnswer::Fresh);
+        match spec_production_arms(s) {
+            Some(key) => {
+                assert(o1 == AOutcome::Act(AAct::PutKey(key)));
+                let (s2, n2, o2) = spec_production_advance(s1, n1, AAnswer::Done);
+                assert(s2.plan == spec_production_armed(s.plan, key));
+                lemma_production_written(s2, n2, tag);
+                let (acts, last, after) = spec_production_run(s2, n2, tag, 4);
+                assert(spec_production_run(s, n, tag, 6).0 =~= seq![AAct::PutKey(key)] + (seq![AAct::Write { cond: s.etag, idle: false }] + acts));
+                assert(spec_production_calls(s, n) =~= seq![AAct::PutKey(key)] + (seq![AAct::Write { cond: s.etag, idle: false }] + acts));
+            },
+            None => {
+                assert(o1 == AOutcome::Act(AAct::Write { cond: s.etag, idle: false }));
+                lemma_production_written(s1, n1, tag);
+                let (acts, last, after) = spec_production_run(s1, n1, tag, 5);
+                assert(spec_production_run(s, n, tag, 6).0 =~= seq![AAct::Write { cond: s.etag, idle: false }] + acts);
+                assert(spec_production_calls(s, n) =~= seq![AAct::Write { cond: s.etag, idle: false }] + acts);
+            },
+        }
+    } else if s.fired is Some {
+        let f = s.fired->Some_0;
+        let (s1, n1, o1) = spec_production_advance(s, n, AAnswer::Fresh);
+        assert(o1 == AOutcome::Act(AAct::Write { cond: s.etag, idle: true }));
+        let (s2, n2, o2) = spec_production_advance(s1, n1, AAnswer::Written(tag));
+        assert(o2 == AOutcome::Act(AAct::DeleteKey { key: f.key, by: f.by }));
+        assert(n2 == spec_production_collected(n, s.origin, f.key));
+        let (s3, n3, o3) = spec_production_advance(s2, n2, AAnswer::Done);
+        assert(o3 == AOutcome::Act(AAct::Done { deleted: true }));
+        assert(spec_production_run(s, n, tag, 6).0 =~= seq![AAct::Write { cond: s.etag, idle: true }, AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+        assert(spec_production_calls(s, n) =~= seq![AAct::Write { cond: s.etag, idle: true }, AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+    } else {
+        let (s1, n1, o1) = spec_production_advance(s, n, AAnswer::Fresh);
+        assert(o1 == AOutcome::Act(AAct::Done { deleted: false }));
+        assert(spec_production_run(s, n, tag, 6).0 =~= seq![AAct::Done { deleted: false }]);
+        assert(spec_production_calls(s, n) =~= seq![AAct::Done { deleted: false }]);
+    }
+}
+
+/// From `Writing { idle: false }` on, with `plan` the plan the write runs
+/// under: the key replaced is removed, the kept key remembered, the fired
+/// key collected.
+
+proof fn lemma_production_written(s: ASequence, n: ANode, tag: Seq<char>)
+    requires
+        s.step == (AStep::Writing { idle: false }),
+        s.changed,
+    ensures
+        ({
+            let disarm = match spec_production_to_disarm(s.plan) {
+                Some(previous) => seq![AAct::DeleteKey { key: previous, by: n.id }],
+                None => Seq::<AAct>::empty(),
+            };
+            let collect = match s.fired {
+                Some(f) => seq![AAct::DeleteKey { key: f.key, by: f.by }],
+                None => Seq::<AAct>::empty(),
+            };
+            let after = match s.fired {
+                Some(f) => spec_production_collected(spec_production_finish(n, s.plan, tag), s.origin, f.key),
+                None => spec_production_finish(n, s.plan, tag),
+            };
+            &&& spec_production_run(s, n, tag, 4).0 == disarm + collect + seq![AAct::Done { deleted: s.fired is Some }]
+            &&& spec_production_run(s, n, tag, 5).0 == spec_production_run(s, n, tag, 4).0
+            &&& spec_production_run(s, n, tag, 4).1.step is Over
+            &&& spec_production_run(s, n, tag, 5).1.step is Over
+            &&& spec_production_run(s, n, tag, 4).2 == after
+            &&& spec_production_run(s, n, tag, 5).2 == after
+        }),
+{
+    reveal_with_fuel(spec_production_run, 6);
+    let (s1, n1, o1) = spec_production_advance(s, n, AAnswer::Written(tag));
+    assert(s1.etag == Some(tag));
+    match spec_production_to_disarm(s.plan) {
+        Some(previous) => {
+            assert(o1 == AOutcome::Act(AAct::DeleteKey { key: previous, by: n.id }));
+            let (s2, n2, o2) = spec_production_advance(s1, n1, AAnswer::Done);
+            assert(n2 == spec_production_finish(n, s.plan, tag) || s.fired is Some);
+            match s.fired {
+                Some(f) => {
+                    assert(o2 == AOutcome::Act(AAct::DeleteKey { key: f.key, by: f.by }));
+                    let (s3, n3, o3) = spec_production_advance(s2, n2, AAnswer::Done);
+                    assert(o3 == AOutcome::Act(AAct::Done { deleted: true }));
+                    assert(spec_production_run(s, n, tag, 4).0 =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                    assert(spec_production_run(s, n, tag, 5).0 =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                    assert(seq![AAct::DeleteKey { key: previous, by: n.id }] + seq![AAct::DeleteKey { key: f.key, by: f.by }] + seq![AAct::Done { deleted: true }] =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                },
+                None => {
+                    assert(o2 == AOutcome::Act(AAct::Done { deleted: false }));
+                    assert(spec_production_run(s, n, tag, 4).0 =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::Done { deleted: false }]);
+                    assert(spec_production_run(s, n, tag, 5).0 =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::Done { deleted: false }]);
+                    assert(seq![AAct::DeleteKey { key: previous, by: n.id }] + Seq::<AAct>::empty() + seq![AAct::Done { deleted: false }] =~= seq![AAct::DeleteKey { key: previous, by: n.id }, AAct::Done { deleted: false }]);
+                },
+            }
+        },
+        None => {
+            match s.fired {
+                Some(f) => {
+                    assert(o1 == AOutcome::Act(AAct::DeleteKey { key: f.key, by: f.by }));
+                    assert(n1 == spec_production_collected(spec_production_finish(n, s.plan, tag), s.origin, f.key));
+                    let (s2, n2, o2) = spec_production_advance(s1, n1, AAnswer::Done);
+                    assert(o2 == AOutcome::Act(AAct::Done { deleted: true }));
+                    assert(spec_production_run(s, n, tag, 4).0 =~= seq![AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                    assert(spec_production_run(s, n, tag, 5).0 =~= seq![AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                    assert(Seq::<AAct>::empty() + seq![AAct::DeleteKey { key: f.key, by: f.by }] + seq![AAct::Done { deleted: true }] =~= seq![AAct::DeleteKey { key: f.key, by: f.by }, AAct::Done { deleted: true }]);
+                },
+                None => {
+                    assert(o1 == AOutcome::Act(AAct::Done { deleted: false }));
+                    assert(n1 == spec_production_finish(n, s.plan, tag));
+                    assert(spec_production_run(s, n, tag, 4).0 =~= seq![AAct::Done { deleted: false }]);
+                    assert(spec_production_run(s, n, tag, 5).0 =~= seq![AAct::Done { deleted: false }]);
+                    assert(Seq::<AAct>::empty() + Seq::<AAct>::empty() + seq![AAct::Done { deleted: false }] =~= seq![AAct::Done { deleted: false }]);
+                },
+            }
+        },
+    }
+}
+
+
+pub proof fn lemma_bulk_notifications_are_unique(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires
+        forall|id: Seq<char>| map.contains_key(id) ==> (#[trigger] map[id].promise.listeners).no_duplicates(),
+    ensures
+        crate::handler::note_effect_keys(crate::handler::spec_bulk_workflow(map, now, retry_timeout).1).no_duplicates(),
+{
+    lemma_document_object_order(DocumentBodyV::Workflow(map));
+    let keys = crate::handler::spec_sorted_present(map);
+    assert(keys.no_duplicates());
+    assert forall|i: int| 0 <= i < keys.len() implies
+        map.contains_key(#[trigger] keys[i]) by {
+        assert(keys.contains(keys[i]));
+    };
+    lemma_projected_offers_are_unique(map, keys, keys.len(), now, retry_timeout);
+    lemma_projection_preserves_listeners(map, keys, keys.len(), now, retry_timeout);
+    let projected = crate::handler::spec_project_workflow(map, now, retry_timeout);
+    let offers = crate::handler::spec_project_offers(map, keys, keys.len(), now);
+    assert(projected.dom() == map.dom());
+    assert(crate::handler::spec_sorted_present(projected) == keys);
+    lemma_callback_keys_preserve_collected_offers(projected, offers, keys, keys.len(), now, retry_timeout);
+    let (resumed, callbacks) = crate::handler::spec_drain_callback_keys(projected, keys, keys.len(), now, retry_timeout);
+    assert forall|id: Seq<char>| resumed.contains_key(id) implies
+        (#[trigger] resumed[id].promise.listeners).no_duplicates() by {
+        assert(resumed[id].promise.listeners == projected[id].promise.listeners);
+        assert(projected[id].promise.listeners == map[id].promise.listeners);
+    };
+    lemma_listener_pass_is_unique(resumed, keys, keys.len());
+    let (_, listeners) = crate::handler::spec_drain_listener_keys(resumed, keys, keys.len());
+    let left = offers + callbacks;
+    let all = left + listeners;
+    let left_keys = crate::handler::note_effect_keys(left);
+    let right_keys = crate::handler::note_effect_keys(listeners);
+    let all_keys = crate::handler::note_effect_keys(all);
+    assert(all_keys =~= left_keys + right_keys);
+    assert forall|i: int, j: int| 0 <= i < j < all_keys.len() implies
+        #[trigger] all_keys[i] != #[trigger] all_keys[j] by {
+        if j < left.len() {
+            assert(left_keys[i] != left_keys[j]);
+        } else if i >= left.len() {
+            assert(right_keys[i - left.len()] != right_keys[j - left.len()]);
+        } else {
+            assert(left[i] is Execute);
+            assert(listeners[j - left.len()] is Unblock);
+        }
+    };
+    assert(crate::handler::spec_bulk_workflow(map, now, retry_timeout).1 =~= all);
+}
+
+pub proof fn lemma_projection_preserves_listeners(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires count <= keys.len(),
+    ensures
+        ({
+            let next = crate::handler::spec_project_keys(map, keys, count, now, retry_timeout);
+            &&& next.dom() == map.dom()
+            &&& forall|id: Seq<char>| map.contains_key(id) ==>
+                #[trigger] next[id].promise.listeners == map[id].promise.listeners
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_projection_preserves_listeners(map, keys, (count - 1) as nat, now, retry_timeout);
+        let prior = crate::handler::spec_project_keys(map, keys, (count - 1) as nat, now, retry_timeout);
+        let next = crate::handler::spec_project_keys(map, keys, count, now, retry_timeout);
+        let key = keys[count as int - 1];
+        assert forall|id: Seq<char>| map.contains_key(id) implies
+            #[trigger] next[id].promise.listeners == map[id].promise.listeners by {
+            assert(prior[id].promise.listeners == map[id].promise.listeners);
+            if id != key { assert(next[id] == prior[id]); }
+        };
+    }
+}
+
+pub proof fn lemma_listener_pass_is_unique(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+)
+    requires
+        count <= keys.len(),
+        keys.no_duplicates(),
+        forall|id: Seq<char>| map.contains_key(id) ==> (#[trigger] map[id].promise.listeners).no_duplicates(),
+    ensures
+        ({
+            let (next, notes) = crate::handler::spec_drain_listener_keys(map, keys, count);
+            &&& next.dom() == map.dom()
+            &&& crate::handler::note_effect_keys(notes).no_duplicates()
+            &&& forall|id: Seq<char>| map.contains_key(id) && !keys.take(count as int).contains(id) ==>
+                #[trigger] next[id] == map[id]
+            &&& forall|i: int| 0 <= i < notes.len() ==> match #[trigger] notes[i] {
+                NoteV::Unblock { promise, .. } => keys.take(count as int).contains(promise.id@),
+                _ => false,
+            }
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_listener_pass_is_unique(map, keys, (count - 1) as nat);
+        let (prior, collected) = crate::handler::spec_drain_listener_keys(map, keys, (count - 1) as nat);
+        let id = keys[count as int - 1];
+        assert(!keys.take(count as int - 1).contains(id));
+        if map.contains_key(id) { assert(prior[id] == map[id]); }
+        lemma_listener_collection_is_unique(prior, id);
+        let (next, more) = crate::handler::spec_drain_listeners(prior, id);
+        let all = collected + more;
+        let left = crate::handler::note_effect_keys(collected);
+        let right = crate::handler::note_effect_keys(more);
+        let all_keys = crate::handler::note_effect_keys(all);
+        assert(all_keys =~= left + right);
+        assert forall|i: int, j: int| 0 <= i < j < all_keys.len() implies
+            #[trigger] all_keys[i] != #[trigger] all_keys[j] by {
+            if j < collected.len() {
+                assert(left[i] != left[j]);
+            } else if i >= collected.len() {
+                assert(right[i - collected.len()] != right[j - collected.len()]);
+            } else {
+                match collected[i] {
+                    NoteV::Unblock { promise, .. } => {
+                        assert(keys.take(count as int - 1).contains(promise.id@));
+                        assert(promise.id@ != id);
+                    },
+                    _ => {},
+                }
+            }
+        };
+        assert(keys.take(count as int)[count as int - 1] == id);
+        assert(keys.take(count as int).contains(id));
+        assert forall|other: Seq<char>| map.contains_key(other) && !keys.take(count as int).contains(other) implies
+            #[trigger] next[other] == map[other] by {
+            if keys.take(count as int - 1).contains(other) {
+                let k = choose|k: int| 0 <= k < count as int - 1
+                    && #[trigger] keys.take(count as int - 1)[k] == other;
+                assert(keys.take(count as int)[k] == other);
+                assert(keys.take(count as int).contains(other));
+            }
+            assert(prior[other] == map[other]);
+        };
+        assert forall|i: int| 0 <= i < all.len() implies match #[trigger] all[i] {
+            NoteV::Unblock { promise, .. } => keys.take(count as int).contains(promise.id@),
+            _ => false,
+        } by {
+            if i < collected.len() {
+                match collected[i] {
+                    NoteV::Unblock { promise, .. } => {
+                        let k = choose|k: int| 0 <= k < count as int - 1
+                            && #[trigger] keys.take(count as int - 1)[k] == promise.id@;
+                        assert(keys.take(count as int)[k] == promise.id@);
+                        assert(keys.take(count as int).contains(promise.id@));
+                    },
+                    _ => {},
+                }
+            }
+        };
+    } else {
+        assert(crate::handler::note_effect_keys(Seq::<NoteV>::empty()) =~= Seq::empty());
+    }
+}
+
+pub proof fn lemma_listener_collection_is_unique(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    id: Seq<char>,
+)
+    requires
+        map.contains_key(id) ==> map[id].promise.listeners.no_duplicates(),
+    ensures
+        ({
+            let (next, notes) = crate::handler::spec_drain_listeners(map, id);
+            &&& next.dom() == map.dom()
+            &&& crate::handler::note_effect_keys(notes).no_duplicates()
+            &&& forall|i: int| 0 <= i < notes.len() ==> match #[trigger] notes[i] {
+                NoteV::Unblock { address, promise } =>
+                    promise.id@ == id && map.contains_key(id)
+                    && map[id].promise.listeners.contains(address),
+                _ => false,
+            }
+            &&& forall|other: Seq<char>| map.contains_key(other) && other != id ==>
+                #[trigger] next[other] == map[other]
+        }),
+{
+    let (next, notes) = crate::handler::spec_drain_listeners(map, id);
+    if map.contains_key(id) && map[id].promise.state != PromiseState::Pending {
+        lemma_string_realised(id);
+        let listeners = map[id].promise.listeners;
+        assert(notes.len() == listeners.len());
+        assert forall|i: int| 0 <= i < notes.len() implies match #[trigger] notes[i] {
+            NoteV::Unblock { address, promise } =>
+                promise.id@ == id && map.contains_key(id)
+                && map[id].promise.listeners.contains(address),
+            _ => false,
+        } by {
+            assert(listeners.contains(listeners[i]));
+        };
+        let keys = crate::handler::note_effect_keys(notes);
+        assert forall|i: int, j: int| 0 <= i < j < keys.len() implies
+            #[trigger] keys[i] != #[trigger] keys[j] by {
+            assert(listeners[i] != listeners[j]);
+        };
+    } else {
+        assert(crate::handler::note_effect_keys(notes) =~= Seq::empty());
+    }
+}
+
+pub proof fn lemma_projected_offers_are_unique(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires
+        count <= keys.len(),
+        keys.no_duplicates(),
+        forall|i: int| 0 <= i < keys.len() ==> map.contains_key(#[trigger] keys[i]),
+    ensures
+        ({
+            let next = crate::handler::spec_project_keys(map, keys, count, now, retry_timeout);
+            let notes = crate::handler::spec_project_offers(map, keys, count, now);
+            &&& next.dom() == map.dom()
+            &&& forall|id: Seq<char>| map.contains_key(id) && !keys.take(count as int).contains(id) ==>
+                #[trigger] next[id] == map[id]
+            &&& crate::property_claim::collected_offers_valid(next, notes)
+            &&& forall|i: int| 0 <= i < notes.len() ==> match #[trigger] notes[i] {
+                NoteV::Execute { id, .. } => keys.take(count as int).contains(id),
+                _ => false,
+            }
+        }),
+    decreases count,
+{
+    if count == 0 {
+        assert(keys.take(0) =~= Seq::<Seq<char>>::empty());
+        assert(crate::handler::note_effect_keys(Seq::<NoteV>::empty()) =~= Seq::empty());
+    } else {
+        lemma_projected_offers_are_unique(map, keys, (count - 1) as nat, now, retry_timeout);
+        let prior = crate::handler::spec_project_keys(map, keys, (count - 1) as nat, now, retry_timeout);
+        let notes = crate::handler::spec_project_offers(map, keys, (count - 1) as nat, now);
+        let id = keys[count as int - 1];
+        assert(!keys.take(count as int - 1).contains(id));
+        assert(prior[id] == map[id]);
+        let projected = crate::handler::spec_project_due_object(prior[id], now, retry_timeout);
+        let next = prior.insert(id, projected);
+        assert(prior.contains_key(id));
+        assert(next == crate::handler::spec_project_keys(map, keys, count, now, retry_timeout));
+        assert(next.dom() == map.dom());
+        assert(keys.take(count as int) =~= keys.take(count as int - 1).push(id));
+        assert(keys.take(count as int).len() == count);
+        assert(keys.take(count as int)[count as int - 1] == id);
+        assert(keys.take(count as int).contains(id));
+        assert forall|other: Seq<char>| map.contains_key(other) && !keys.take(count as int).contains(other) implies
+            #[trigger] next[other] == map[other] by {
+                assert(other != id);
+                if keys.take(count as int - 1).contains(other) {
+                    let k = choose|k: int| 0 <= k < count as int - 1
+                        && #[trigger] keys.take(count as int - 1)[k] == other;
+                    assert(keys.take(count as int)[k] == other);
+                    assert(keys.take(count as int).contains(other));
+                }
+                assert(prior[other] == map[other]);
+            };
+        assert forall|i: int| 0 <= i < notes.len() implies match #[trigger] notes[i] {
+            NoteV::Execute { id: offered, version } =>
+                next.contains_key(offered) && next[offered].task is Some
+                && next[offered].task.unwrap().state == TaskState::Pending
+                && next[offered].task.unwrap().version == version,
+            _ => false,
+        } by {
+            match notes[i] {
+                NoteV::Execute { id: offered, .. } => {
+                    assert(keys.take(count as int - 1).contains(offered));
+                    assert(offered != id);
+                },
+                _ => {},
+            }
+        };
+        if crate::handler::spec_due_offer(map[id], now) {
+            let note = NoteV::Execute { id, version: map[id].task.unwrap().version };
+            assert forall|i: int| 0 <= i < notes.len() implies
+                crate::handler::protocol_effect_key(crate::handler::note_effect(#[trigger] notes[i]))
+                    != crate::handler::protocol_effect_key(crate::handler::note_effect(note)) by {
+                match notes[i] {
+                    NoteV::Execute { id: offered, .. } => {
+                        assert(keys.take(count as int - 1).contains(offered));
+                        let k = choose|k: int| 0 <= k < count as int - 1
+                            && #[trigger] keys.take(count as int - 1)[k] == offered;
+                        assert(keys.take(count as int)[k] == offered);
+                        assert(keys.take(count as int).contains(offered));
+                        assert(offered != id);
+                    },
+                    _ => {},
+                }
+            };
+            assert(crate::handler::note_effect_keys(notes.push(note))
+                =~= crate::handler::note_effect_keys(notes).push(
+                    crate::handler::protocol_effect_key(crate::handler::note_effect(note))));
+            assert(crate::handler::note_effect_keys(notes.push(note)).no_duplicates());
+            assert(crate::property_claim::collected_offers_valid(next, notes.push(note)));
+        } else {
+            assert(crate::property_claim::collected_offers_valid(next, notes));
+        }
+        let all = crate::handler::spec_project_offers(map, keys, count, now);
+        assert forall|i: int| 0 <= i < all.len() implies match #[trigger] all[i] {
+            NoteV::Execute { id: offered, .. } => keys.take(count as int).contains(offered),
+            _ => false,
+        } by {
+            if i < notes.len() {
+                assert(all[i] == notes[i]);
+                match notes[i] {
+                    NoteV::Execute { id: offered, .. } => {
+                        assert(keys.take(count as int - 1).contains(offered));
+                    },
+                    _ => {},
+                }
+            } else {
+                assert(all[i] == NoteV::Execute { id, version: map[id].task.unwrap().version });
+            }
+        };
+    }
+}
+
+pub proof fn lemma_callback_keys_preserve_collected_offers(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    notes: Seq<NoteV>,
+    keys: Seq<Seq<char>>,
+    count: nat,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires
+        count <= keys.len(),
+        crate::property_claim::collected_offers_valid(map, notes),
+    ensures
+        ({
+            let (next, more) = crate::handler::spec_drain_callback_keys(map, keys, count, now, retry_timeout);
+            &&& next.dom() == map.dom()
+            &&& crate::property_claim::collected_offers_valid(next, notes + more)
+            &&& forall|id: Seq<char>| map.contains_key(id) ==>
+                #[trigger] next[id].promise.listeners == map[id].promise.listeners
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_callback_keys_preserve_collected_offers(map, notes, keys, (count - 1) as nat, now, retry_timeout);
+        let (prior, collected) = crate::handler::spec_drain_callback_keys(map, keys, (count - 1) as nat, now, retry_timeout);
+        let id = keys[count as int - 1];
+        if prior.contains_key(id) && prior[id].promise.state != PromiseState::Pending {
+            lemma_callback_pass_preserves_collected_offers(
+                prior, notes + collected, id, prior[id].promise.callbacks.len(), now, retry_timeout);
+        }
+        let (_, more) = crate::handler::spec_drain_settled_callbacks(prior, id, now, retry_timeout);
+        let (next, _) = crate::handler::spec_drain_callback_keys(map, keys, count, now, retry_timeout);
+        assert forall|key: Seq<char>| map.contains_key(key) implies
+            #[trigger] next[key].promise.listeners == map[key].promise.listeners by {
+            assert(prior.contains_key(key));
+            assert(prior[key].promise.listeners == map[key].promise.listeners);
+            if prior.contains_key(id) && prior[id].promise.state != PromiseState::Pending {
+                let (drained, _) = crate::handler::spec_drain_callbacks(
+                    prior, id, prior[id].promise.callbacks.len(), now, retry_timeout);
+                assert(next == drained);
+                assert(drained[key].promise.listeners == prior[key].promise.listeners);
+            } else {
+                assert(next == prior);
+            }
+        };
+        assert(notes + (collected + more) =~= (notes + collected) + more);
+    } else {
+        assert(notes + Seq::<NoteV>::empty() =~= notes);
+    }
+}
+
+pub proof fn lemma_callback_pass_preserves_collected_offers(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    notes: Seq<NoteV>,
+    id: Seq<char>,
+    count: nat,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires
+        map.contains_key(id),
+        map[id].promise.state != PromiseState::Pending,
+        count <= map[id].promise.callbacks.len(),
+        crate::property_claim::collected_offers_valid(map, notes),
+    ensures
+        ({
+            let (next, more) = crate::handler::spec_drain_callbacks(map, id, count, now, retry_timeout);
+            &&& next.dom() == map.dom()
+            &&& next[id].promise.callbacks == map[id].promise.callbacks.skip(count as int)
+            &&& next[id].promise.state == map[id].promise.state
+            &&& crate::property_claim::collected_offers_valid(next, notes + more)
+            &&& forall|key: Seq<char>| map.contains_key(key) ==>
+                #[trigger] next[key].promise.listeners == map[key].promise.listeners
+        }),
+    decreases count,
+{
+    if count > 0 {
+        lemma_callback_pass_preserves_collected_offers(map, notes, id, (count - 1) as nat, now, retry_timeout);
+        let (prior, collected) = crate::handler::spec_drain_callbacks(map, id, (count - 1) as nat, now, retry_timeout);
+        let obj = prior[id];
+        let awaiter = obj.promise.callbacks[0];
+        let since = match obj.promise.settled_at { Some(t) => t, None => 0 };
+        let consumed = prior.insert(id, crate::state::ObjV {
+            promise: crate::state::PromV { callbacks: obj.promise.callbacks.skip(1), ..obj.promise },
+            ..obj
+        });
+        assert forall|key: Seq<char>| prior.contains_key(key) implies
+            #[trigger] consumed[key].task == prior[key].task by {};
+        assert(crate::property_claim::collected_offers_valid(consumed, notes + collected));
+        lemma_resume_preserves_collected_offers(consumed, notes + collected, awaiter, id, since, now, retry_timeout);
+        lemma_resume_offer_frame(consumed, awaiter, id, since, now, retry_timeout);
+        let (_, more) = crate::handler::spec_resume_offer(consumed, awaiter, id, since, now, retry_timeout);
+        let (next, _) = crate::handler::spec_drain_callbacks(map, id, count, now, retry_timeout);
+        assert forall|key: Seq<char>| map.contains_key(key) implies
+            #[trigger] next[key].promise.listeners == map[key].promise.listeners by {
+            assert(prior[key].promise.listeners == map[key].promise.listeners);
+            assert(consumed[key].promise.listeners == prior[key].promise.listeners);
+            assert(next[key].promise == consumed[key].promise);
+        };
+        assert(notes + (collected + more) =~= (notes + collected) + more);
+        assert(map[id].promise.callbacks.skip(count as int)
+            =~= map[id].promise.callbacks.skip(count as int - 1).skip(1));
+    } else {
+        assert(notes + Seq::<NoteV>::empty() =~= notes);
+        assert(map[id].promise.callbacks.skip(0) =~= map[id].promise.callbacks);
+    }
+}
+
+pub proof fn lemma_resume_preserves_collected_offers(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    notes: Seq<NoteV>,
+    awaiter: Seq<char>,
+    awaited: Seq<char>,
+    since: Time,
+    now: Time,
+    retry_timeout: u64,
+)
+    requires
+        crate::property_claim::collected_offers_valid(map, notes),
+    ensures
+        ({
+            let (next, more) = crate::handler::spec_resume_offer(map, awaiter, awaited, since, now, retry_timeout);
+            crate::property_claim::collected_offers_valid(next, notes + more)
+        }),
+{
+    lemma_resume_offer_frame(map, awaiter, awaited, since, now, retry_timeout);
+    let (next, more) = crate::handler::spec_resume_offer(map, awaiter, awaited, since, now, retry_timeout);
+    assert forall|i: int| 0 <= i < notes.len() implies match #[trigger] notes[i] {
+        NoteV::Execute { id, version } =>
+            next.contains_key(id) && next[id].task is Some
+            && next[id].task.unwrap().state == TaskState::Pending
+            && next[id].task.unwrap().version == version,
+        _ => false,
+    } by {
+        assert(crate::property_claim::collected_offers_valid(map, notes));
+    };
+    if more.len() == 0 {
+        assert(notes + more =~= notes);
+    } else {
+        assert(more =~= seq![more[0]]);
+        assert(notes + more =~= notes.push(more[0]));
+        assert forall|i: int| 0 <= i < notes.len() implies
+            crate::handler::protocol_effect_key(crate::handler::note_effect(#[trigger] notes[i]))
+                != crate::handler::protocol_effect_key(crate::handler::note_effect(more[0])) by {
+            match notes[i] {
+                NoteV::Execute { id, .. } => {
+                    assert(map[id].task.unwrap().state == TaskState::Pending);
+                    assert(id != awaiter);
+                },
+                _ => {},
+            }
+        };
+        assert(crate::handler::note_effect_keys(notes.push(more[0]))
+            =~= crate::handler::note_effect_keys(notes).push(
+                crate::handler::protocol_effect_key(crate::handler::note_effect(more[0]))));
+    }
+}
+
+pub proof fn lemma_resume_offer_frame(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    awaiter: Seq<char>,
+    awaited: Seq<char>,
+    since: Time,
+    now: Time,
+    retry_timeout: u64,
+)
+    ensures
+        ({
+            let (next, notes) = crate::handler::spec_resume_offer(map, awaiter, awaited, since, now, retry_timeout);
+            &&& next.dom() == map.dom()
+            &&& forall|id: Seq<char>| map.contains_key(id) ==>
+                #[trigger] next[id].promise == map[id].promise
+            &&& forall|id: Seq<char>| map.contains_key(id)
+                && map[id].task is Some
+                && map[id].task.unwrap().state == TaskState::Pending ==>
+                    (#[trigger] next[id].task) is Some
+                    && next[id].task.unwrap().state == TaskState::Pending
+                    && next[id].task.unwrap().version == map[id].task.unwrap().version
+            &&& notes.len() <= 1
+            &&& notes.len() == 1 ==> {
+                &&& map.contains_key(awaiter)
+                &&& map[awaiter].task is Some
+                &&& map[awaiter].task.unwrap().state == TaskState::Suspended
+                &&& next[awaiter].task is Some
+                &&& next[awaiter].task.unwrap().state == TaskState::Pending
+                &&& notes[0] == NoteV::Execute { id: awaiter, version: next[awaiter].task.unwrap().version }
+            }
+        }),
+{
+    let (next, notes) = crate::handler::spec_resume_offer(map, awaiter, awaited, since, now, retry_timeout);
+    assert forall|id: Seq<char>| map.contains_key(id) implies
+        #[trigger] next[id].promise == map[id].promise by {
+        if id != awaiter {
+            assert(next[id] == map[id]);
+        }
+    };
+    assert forall|id: Seq<char>| map.contains_key(id)
+        && map[id].task is Some
+        && map[id].task.unwrap().state == TaskState::Pending implies
+            (#[trigger] next[id].task) is Some
+            && next[id].task.unwrap().state == TaskState::Pending
+            && next[id].task.unwrap().version == map[id].task.unwrap().version by {
+        if id != awaiter {
+            assert(next[id] == map[id]);
+        }
+    };
+}
+
 #[cfg(verus_keep_ghost)]
 pub proof fn lemma_apply_changes_append<V>(
     entries: Map<Seq<char>, V>,
@@ -1108,7 +2164,7 @@ proof fn lemma_apply_put_none(store: StoreV, key: String, body: Vec<u8>)
     }
 }
 
-#[verifier::rlimit(10)]
+#[verifier::rlimit(20)]
 proof fn lemma_apply_put_match(
     store: StoreV,
     key: String,
@@ -1149,7 +2205,7 @@ proof fn lemma_apply_put_match(
     }
 }
 
-#[verifier::rlimit(10)]
+#[verifier::rlimit(40)]
 proof fn lemma_apply_append(
     store: StoreV,
     key: String,

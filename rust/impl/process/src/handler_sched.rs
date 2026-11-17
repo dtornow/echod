@@ -33,169 +33,49 @@ use crate::verified::flight_spec::*;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::document::{pend_v, spec_body_deadline, DocumentBodyV};
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_handler_sched_spec_loaded_schedule as spec_loaded_schedule,
+    production_handler_sched_spec_run_schedule as spec_run_schedule,
+    production_handler_sched_spec_schedule_row as spec_schedule_row,
+    production_handler_sched_spec_fire_decide as spec_fire_decide,
+    production_handler_sched_spec_fire_idle as spec_fire_idle,
+    production_handler_sched_spec_fire_claim as spec_fire_claim,
+    production_handler_sched_spec_fire_load_origin as spec_fire_load_origin,
+    production_handler_sched_spec_fire_run as spec_fire_run,
+    production_handler_sched_spec_fire_advance as spec_fire_advance,
+};
+
 verus! {
 
 /// The store answered a load of schedule `id`, read in full: not cached.
-#[verifier::opaque]
-pub open spec fn spec_loaded_schedule(s: S, id: Seq<char>, outcome: StoreRes) -> (S, Result<WorkingSpec, Seq<char>>) {
-    let key = spec_sched_key(s.keys.prefix, id);
-    let target = crate::target::spec_name(crate::target::TargetSpec::Schedule(id));
-    match outcome {
-        StoreRes::Get { result: Ok(None) } => (s, Ok(spec_working(target, key, document::spec_empty_schedule(id), None))),
-        StoreRes::Get { result: Ok(Some((bytes, etag))) } => match document::spec_decode_schedule(bytes@) {
-            Ok(loaded) => (s, Ok(spec_working(target, key, loaded, Some(etag.deep_view())))),
-            Err(e) => (s, Err(e)),
-        },
-        StoreRes::Get { result: Err(e) } => (s, Err(spec_error_text(e.deep_view()))),
-        _ => (s, Err(spec_error_text(spec_unexpected()))),
-    }
-}
 
-#[verifier::opaque]
-pub open spec fn spec_run_schedule(s: S, f: FlightSpec, w: WorkingSpec) -> S {
-    let (s, commit, done) = spec_decide(s, f.work, w);
-    let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-    match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::Schedule { commit, done }, ..f }),
-        ProgressSpec::Done(fired) => spec_committed(s, f, done, fired),
-        ProgressSpec::Failed(e) => spec_commit_failed(s, f, e),
-    }
-}
+
+
 
 /// The schedule's row, if the document holds one.
-pub open spec fn spec_schedule_row(doc: DocumentBodyV) -> Option<crate::verified::ScheduleSpec> {
-    match doc {
-        DocumentBodyV::Schedule(Some(row)) => Some(row.deep_view()),
-        _ => None,
-    }
-}
+
 
 /// The schedule is loaded: its due occurrence, if any, as a promise in the
 /// occurrence's origin, then the schedule advanced, each its own commit, in
 /// that order. A schedule not due, or gone, is rewritten unchanged so the
 /// key can be collected behind the write.
-#[verifier::opaque]
-pub open spec fn spec_fire_decide(s: S, f: FlightSpec, ws: WorkingSpec) -> S {
-    match f.work {
-        WorkSpec::Fire { fired, now, .. } => {
-            let t1 = document::spec_clamp_now(document::spec_loaded_committed_at(ws.loaded), now);
-            let body = document::spec_loaded_body(ws.loaded);
-            let (advanced, _response, born, _notes) = spec_step(AJob::Fire, body, t1, s.cfg.retry_timeout, 0);
-            let due = match (spec_schedule_row(body), born.len() > 0) {
-                (Some(row), true) => Some((row, born.last())),
-                _ => None,
-            };
-            match due {
-                None => spec_fire_idle(s, f, ws, t1, fired),
-                Some((row, pending)) => {
-                    let next = match spec_schedule_row(advanced) {
-                        Some(c) => c.next_run_at,
-                        None => pending.at,
-                    };
-                    let origin = echod_types::origin(pending.promise);
-                    spec_fire_claim(s, f, FireCtxSpec { ws, row, advanced, pending, t1, origin, next })
-                },
-            }
-        },
-        _ => spec_fail(s, f, "not a fire"@),
-    }
-}
+
 
 /// Nothing due: a sweep of the schedule's document, rewritten unchanged.
-#[verifier::opaque]
-pub open spec fn spec_fire_idle(s: S, f: FlightSpec, ws: WorkingSpec, t1: u64, fired: Option<AFired>) -> S {
-    let f = FlightSpec { idle: true, ..f };
-    let body = document::spec_loaded_body(ws.loaded);
-    let deadline = spec_body_deadline(body);
-    let s = spec_note(s, NoteSpec::SweepBegin { flight: f.id, target: ws.target, now: t1 });
-    let (s, commit) = spec_commit_new(s, ws, body, deadline, t1, fired);
-    let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-    match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireIdle { commit }, ..f }),
-        ProgressSpec::Done(fired) => {
-            let s = spec_note(s, NoteSpec::SweepEnd { flight: f.id, committed: true });
-            let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
-            spec_finish(s, f, Ok(fired))
-        },
-        ProgressSpec::Failed(e) => {
-            let s = spec_note(s, NoteSpec::SweepEnd { flight: f.id, committed: false });
-            spec_commit_failed(s, f, e)
-        },
-    }
-}
+
 
 /// The origin's slot, now or when it frees.
-#[verifier::opaque]
-pub open spec fn spec_fire_claim(s: S, f: FlightSpec, ctx: FireCtxSpec) -> S {
-    let origin = ctx.origin;
-    let slot = spec_slot_of(s, origin);
-    if slot.busy is Some {
-        let s = spec_with_slot(s, origin, SlotSpec { queue: slot.queue.push(QueuedSpec::Waiter(f.id)), ..slot });
-        spec_inflight(s, FlightSpec { phase: PhaseSpec::FireWaitingOrigin(ctx), ..f })
-    } else {
-        let s = spec_with_slot(s, origin, SlotSpec { busy: Some(f.id), ..slot });
-        spec_fire_load_origin(s, f, ctx)
-    }
-}
 
-#[verifier::opaque]
-pub open spec fn spec_fire_load_origin(s: S, f: FlightSpec, ctx: FireCtxSpec) -> S {
-    let (s, op, revalidating) = spec_load_origin(s, f.id, ctx.origin);
-    spec_inflight(s, FlightSpec { phase: PhaseSpec::FireLoadingOrigin { op, revalidating, ctx }, ..f })
-}
+
+
 
 /// Both documents loaded: the model's `create_occurrence` on the origin's
 /// document, committed first.
-#[verifier::opaque]
-pub open spec fn spec_fire_run(s: S, f: FlightSpec, ctx: FireCtxSpec, wo: WorkingSpec) -> S {
-    let t = document::spec_clamp_now(document::spec_loaded_committed_at(wo.loaded), ctx.t1);
-    let (after, _r, _b, _n) = spec_step(AJob::Occurrence(ctx.pending), document::spec_loaded_body(wo.loaded), t, s.cfg.retry_timeout, 0);
-    let deadline = spec_body_deadline(after);
-    let s = spec_note(s, NoteSpec::FireBegin { flight: f.id, origin: ctx.origin, now: t, row: ctx.row, at: ctx.pending.at, promise_id: ctx.pending.promise, next: ctx.next });
-    let (s, commit) = spec_commit_new(s, wo, after, deadline, t, None);
-    let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-    match p {
-        ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireOrigin { commit, ctx, t }, ..f }),
-        ProgressSpec::Done(_) => {
-            let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: true });
-            let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
-            let s = spec_release(s, ctx.origin);
-            spec_fire_advance(s, f, ctx, t)
-        },
-        ProgressSpec::Failed(e) => {
-            let s = spec_note(s, NoteSpec::FireEnd { flight: f.id, committed: false });
-            let s = spec_forget_origin(s, ctx.origin);
-            let s = spec_release(s, ctx.origin);
-            spec_commit_failed(s, f, e)
-        },
-    }
-}
+
 
 /// Then the schedule, advanced, with the key fired.
-#[verifier::opaque]
-pub open spec fn spec_fire_advance(s: S, f: FlightSpec, ctx: FireCtxSpec, t: u64) -> S {
-    match f.work {
-        WorkSpec::Fire { schedule, fired, .. } => {
-            let s = spec_note(s, NoteSpec::AdvanceBegin { flight: f.id, schedule, now: t, at: ctx.pending.at, next: ctx.next });
-            let deadline = spec_body_deadline(ctx.advanced);
-            let (s, commit) = spec_commit_new(s, ctx.ws, ctx.advanced, deadline, t, fired);
-            let (s, commit, p) = spec_commit_advance(s, f.id, commit, None);
-            match p {
-                ProgressSpec::Issued => spec_inflight(s, FlightSpec { phase: PhaseSpec::FireSchedule { commit }, ..f }),
-                ProgressSpec::Done(fired) => {
-                    let s = spec_note(s, NoteSpec::AdvanceEnd { flight: f.id, committed: true });
-                    let s = spec_note(s, NoteSpec::Commit(CommitOutcome::Committed));
-                    spec_finish(s, f, Ok(fired))
-                },
-                ProgressSpec::Failed(e) => {
-                    let s = spec_note(s, NoteSpec::AdvanceEnd { flight: f.id, committed: false });
-                    spec_commit_failed(s, f, e)
-                },
-            }
-        },
-        _ => spec_fail(s, f, "not a fire"@),
-    }
-}
+
 
 /// The schedule's row, if the document holds one.
 pub fn schedule_row(doc: &DocumentBody) -> (r: Option<crate::verified::Schedule>)

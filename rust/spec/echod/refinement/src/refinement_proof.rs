@@ -1,4 +1,4 @@
-//! Proof of Echod concrete-to-abstract trace refinement.
+//! Component proofs and the unfinished global trace-refinement proof.
 //!
 //! All interpretation, handler-agreement, work-agreement, relation, and
 //! forward-simulation machinery is private to this module.
@@ -10,6 +10,308 @@ use echod_types::spec_deadline_bounded;
 
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::Config as ConcreteConfig;
+
+mod frames {
+use vstd::prelude::*;
+use echod_abstract_spec::state::StoreV;
+use echod_concrete_spec::state::DocumentBodyV;
+#[cfg(verus_keep_ghost)]
+use echod_abstract_spec::handler::{spec_install_origin, spec_install_schedule};
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::spec_starts;
+#[cfg(verus_keep_ghost)]
+use super::interpretation::{doc_rel, others_kept, origin_prefix, schedule_prefix, lemma_starts_split};
+
+verus! {
+pub(crate) proof fn install_origin_frames_live_documents(
+    live: StoreV, evaluated: StoreV, workflow: Seq<char>, document: DocumentBodyV,
+)
+    requires doc_rel(origin_prefix() + workflow, document, evaluated),
+    ensures
+        doc_rel(origin_prefix() + workflow, document, spec_install_origin(live, evaluated, workflow)),
+        others_kept(origin_prefix() + workflow, live, spec_install_origin(live, evaluated, workflow)),
+{
+    broadcast use vstd::seq_lib::group_seq_properties;
+    echod_abstract_spec::property_proof::lemma_install_origin_frame(live, evaluated, workflow);
+    let installed = spec_install_origin(live, evaluated, workflow);
+    assert((origin_prefix() + workflow).skip(2) =~= workflow);
+    assert forall|key: Seq<char>, doc: DocumentBodyV|
+        key != origin_prefix() + workflow && doc_rel(key, doc, live)
+        implies #[trigger] doc_rel(key, doc, installed) by {
+        if spec_starts(key, origin_prefix()) {
+            lemma_starts_split(key, origin_prefix());
+            assert(key =~= origin_prefix() + key.skip(2));
+            assert(key.skip(2) != workflow);
+        }
+    }
+}
+
+pub(crate) proof fn install_schedule_frames_live_documents(
+    live: StoreV, evaluated: StoreV, id: Seq<char>, document: DocumentBodyV,
+)
+    requires doc_rel(schedule_prefix() + id, document, evaluated),
+    ensures
+        doc_rel(schedule_prefix() + id, document, spec_install_schedule(live, evaluated, id)),
+        others_kept(schedule_prefix() + id, live, spec_install_schedule(live, evaluated, id)),
+{
+    broadcast use vstd::seq_lib::group_seq_properties;
+    echod_abstract_spec::property_proof::lemma_install_schedule_frame(live, evaluated, id);
+    let installed = spec_install_schedule(live, evaluated, id);
+    assert((schedule_prefix() + id).skip(2) =~= id);
+    assert forall|key: Seq<char>, doc: DocumentBodyV|
+        key != schedule_prefix() + id && doc_rel(key, doc, live)
+        implies #[trigger] doc_rel(key, doc, installed) by {
+        if spec_starts(key, schedule_prefix()) {
+            lemma_starts_split(key, schedule_prefix());
+            assert(key =~= schedule_prefix() + key.skip(2));
+            assert(key.skip(2) != id);
+        }
+    }
+}
+}
+}
+
+mod storage {
+use vstd::prelude::*;
+use echod_concrete_spec::{StoreReq, StoreRes, Read};
+use echod_concrete_spec::state::StoreV;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::{spec_apply, spec_find, spec_etag, production_document_spec_decode_workflow, production_document_spec_decode_schedule};
+#[cfg(verus_keep_ghost)]
+use crate::{accepted_document_validator_body, document_validator_separation};
+
+verus! {
+pub proof fn conditional_read_uses_captured_body(store: StoreV, request: StoreReq, captured: Seq<u8>)
+    requires
+        request is GetIfNoneMatch,
+        document_validator_separation(store, request, captured),
+        spec_apply(store, request).1 == (StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }),
+    ensures
+        spec_apply(store, request).0 == store,
+        accepted_document_validator_body(store, request) == Some(captured),
+        match request {
+            StoreReq::GetIfNoneMatch { key, .. } => {
+                let i = spec_find(store.entries, key@, 0).unwrap();
+                &&& spec_find(store.entries, key@, 0) is Some
+                &&& store.entries[i].body == captured
+                &&& production_document_spec_decode_workflow(store.entries[i].body)
+                    == production_document_spec_decode_workflow(captured)
+                &&& production_document_spec_decode_schedule(store.entries[i].body)
+                    == production_document_spec_decode_schedule(captured)
+            },
+            _ => false,
+        },
+{
+}
+
+pub proof fn conditional_rewrite_uses_captured_body(store: StoreV, request: StoreReq, captured: Seq<u8>)
+    requires
+        request is PutIfMatch,
+        document_validator_separation(store, request, captured),
+        match spec_apply(store, request).1 { StoreRes::PutIfMatch { result: Ok(_) } => true, _ => false },
+    ensures
+        accepted_document_validator_body(store, request) == Some(captured),
+        match request {
+            StoreReq::PutIfMatch { key, body, .. } => {
+                &&& spec_find(store.entries, key@, 0) is Some
+                &&& store.entries[spec_find(store.entries, key@, 0).unwrap()].body == captured
+                &&& spec_apply(store, request).1 == (StoreRes::PutIfMatch { result: Ok(spec_etag(body@)) })
+            },
+            _ => false,
+        },
+{
+}
+
+pub proof fn conditional_append_uses_captured_body(store: StoreV, request: StoreReq, captured: Seq<u8>)
+    requires
+        request is AppIfMatch,
+        document_validator_separation(store, request, captured),
+        match spec_apply(store, request).1 { StoreRes::AppIfMatch { result: Ok(_) } => true, _ => false },
+    ensures
+        store.appendable,
+        accepted_document_validator_body(store, request) == Some(captured),
+        match request {
+            StoreReq::AppIfMatch { key, body, offset, .. } => {
+                &&& spec_find(store.entries, key@, 0) is Some
+                &&& store.entries[spec_find(store.entries, key@, 0).unwrap()].body == captured
+                &&& captured.len() == offset
+                &&& spec_apply(store, request).1 == (StoreRes::AppIfMatch { result: Ok(spec_etag(captured + body@)) })
+            },
+            _ => false,
+        },
+{
+}
+
+pub proof fn create_success_requires_absence(store: StoreV, request: StoreReq)
+    requires
+        request is PutIfNoneMatch,
+        match spec_apply(store, request).1 { StoreRes::PutIfNoneMatch { result: Ok(_) } => true, _ => false },
+    ensures match request {
+        StoreReq::PutIfNoneMatch { key, .. } => spec_find(store.entries, key@, 0) is None,
+        _ => false,
+    },
+{
+}
+
+pub proof fn same_body_suffices(store: StoreV, request: StoreReq, captured: Seq<u8>)
+    requires accepted_document_validator_body(store, request) == Some(captured),
+    ensures document_validator_separation(store, request, captured),
+{
+}
+}
+}
+
+mod network {
+use vstd::prelude::*;
+use rover_spec::rover::RoverSpec as transport;
+use transport::{Spec, Proc as _, State, Label, Execution};
+use rover_spec::rover::comm::{Envelope, ProcessEvent};
+#[cfg(verus_keep_ghost)]
+use crate::network_permutation as equivalent;
+
+verus! {
+proof fn member<T>(left: Seq<T>, right: Seq<T>, value: T)
+    requires left.to_multiset() == right.to_multiset(), left.contains(value),
+    ensures right.contains(value),
+{
+    vstd::seq_lib::to_multiset_contains(left, value);
+    vstd::seq_lib::to_multiset_contains(right, value);
+}
+
+proof fn append<T>(left: Seq<T>, right: Seq<T>, suffix: Seq<T>)
+    requires left.to_multiset() == right.to_multiset(),
+    ensures (left + suffix).to_multiset() == (right + suffix).to_multiset(),
+{
+    vstd::seq_lib::lemma_multiset_commutative(left, suffix);
+    vstd::seq_lib::lemma_multiset_commutative(right, suffix);
+}
+
+proof fn event<M: Spec>(left: State<M>, right: State<M>, recipient: M::Pid, event: ProcessEvent<M::Pid, M::Message>)
+    requires equivalent(left, right), transport::event_valid(left, recipient, event),
+    ensures transport::event_valid(right, recipient, event),
+{
+    if let ProcessEvent::Receive { sender, message } = event {
+        let envelope = Envelope { sender, recipient, message };
+        assert(left.network.contains(envelope));
+        member(left.network, right.network, envelope);
+    }
+}
+
+pub proof fn step<M: Spec>(
+    model: M, config: M::Config, left: State<M>, right: State<M>,
+    label: Label<M::Pid, M::Message>, left_next: State<M>,
+) -> (right_next: State<M>)
+    requires equivalent(left, right), left.step(model, config, label, left_next),
+    ensures
+        right.step(model, config, label, right_next),
+        equivalent(left_next, right_next),
+{
+    match label {
+        Label::Input { recipient, at, message } => {
+            let envelope = Envelope { sender: model.outside(), recipient, message };
+            vstd::seq_lib::to_multiset_build(left.network, envelope);
+            vstd::seq_lib::to_multiset_build(right.network, envelope);
+            transport::inject(right, model.outside(), recipient, at, message)
+        },
+        Label::Process { process, at, event: received, send } => {
+            let (i, j) = choose|i: int, j: int|
+                #![trigger left.process[i].1.on_event(config, at, received)[j]]
+            {
+                &&& 0 <= i < left.process.len()
+                &&& left.process[i].0 == process
+                &&& {
+                    let outcomes = left.process[i].1.on_event(config, at, received);
+                    &&& 0 <= j < outcomes.len()
+                    &&& outcomes[j].send == send
+                    &&& left_next == transport::land(left, i, process, at, outcomes[j])
+                }
+            };
+            event(left, right, process, received);
+            let outcome = left.process[i].1.on_event(config, at, received)[j];
+            transport::process_step(model, config, right, i, at, received, j);
+            append(left.network, right.network, transport::envelopes(process, outcome.send));
+            transport::land(right, i, process, at, outcome)
+        },
+        Label::Outside { sender, at, message } => {
+            let envelope = Envelope { sender, recipient: model.outside(), message };
+            assert(left.network.contains(envelope));
+            member(left.network, right.network, envelope);
+            transport::observe_outside(right, at)
+        },
+        Label::Clock { at } => transport::observe_outside(right, at),
+    }
+}
+
+pub proof fn execution<M: Spec>(
+    model: M, config: M::Config, left: State<M>, right: State<M>, original: Execution<M>,
+) -> (matching: Execution<M>)
+    requires equivalent(left, right), transport::legal(model, config, left, original),
+    ensures
+        transport::legal(model, config, right, matching),
+        matching.len() == original.len(),
+        matching.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0)
+            == original.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0),
+        transport::trace::<M>(matching) == transport::trace::<M>(original),
+        forall|i: int| 0 <= i < original.len() ==> equivalent(#[trigger] original[i].1, matching[i].1),
+    decreases original.len(),
+{
+    broadcast use vstd::seq_lib::group_seq_properties;
+    if original.len() == 0 {
+        Seq::empty()
+    } else {
+        let prefix = original.drop_last();
+        assert(prefix.len() + 1 == original.len());
+        assert(transport::legal(model, config, left, prefix)) by {
+            assert forall|i: int| 0 <= i < prefix.len() implies
+                #[trigger] transport::before(left, prefix, i).step(model, config, prefix[i].0, prefix[i].1) by {
+                assert(prefix[i] == original[i]);
+                if i > 0 { assert(prefix[i - 1] == original[i - 1]); }
+                assert(transport::before(left, original, i).step(model, config, original[i].0, original[i].1));
+                assert(transport::before(left, prefix, i) == transport::before(left, original, i));
+            }
+        }
+        let prior = execution(model, config, left, right, prefix);
+        let last = original.len() as int - 1;
+        let left_before = transport::before(left, original, last);
+        let right_before = if prior.len() == 0 { right } else { prior.last().1 };
+        if last > 0 {
+            assert(prefix[last - 1] == original[last - 1]);
+        }
+        let next = step(model, config, left_before, right_before, original[last].0, original[last].1);
+        let result = prior.push((original[last].0, next));
+        assert(transport::legal(model, config, right, result)) by {
+            assert forall|i: int| 0 <= i < result.len() implies
+                #[trigger] transport::before(right, result, i).step(model, config, result[i].0, result[i].1) by {
+                if i < last {
+                    assert(result[i] == prior[i]);
+                    if i > 0 { assert(result[i - 1] == prior[i - 1]); }
+                    assert(transport::before(right, prior, i).step(model, config, prior[i].0, prior[i].1));
+                    assert(transport::before(right, result, i) == transport::before(right, prior, i));
+                } else {
+                    assert(transport::before(right, result, i) == right_before);
+                }
+            }
+        }
+        assert forall|i: int| 0 <= i < original.len() implies
+            equivalent(#[trigger] original[i].1, result[i].1) by {
+            if i < last { assert(prefix[i] == original[i]); }
+        }
+        assert(result.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0)
+            =~= original.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0)) by {
+            assert forall|i: int| 0 <= i < original.len() implies result[i].0 == original[i].0 by {
+                if i < last {
+                    assert(prefix[i] == original[i]);
+                    assert(prior.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0)[i]
+                        == prefix.map_values(|entry: (Label<M::Pid, M::Message>, State<M>)| entry.0)[i]);
+                }
+            }
+        }
+        assert(result.drop_last() =~= prior);
+        result
+    }
+}
+}
+}
 
 mod interpretation {
 //! A concrete document, read as part of the abstract store.
@@ -5565,24 +5867,33 @@ pub(crate) proof fn lemma_retry_due(
 
 /// A settled promise with a callback: both sides drop the callback and
 /// resume the awaiter.
-pub(crate) proof fn lemma_callback_due(
+pub(crate) proof fn lemma_callback_transition(
     config: AbstractConfig,
     key: Seq<char>,
     o: Seq<char>,
     map: Map<Seq<char>, ObjV>,
-    state: Proc,
+    s: AStore,
     now: Time,
     id: Seq<char>,
 )
     requires
-        due_context(key, o, map, state.store, id),
-        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
+        due_context(key, o, map, s, id),
         map[id].promise.state != PromiseState::Pending,
         map[id].promise.callbacks.len() > 0,
-    ensures
-        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
+    ensures ({
+        let response = spec_callback(s, id, map[id].promise.callbacks[0], now);
+        let (next, notes) = spec_step_object(map, id, now, config.retry_timeout);
+        &&& !response.not_due
+        &&& response.work.len() == 0
+        &&& response.send.len() == 0
+        &&& notes.len() == 0
+        &&& next.dom() == map.dom()
+        &&& origin_rel(next, o, response.next)
+        &&& changed_within(s, response.next, o)
+        &&& finite_store(response.next)
+        &&& response.next.schedules == s.schedules
+    }),
 {
-    let s = state.store;
     let obj = map[id];
     let p = s.promises[id];
     let ta = abstract_task(s, id);
@@ -5600,9 +5911,6 @@ pub(crate) proof fn lemma_callback_due(
         None => 0,
     };
     let work = InternalV::Callback { awaited: id, awaiter };
-    let results = spec_run_timeout(config, state, now);
-    lemma_work_offered(config, state, now, work);
-    assert(offered(config, state, now, work, results));
     // The awaited side.
     assert(spec_project_promise(p, now) == p);
     let q = PromiseV { callbacks: p.callbacks.remove(awaiter), ..p };
@@ -5638,7 +5946,6 @@ pub(crate) proof fn lemma_callback_due(
     lemma_one_changed(map, o, s, id, obj1, q, ta, n1);
     let map2 = spec_resume(map1, awaiter, id, since, now);
     assert(spec_step_object(map, id, now, config.retry_timeout) == (map2, Seq::<NoteV>::empty()));
-    lemma_sends_none();
     // The awaiter side.
     let n = AStore { promises: s.promises.insert(id, q), tasks: response.next.tasks, ..s };
     assert(response.next == n);
@@ -5650,7 +5957,6 @@ pub(crate) proof fn lemma_callback_due(
         assert(awaiter != id);
         assert(!map1.contains_key(awaiter));
         assert(map2 == map1);
-        lemma_origin_matched(config, key, o, map, state, now, work, map1, Seq::empty());
     } else if awaiter == id {
         let proj = spec_project_obj(obj1, now);
         assert(proj.promise.state != PromiseState::Pending);
@@ -5672,7 +5978,6 @@ pub(crate) proof fn lemma_callback_due(
         } else {
             assert(n.tasks == tasks0);
         }
-        lemma_origin_matched(config, key, o, map, state, now, work, map1, Seq::empty());
     } else {
         let objw = map[awaiter];
         let pw = s.promises[awaiter];
@@ -5689,7 +5994,6 @@ pub(crate) proof fn lemma_callback_due(
                 assert(!s.tasks.contains_key(awaiter));
                 assert(n.tasks == tasks0);
                 assert(map2 == map1);
-                lemma_origin_matched(config, key, o, map, state, now, work, map1, Seq::empty());
             },
             Some(tp) => {
                 assert(taw is Some);
@@ -5733,12 +6037,10 @@ pub(crate) proof fn lemma_callback_due(
                         lemma_within_two(s, n, id, awaiter);
                         assert(n.tasks.dom() == s.tasks.dom().insert(awaiter));
                         assert(finite_store(n));
-                        lemma_origin_matched(config, key, o, map, state, now, work, map2, Seq::empty());
                     },
                     TaskState::Fulfilled => {
                         assert(n.tasks == tasks0);
                         assert(map2 == map1);
-                        lemma_origin_matched(config, key, o, map, state, now, work, map1, Seq::empty());
                     },
                     _ => {
                         assert(objw.promise.state == PromiseState::Pending);
@@ -5746,7 +6048,6 @@ pub(crate) proof fn lemma_callback_due(
                             assert(t.resumes.contains(id));
                             assert(n.tasks == tasks0);
                             assert(map2 == map1);
-                            lemma_origin_matched(config, key, o, map, state, now, work, map1, Seq::empty());
                         } else {
                             assert(!t.resumes.contains(id));
                             let u = TaskV { resumes: t.resumes.push(id), ..t };
@@ -5766,36 +6067,64 @@ pub(crate) proof fn lemma_callback_due(
                             lemma_within_two(s, n, id, awaiter);
                             assert(n.tasks.dom() == s.tasks.dom().insert(awaiter));
                             assert(finite_store(n));
-                            lemma_origin_matched(config, key, o, map, state, now, work, map2, Seq::empty());
                         }
                     },
                 }
             },
         }
     }
+    assert(map2.dom() =~= map.dom());
 }
 
-/// A settled promise with a listener: both sides drop the listener and tell
-/// the address.
-pub(crate) proof fn lemma_listener_due(
-    config: AbstractConfig,
-    key: Seq<char>,
-    o: Seq<char>,
-    map: Map<Seq<char>, ObjV>,
-    state: Proc,
-    now: Time,
-    id: Seq<char>,
+pub(crate) proof fn lemma_callback_due(
+    config: AbstractConfig, key: Seq<char>, o: Seq<char>, map: Map<Seq<char>, ObjV>,
+    state: Proc, now: Time, id: Seq<char>,
 )
     requires
         due_context(key, o, map, state.store, id),
         spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
         map[id].promise.state != PromiseState::Pending,
-        map[id].promise.callbacks.len() == 0,
-        map[id].promise.listeners.len() > 0,
+        map[id].promise.callbacks.len() > 0,
     ensures
         due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
 {
-    let s = state.store;
+    lemma_callback_transition(config, key, o, map, state.store, now, id);
+    let work = InternalV::Callback { awaited: id, awaiter: map[id].promise.callbacks[0] };
+    lemma_work_offered(config, state, now, work);
+    lemma_sends_none();
+    lemma_origin_matched(config, key, o, map, state, now, work,
+        spec_step_object(map, id, now, config.retry_timeout).0, Seq::empty());
+}
+
+/// A settled promise with a listener: both sides drop the listener and tell
+/// the address.
+pub(crate) proof fn lemma_listener_transition(
+    config: AbstractConfig,
+    key: Seq<char>,
+    o: Seq<char>,
+    map: Map<Seq<char>, ObjV>,
+    s: AStore,
+    now: Time,
+    id: Seq<char>,
+)
+    requires
+        due_context(key, o, map, s, id),
+        map[id].promise.state != PromiseState::Pending,
+        map[id].promise.callbacks.len() == 0,
+        map[id].promise.listeners.len() > 0,
+    ensures ({
+        let response = spec_listener(s, id, map[id].promise.listeners[0], now);
+        let (next, notes) = spec_step_object(map, id, now, config.retry_timeout);
+        &&& !response.not_due
+        &&& response.work.len() == 0
+        &&& next.dom() == map.dom()
+        &&& origin_rel(next, o, response.next)
+        &&& changed_within(s, response.next, o)
+        &&& finite_store(response.next)
+        &&& response.next.schedules == s.schedules
+        &&& sends_of(response.send) == note_sends(notes)
+    }),
+{
     let obj = map[id];
     let p = s.promises[id];
     let ta = abstract_task(s, id);
@@ -5808,9 +6137,6 @@ pub(crate) proof fn lemma_listener_due(
     lemma_contains_to_set(listeners, address);
     assert(p.listeners.contains(address));
     let work = InternalV::Listener { awaited: id, address };
-    let results = spec_run_timeout(config, state, now);
-    lemma_work_offered(config, state, now, work);
-    assert(offered(config, state, now, work, results));
     assert(spec_project_promise(p, now) == p);
     lemma_string_view(id);
     assert(c_string(id) == a_string(id));
@@ -5847,7 +6173,27 @@ pub(crate) proof fn lemma_listener_due(
     let notes = seq![NoteV::Unblock { address, promise: rec }];
     assert(spec_step_object(map, id, now, config.retry_timeout) == (map.insert(id, obj2), notes));
     lemma_sends_unblock(address, rec);
-    lemma_origin_matched(config, key, o, map, state, now, work, map.insert(id, obj2), notes);
+    assert(map.insert(id, obj2).dom() =~= map.dom());
+}
+
+pub(crate) proof fn lemma_listener_due(
+    config: AbstractConfig, key: Seq<char>, o: Seq<char>, map: Map<Seq<char>, ObjV>,
+    state: Proc, now: Time, id: Seq<char>,
+)
+    requires
+        due_context(key, o, map, state.store, id),
+        spec_due_id(map, c_sorted(map.dom()), now) == Some(id),
+        map[id].promise.state != PromiseState::Pending,
+        map[id].promise.callbacks.len() == 0,
+        map[id].promise.listeners.len() > 0,
+    ensures
+        due_agrees(config, key, DocumentBodyV::Workflow(map), state, now),
+{
+    lemma_listener_transition(config, key, o, map, state.store, now, id);
+    let work = InternalV::Listener { awaited: id, address: map[id].promise.listeners[0] };
+    lemma_work_offered(config, state, now, work);
+    let (next, notes) = spec_step_object(map, id, now, config.retry_timeout);
+    lemma_origin_matched(config, key, o, map, state, now, work, next, notes);
 }
 
 /// The due step of an origin document.
@@ -7829,7 +8175,9 @@ pub(crate) proof fn lemma_queue_offers(config: AbstractConfig, state: AProc, now
     assert(results == queued + self::derived(config, state, now));
     assert(results[j] == queued[j]);
     assert(results.len() > 0);
-    assert(state.on_event(config, now, ProcessEvent::Timeout) == results);
+    let detached = echod_abstract_spec::handler::spec_detached_queue(state, 0);
+    assert(state.on_event(config, now, ProcessEvent::Timeout) == results + detached);
+    assert((results + detached)[j] == results[j]);
     j
 }
 
@@ -7845,8 +8193,9 @@ pub(crate) proof fn lemma_timeout_offers(config: AbstractConfig, state: AProc, n
     ensures
         ({
             let outcomes = state.on_event(config, now, ProcessEvent::Timeout);
-            &&& outcomes == spec_run_timeout(config, state, now)
+            &&& outcomes == spec_run_timeout(config, state, now) + echod_abstract_spec::handler::spec_detached_queue(state, 0)
             &&& 0 <= j < outcomes.len()
+            &&& outcomes[j] == spec_run_timeout(config, state, now)[j]
         }),
 {
 }
@@ -10909,10 +11258,10 @@ pub(crate) proof fn lemma_initial(fleet: ConcreteConfig, config: AbstractConfig)
     assert(cw.process == spec_world(fleet));
     assert(cw.network =~= Seq::<Envelope<CPid, CMessage>>::empty());
     assert(cw.now == 0);
-    assert(aw.process == seq![(APid::Service, AProc { store: empty_store(), pending: Seq::empty() })]);
+    assert(aw.process == seq![(APid::Service, AProc { store: empty_store(), pending: Seq::empty(), detached: Seq::empty() })]);
     assert(aw.network =~= Seq::<Envelope<APid, AMessage>>::empty());
     assert(single(aw));
-    assert(astate(aw) == AProc { store: empty_store(), pending: Seq::empty() });
+    assert(astate(aw) == AProc { store: empty_store(), pending: Seq::empty(), detached: Seq::empty() });
     assert(empty_store().promises.dom() =~= Set::<Seq<char>>::empty());
     assert(empty_store().tasks.dom() =~= Set::<Seq<char>>::empty());
     assert(empty_store().schedules.dom() =~= Set::<Seq<char>>::empty());
@@ -11100,7 +11449,1078 @@ pub proof fn refinement_proof(concrete_config: ConcreteConfig)
     simulation::prove_refinement(concrete_config);
 }
 
+pub proof fn public_admission_proof(target: echod_concrete_spec::state::ProductionTargetV, request: echod_types::Request)
+    ensures crate::public_admission_agrees(target, request),
+{}
+
+pub proof fn document_time_proof(committed: u64, admitted: u64)
+    ensures
+        echod_concrete_spec::handler::production_document_spec_clamp_now(committed, admitted)
+            == crate::effective_document_time(admitted, committed),
+        crate::effective_document_time(admitted, committed) >= admitted,
+        crate::effective_document_time(admitted, committed) >= committed,
+{}
+
+pub proof fn work_admission_proof(
+    state: echod_concrete_spec::state::ProductionStateV,
+    call: echod_concrete_spec::state::ProductionCallV,
+)
+    ensures crate::public_work_time_agrees(state, call),
+{
+    reveal(echod_concrete_spec::handler::production_handler_spec_request);
+}
+
+pub proof fn timed_admission_proof(
+    target: echod_concrete_spec::state::ProductionTargetV,
+    call: echod_types::protocol::TimedCall, fleet_at: u64,
+)
+    ensures crate::timed_admission_matches(target, call, fleet_at),
+{
+    public_admission_proof(target, call.call.request);
+}
+
+pub proof fn detached_submission_time_proof(
+    state: echod_concrete_spec::state::ProductionStateV,
+    flight: echod_concrete_spec::state::ProductionFlightV,
+    done: echod_concrete_spec::state::ProductionDoneV,
+    fired: echod_types::ProductionFired,
+)
+    ensures crate::detached_submission_preserves_saved_time(state, flight, done, fired),
+{
+    reveal(echod_concrete_spec::handler::production_handler_docs_spec_committed);
+}
+
 } // verus!
+
+#[cfg(verus_keep_ghost)]
+mod timed_handlers {
+use vstd::prelude::*;
+use echod_types::{Request, Response, TaskFenceInnerRes, TaskFenceRes};
+use echod_abstract_spec::state::{TimedWorkV, TimedStage, StoreV};
+use echod_abstract_spec::rover::Config;
+use echod_abstract_spec::handler::{spec_timed_request, spec_timed_evaluation_time, spec_timed_handler_outcomes};
+use echod_concrete_spec::state::DocumentBodyV;
+use echod_concrete_spec::handler::{spec_handle, spec_key};
+use super::interpretation::{doc_rel, finite_store, others_kept, origin_rel, changed_within, abstract_task};
+use echod_concrete_spec::handler::{spec_project_keys, spec_project_offers, spec_project_due_object};
+use echod_abstract_spec::handler::{spec_project_timed_keys, spec_project_timed_key};
+
+verus! {
+pub(crate) proof fn lemma_join_batch_messages(
+    a: Seq<echod_types::DispatchV>, b: Seq<echod_types::DispatchV>,
+    na: Seq<echod_concrete_spec::state::NoteV>, nb: Seq<echod_concrete_spec::state::NoteV>,
+)
+    requires
+        super::work::sends_of(a).to_multiset() == super::relation::note_sends(na).to_multiset(),
+        super::work::sends_of(b).to_multiset() == super::relation::note_sends(nb).to_multiset(),
+    ensures super::work::sends_of(a + b).to_multiset() == super::relation::note_sends(na + nb).to_multiset(),
+{
+    assert(super::work::sends_of(a + b) =~= super::work::sends_of(a) + super::work::sends_of(b));
+    assert(super::relation::note_sends(na + nb) =~= super::relation::note_sends(na) + super::relation::note_sends(nb));
+    vstd::seq_lib::lemma_multiset_commutative(super::work::sends_of(a), super::work::sends_of(b));
+    vstd::seq_lib::lemma_multiset_commutative(super::relation::note_sends(na), super::relation::note_sends(nb));
+}
+
+pub(crate) proof fn lemma_timed_callback_keys_agree(
+    config: Config, original: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, keys: Seq<Seq<char>>, count: nat, now: u64,
+)
+    requires
+        origin_rel(map, origin, original), finite_store(original), map.dom().finite(),
+        deadlines_projected(map, now), count <= keys.len(),
+        forall|i: int| 0 <= i < keys.len() ==> map.contains_key(#[trigger] keys[i]),
+    ensures ({
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_callback_keys(config, original, keys, count, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_callback_keys(map, keys, count, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(original, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == original.schedules
+        &&& deadlines_projected(projected, now)
+        &&& forall|id: Seq<char>| map.contains_key(id) ==> #[trigger] projected[id].promise.state == map[id].promise.state
+        &&& forall|i: int| 0 <= i < count && projected[keys[i]].promise.state != echod_types::PromiseState::Pending
+            ==> #[trigger] projected[keys[i]].promise.callbacks.len() == 0
+        &&& super::work::sends_of(sends).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+    decreases count,
+{
+    if count == 0 {
+        super::work::lemma_sends_none();
+    } else {
+        let n = (count - 1) as nat;
+        lemma_timed_callback_keys_agree(config, original, map, origin, keys, n, now);
+        let source = keys[n as int];
+        let (before, sends) = echod_abstract_spec::handler::spec_drain_timed_callback_keys(config, original, keys, n, now);
+        let (prior, notes) = echod_concrete_spec::handler::spec_drain_callback_keys(map, keys, n, now, config.retry_timeout);
+        if prior[source].promise.state != echod_types::PromiseState::Pending {
+            lemma_canonical_callback_drain_agrees(config, before, prior, origin, source, now);
+        } else {
+            super::work::lemma_sends_none();
+        }
+        let (next, more) = echod_abstract_spec::handler::spec_drain_timed_callbacks(config, before, source, now);
+        let (projected, more_notes) = echod_concrete_spec::handler::spec_drain_settled_callbacks(prior, source, now, config.retry_timeout);
+        assert forall|id: Seq<char>| map.contains_key(id)
+            implies #[trigger] projected[id].promise.state == map[id].promise.state by {
+            if id != source { assert(projected[id].promise == prior[id].promise); }
+        };
+        assert forall|i: int| 0 <= i < count && projected[keys[i]].promise.state != echod_types::PromiseState::Pending
+            implies #[trigger] projected[keys[i]].promise.callbacks.len() == 0 by {
+            if keys[i] != source {
+                assert(i < n);
+                assert(projected[keys[i]].promise == prior[keys[i]].promise);
+            }
+        };
+        assert forall|id: Seq<char>| #![trigger echod_types::origin(id)]
+            echod_types::origin(id) != origin implies {
+                &&& original.promises.contains_key(id) == next.promises.contains_key(id)
+                &&& (original.promises.contains_key(id) ==> original.promises[id] == next.promises[id])
+                &&& original.tasks.contains_key(id) == next.tasks.contains_key(id)
+                &&& (original.tasks.contains_key(id) ==> original.tasks[id] == next.tasks[id])
+            } by {};
+        lemma_join_batch_messages(sends, more, notes, more_notes);
+    }
+}
+
+pub(crate) open spec fn settled_callbacks_empty(map: Map<Seq<char>, echod_concrete_spec::state::ObjV>) -> bool {
+    forall|id: Seq<char>| map.contains_key(id) && map[id].promise.state != echod_types::PromiseState::Pending
+        ==> #[trigger] map[id].promise.callbacks.len() == 0
+}
+
+pub(crate) proof fn lemma_timed_listener_keys_agree(
+    config: Config, original: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, keys: Seq<Seq<char>>, count: nat, now: u64,
+)
+    requires
+        origin_rel(map, origin, original), finite_store(original), map.dom().finite(),
+        deadlines_projected(map, now), settled_callbacks_empty(map), count <= keys.len(),
+        forall|i: int| 0 <= i < keys.len() ==> map.contains_key(#[trigger] keys[i]),
+    ensures ({
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_listener_keys(original, keys, count, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_listener_keys(map, keys, count);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(original, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == original.schedules
+        &&& deadlines_projected(projected, now)
+        &&& settled_callbacks_empty(projected)
+        &&& super::work::sends_of(sends).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+    decreases count,
+{
+    if count == 0 {
+        super::work::lemma_sends_none();
+    } else {
+        let n = (count - 1) as nat;
+        lemma_timed_listener_keys_agree(config, original, map, origin, keys, n, now);
+        let source = keys[n as int];
+        let (before, sends) = echod_abstract_spec::handler::spec_drain_timed_listener_keys(original, keys, n, now);
+        let (prior, notes) = echod_concrete_spec::handler::spec_drain_listener_keys(map, keys, n);
+        if prior[source].promise.state != echod_types::PromiseState::Pending {
+            lemma_canonical_listener_drain_agrees(config, before, prior, origin, source, now);
+        } else {
+            super::work::lemma_sends_none();
+        }
+        let (next, more) = echod_abstract_spec::handler::spec_drain_timed_listeners(before, source, now);
+        let (projected, more_notes) = echod_concrete_spec::handler::spec_drain_listeners(prior, source);
+        assert forall|id: Seq<char>| projected.contains_key(id) && projected[id].promise.state != echod_types::PromiseState::Pending
+            implies #[trigger] projected[id].promise.callbacks.len() == 0 by {
+            assert(prior.contains_key(id));
+            assert(projected[id].promise.callbacks == prior[id].promise.callbacks);
+        };
+        assert forall|id: Seq<char>| #![trigger echod_types::origin(id)]
+            echod_types::origin(id) != origin implies {
+                &&& original.promises.contains_key(id) == next.promises.contains_key(id)
+                &&& (original.promises.contains_key(id) ==> original.promises[id] == next.promises[id])
+                &&& original.tasks.contains_key(id) == next.tasks.contains_key(id)
+                &&& (original.tasks.contains_key(id) ==> original.tasks[id] == next.tasks[id])
+            } by {};
+        lemma_join_batch_messages(sends, more, notes, more_notes);
+    }
+}
+
+pub(crate) proof fn lemma_bulk_timed_origin_agrees(
+    config: Config, original: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    document: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, echod_types::origin(document), original), finite_store(original), map.dom().finite(),
+    ensures ({
+        let (next, sends) = echod_abstract_spec::handler::spec_bulk_timed_origin(config, original, document, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_bulk_workflow(map, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, echod_types::origin(document), next)
+        &&& changed_within(original, next, echod_types::origin(document))
+        &&& finite_store(next)
+        &&& next.schedules == original.schedules
+        &&& deadlines_projected(projected, now)
+        &&& settled_callbacks_empty(projected)
+        &&& super::work::sends_of(sends).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+{
+    let origin = echod_types::origin(document);
+    let keys = echod_concrete_spec::handler::spec_sorted_present(map);
+    assert(map.dom() =~= original.promises.dom().filter(|id: Seq<char>| echod_types::origin(id) == origin));
+    lemma_stable_key_orders_agree(map.dom());
+    super::work::lemma_c_sorted(map.dom());
+    lemma_timed_origin_projection_agrees(config, original, map, document, now);
+    let (after_projection, offers) = echod_abstract_spec::handler::spec_project_timed_origin(config, original, document, now);
+    let projected = echod_concrete_spec::handler::spec_project_workflow(map, now, config.retry_timeout);
+    let concrete_offers = spec_project_offers(map, keys, keys.len(), now);
+    assert(echod_concrete_spec::handler::spec_sorted_present(projected) == keys);
+    lemma_timed_callback_keys_agree(config, after_projection, projected, origin, keys, keys.len(), now);
+    let (resumed, callbacks) = echod_abstract_spec::handler::spec_drain_timed_callback_keys(config, after_projection, keys, keys.len(), now);
+    let (callback_map, callback_notes) = echod_concrete_spec::handler::spec_drain_callback_keys(projected, keys, keys.len(), now, config.retry_timeout);
+    assert forall|id: Seq<char>| callback_map.contains_key(id) && callback_map[id].promise.state != echod_types::PromiseState::Pending
+        implies #[trigger] callback_map[id].promise.callbacks.len() == 0 by {
+        assert(keys.contains(id));
+        let i = choose|i: int| 0 <= i < keys.len() && #[trigger] keys[i] == id;
+    };
+    lemma_timed_listener_keys_agree(config, resumed, callback_map, origin, keys, keys.len(), now);
+    let (next, listeners) = echod_abstract_spec::handler::spec_drain_timed_listener_keys(resumed, keys, keys.len(), now);
+    let (final_map, listener_notes) = echod_concrete_spec::handler::spec_drain_listener_keys(callback_map, keys, keys.len());
+    lemma_join_batch_messages(offers, callbacks, concrete_offers, callback_notes);
+    lemma_join_batch_messages(offers + callbacks, listeners, concrete_offers + callback_notes, listener_notes);
+    assert((concrete_offers + callback_notes) + listener_notes =~= concrete_offers + (callback_notes + listener_notes));
+    assert forall|id: Seq<char>| #![trigger echod_types::origin(id)]
+        echod_types::origin(id) != origin implies {
+            &&& original.promises.contains_key(id) == next.promises.contains_key(id)
+            &&& (original.promises.contains_key(id) ==> original.promises[id] == next.promises[id])
+            &&& original.tasks.contains_key(id) == next.tasks.contains_key(id)
+            &&& (original.tasks.contains_key(id) ==> original.tasks[id] == next.tasks[id])
+        } by {};
+}
+
+pub(crate) proof fn lemma_map_multisets<A, B>(a: Seq<A>, b: Seq<A>, f: spec_fn(A) -> B)
+    requires a.to_multiset() == b.to_multiset(),
+    ensures a.map_values(f).to_multiset() == b.map_values(f).to_multiset(),
+    decreases a.len(),
+{
+    broadcast use vstd::seq::group_seq_lemmas,
+        vstd::seq_lib::group_to_multiset_ensures,
+        vstd::multiset::group_multiset_axioms;
+    a.to_multiset_ensures();
+    b.to_multiset_ensures();
+    if a.len() == 0 {
+        assert(b.len() == 0);
+        assert(a.map_values(f) =~= b.map_values(f));
+    } else {
+        assert(a.contains(a[0]));
+        assert(a.to_multiset().count(a[0]) > 0);
+        assert(b.to_multiset().count(a[0]) > 0);
+        assert(b.contains(a[0]));
+        let index = choose|i: int| 0 <= i < b.len() && #[trigger] b[i] == a[0];
+        assert(a.drop_first() =~= a.remove(0));
+        vstd::seq_lib::to_multiset_remove(a, 0);
+        vstd::seq_lib::to_multiset_remove(b, index);
+        lemma_map_multisets(a.drop_first(), b.remove(index), f);
+        assert(a.map_values(f).remove(0) =~= a.drop_first().map_values(f));
+        assert(b.map_values(f).remove(index) =~= b.remove(index).map_values(f));
+        vstd::seq_lib::to_multiset_remove(a.map_values(f), 0);
+        vstd::seq_lib::to_multiset_remove(b.map_values(f), index);
+        assert(a.map_values(f).contains(f(a[0])));
+        assert(b.map_values(f).contains(f(a[0])));
+        assert(a.map_values(f).to_multiset() =~= a.drop_first().map_values(f).to_multiset().insert(f(a[0])));
+        assert(b.map_values(f).to_multiset() =~= b.remove(index).map_values(f).to_multiset().insert(f(a[0])));
+    }
+}
+
+pub(crate) proof fn lemma_projected_callback_drain_ready(
+    current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, source: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current), deadlines_projected(map, now),
+        map.contains_key(source), map[source].promise.state != echod_types::PromiseState::Pending,
+    ensures echod_abstract_spec::property_claim::callback_drain_ready(current, source, now),
+{
+    lemma_drain_target_ready_from_origin(current, map, origin, source, now);
+    assert forall|target: Seq<char>| #[trigger] current.promises[source].callbacks.contains(target)
+        implies echod_abstract_spec::property_claim::drain_target_ready(current, target, now) by {
+        let callbacks = map[source].promise.callbacks;
+        super::interpretation::lemma_contains_to_set(callbacks, target);
+        let index = choose|i: int| 0 <= i < callbacks.len() && #[trigger] callbacks[i] == target;
+        lemma_drain_target_ready_from_origin(current, map, origin, target, now);
+    };
+}
+
+pub(crate) proof fn lemma_canonical_callback_drain_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, source: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current), finite_store(current), map.dom().finite(),
+        map.contains_key(source), map[source].promise.state != echod_types::PromiseState::Pending,
+        deadlines_projected(map, now),
+    ensures ({
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_callbacks(config, current, source, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_settled_callbacks(map, source, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& projected[source].promise.callbacks.len() == 0
+        &&& projected[source].promise.listeners == map[source].promise.listeners
+        &&& projected[source].promise.state == map[source].promise.state
+        &&& forall|id: Seq<char>| map.contains_key(id) && id != source ==> #[trigger] projected[id].promise == map[id].promise
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+{
+    lemma_timed_callback_drain_agrees(config, current, map, origin, source, now);
+    lemma_projected_callback_drain_ready(current, map, origin, source, now);
+    let registered = current.promises[source].callbacks;
+    let canonical = echod_abstract_spec::axioms::pset_seq(registered);
+    echod_abstract_spec::axioms::axiom_pset_seq(registered);
+    canonical.to_set_ensures();
+    assert(canonical.to_set() =~= registered);
+    let concrete_order = map[source].promise.callbacks;
+    echod_abstract_spec::property_proof::lemma_callback_plans_permute(config, current, source, canonical, concrete_order, now);
+    let canonical_result = echod_abstract_spec::handler::spec_drain_timed_callbacks(config, current, source, now);
+    let ordered_result = echod_abstract_spec::handler::spec_drain_timed_callback_plan(config, current, source, concrete_order, concrete_order.len(), now);
+    lemma_map_multisets(canonical_result.1, ordered_result.1, |dispatch: echod_types::DispatchV| (
+        echod_abstract_spec::rover::Pid::Outside,
+        echod_types::Message::Output(echod_types::Output::Dispatch(echod_abstract_spec::handler::lift_dispatch(dispatch))),
+    ));
+}
+
+pub(crate) proof fn lemma_canonical_listener_drain_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, source: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current), finite_store(current), map.dom().finite(),
+        map.contains_key(source), map[source].promise.state != echod_types::PromiseState::Pending,
+        map[source].promise.callbacks.len() == 0, deadlines_projected(map, now),
+    ensures ({
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_listeners(current, source, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_listeners(map, source);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+{
+    lemma_timed_listener_drain_agrees(config, current, map, origin, source, now);
+    lemma_drain_target_ready_from_origin(current, map, origin, source, now);
+    let registered = current.promises[source].listeners;
+    let canonical = echod_abstract_spec::axioms::pset_seq(registered);
+    echod_abstract_spec::axioms::axiom_pset_seq(registered);
+    canonical.to_set_ensures();
+    assert(canonical.to_set() =~= registered);
+    let concrete_order = map[source].promise.listeners;
+    echod_abstract_spec::property_proof::lemma_listener_plans_permute(current, source, canonical, concrete_order, now);
+    let canonical_result = echod_abstract_spec::handler::spec_drain_timed_listeners(current, source, now);
+    let ordered_result = echod_abstract_spec::handler::spec_drain_timed_listener_plan(current, source, concrete_order, concrete_order.len(), now);
+    lemma_map_multisets(canonical_result.1, ordered_result.1, |dispatch: echod_types::DispatchV| (
+        echod_abstract_spec::rover::Pid::Outside,
+        echod_types::Message::Output(echod_types::Output::Dispatch(echod_abstract_spec::handler::lift_dispatch(dispatch))),
+    ));
+}
+
+pub(crate) proof fn lemma_drain_target_ready_from_origin(
+    current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, target: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        deadlines_projected(map, now),
+        echod_types::origin(target) == origin,
+    ensures echod_abstract_spec::property_claim::drain_target_ready(current, target, now),
+{
+    if map.contains_key(target) {
+        if current.tasks.contains_key(target) {
+            assert(map[target].task is Some);
+        }
+    }
+}
+
+pub(crate) proof fn lemma_projected_callback_diamond(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, source: Seq<char>, a: Seq<char>, b: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        deadlines_projected(map, now),
+        map.contains_key(source),
+        map[source].promise.state != echod_types::PromiseState::Pending,
+        map[source].promise.callbacks.contains(a),
+        map[source].promise.callbacks.contains(b),
+    ensures echod_abstract_spec::property_claim::same_source_callbacks_commute(config, current, source, a, b, now),
+{
+    let callbacks = map[source].promise.callbacks;
+    let ia = choose|i: int| 0 <= i < callbacks.len() && #[trigger] callbacks[i] == a;
+    let ib = choose|i: int| 0 <= i < callbacks.len() && #[trigger] callbacks[i] == b;
+    super::interpretation::lemma_contains_to_set(callbacks, a);
+    super::interpretation::lemma_contains_to_set(callbacks, b);
+    lemma_drain_target_ready_from_origin(current, map, origin, source, now);
+    lemma_drain_target_ready_from_origin(current, map, origin, a, now);
+    lemma_drain_target_ready_from_origin(current, map, origin, b, now);
+    echod_abstract_spec::property_proof::lemma_same_source_callbacks_commute(config, current, source, a, b, now);
+}
+
+pub(crate) proof fn lemma_projected_listener_diamond(
+    current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, source: Seq<char>, a: Seq<char>, b: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        deadlines_projected(map, now),
+        map.contains_key(source),
+        map[source].promise.state != echod_types::PromiseState::Pending,
+        map[source].promise.listeners.contains(a),
+        map[source].promise.listeners.contains(b),
+    ensures echod_abstract_spec::property_claim::same_source_listeners_commute(current, source, a, b, now),
+{
+    super::interpretation::lemma_contains_to_set(map[source].promise.listeners, a);
+    super::interpretation::lemma_contains_to_set(map[source].promise.listeners, b);
+    lemma_drain_target_ready_from_origin(current, map, origin, source, now);
+    echod_abstract_spec::property_proof::lemma_same_source_listeners_commute(current, source, a, b, now);
+}
+
+pub(crate) proof fn lemma_timed_callback_prefix_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, awaited: Seq<char>, count: nat, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        finite_store(current),
+        map.dom().finite(),
+        map.contains_key(awaited),
+        map[awaited].promise.state != echod_types::PromiseState::Pending,
+        count <= map[awaited].promise.callbacks.len(),
+        deadlines_projected(map, now),
+    ensures ({
+        let callbacks = map[awaited].promise.callbacks;
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_callback_plan(config, current, awaited, callbacks, count, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, count, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& projected[awaited].promise == echod_concrete_spec::state::PromV {
+            callbacks: callbacks.skip(count as int), ..map[awaited].promise
+        }
+        &&& forall|id: Seq<char>| map.contains_key(id) && id != awaited ==> #[trigger] projected[id].promise == map[id].promise
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends) == super::relation::note_sends(notes)
+    }),
+    decreases count,
+{
+    reveal_with_fuel(echod_concrete_spec::handler::spec_drain_callbacks, 2);
+    let callbacks = map[awaited].promise.callbacks;
+    if count == 0 {
+        assert(callbacks.skip(0) =~= callbacks);
+        super::work::lemma_sends_none();
+    } else {
+        let n = (count - 1) as nat;
+        lemma_timed_callback_prefix_agrees(config, current, map, origin, awaited, n, now);
+        let (prior, notes) = echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, n, now, config.retry_timeout);
+        let (before, sends) = echod_abstract_spec::handler::spec_drain_timed_callback_plan(config, current, awaited, callbacks, n, now);
+        lemma_timed_callback_agrees(config, before, prior, origin, awaited, now);
+        let (next, more) = echod_abstract_spec::handler::spec_drain_timed_callback(config, before, awaited, callbacks[n as int], now);
+        let (step_map, step_notes) = echod_concrete_spec::handler::spec_drain_callbacks(prior, awaited, 1, now, config.retry_timeout);
+        assert(echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, count, now, config.retry_timeout)
+            == (step_map, notes + step_notes));
+        assert(callbacks.skip(n as int).skip(1) =~= callbacks.skip(count as int));
+        assert(super::work::sends_of(sends + more) =~= super::work::sends_of(sends) + super::work::sends_of(more));
+        assert(super::relation::note_sends(notes + step_notes) =~= super::relation::note_sends(notes) + super::relation::note_sends(step_notes));
+    }
+}
+
+pub(crate) proof fn lemma_timed_callback_drain_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, awaited: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        finite_store(current),
+        map.dom().finite(),
+        map.contains_key(awaited),
+        map[awaited].promise.state != echod_types::PromiseState::Pending,
+        deadlines_projected(map, now),
+    ensures ({
+        let callbacks = map[awaited].promise.callbacks;
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_callback_plan(config, current, awaited, callbacks, callbacks.len(), now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_settled_callbacks(map, awaited, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& projected[awaited].promise.callbacks.len() == 0
+        &&& projected[awaited].promise.listeners == map[awaited].promise.listeners
+        &&& projected[awaited].promise.state == map[awaited].promise.state
+        &&& forall|id: Seq<char>| map.contains_key(id) && id != awaited ==> #[trigger] projected[id].promise == map[id].promise
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends) == super::relation::note_sends(notes)
+    }),
+{
+    let callbacks = map[awaited].promise.callbacks;
+    lemma_timed_callback_prefix_agrees(config, current, map, origin, awaited, callbacks.len(), now);
+    assert(callbacks.skip(callbacks.len() as int) =~= Seq::<Seq<char>>::empty());
+}
+
+pub(crate) open spec fn listener_prefix_map(
+    map: Map<Seq<char>, echod_concrete_spec::state::ObjV>, id: Seq<char>, count: nat,
+) -> Map<Seq<char>, echod_concrete_spec::state::ObjV> {
+    let object = map[id];
+    map.insert(id, echod_concrete_spec::state::ObjV {
+        promise: echod_concrete_spec::state::PromV { listeners: object.promise.listeners.skip(count as int), ..object.promise },
+        ..object
+    })
+}
+
+pub(crate) proof fn lemma_timed_listener_prefix_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, awaited: Seq<char>, count: nat, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        finite_store(current),
+        map.dom().finite(),
+        map.contains_key(awaited),
+        map[awaited].promise.state != echod_types::PromiseState::Pending,
+        map[awaited].promise.callbacks.len() == 0,
+        count <= map[awaited].promise.listeners.len(),
+    ensures ({
+        let listeners = map[awaited].promise.listeners;
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_listener_plan(current, awaited, listeners, count, now);
+        let projected = listener_prefix_map(map, awaited, count);
+        let notes = listeners.take(count as int).map_values(|address: Seq<char>| echod_concrete_spec::state::NoteV::Unblock {
+            address, promise: echod_concrete_spec::handler::spec_record(
+                echod_concrete_spec::handler::spec_string(awaited), map[awaited].promise)
+        });
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& (deadlines_projected(map, now) ==> deadlines_projected(projected, now))
+        &&& super::work::sends_of(sends) == super::relation::note_sends(notes)
+    }),
+    decreases count,
+{
+    let listeners = map[awaited].promise.listeners;
+    let projected = listener_prefix_map(map, awaited, count);
+    if count == 0 {
+        assert(listeners.skip(0) =~= listeners);
+        assert(projected =~= map);
+        super::work::lemma_sends_none();
+    } else {
+        let n = (count - 1) as nat;
+        lemma_timed_listener_prefix_agrees(config, current, map, origin, awaited, n, now);
+        let prior = listener_prefix_map(map, awaited, n);
+        let (before, sends) = echod_abstract_spec::handler::spec_drain_timed_listener_plan(current, awaited, listeners, n, now);
+        super::work::lemma_listener_transition(config, echod_concrete_spec::handler::spec_origin_key(origin),
+            origin, prior, before, now, awaited);
+        let next = echod_abstract_spec::handler::spec_listener(before, awaited, listeners[n as int], now);
+        let (step_map, step_notes) = echod_concrete_spec::handler::spec_step_object(prior, awaited, now, config.retry_timeout);
+        assert(listeners.skip(n as int).skip(1) =~= listeners.skip(count as int));
+        assert(step_map =~= projected);
+        assert(super::work::sends_of(sends + next.send) =~= super::work::sends_of(sends) + super::work::sends_of(next.send));
+        assert(listeners.take(count as int) =~= listeners.take(n as int).push(listeners[n as int]));
+        let prefix_notes = listeners.take(n as int).map_values(|address: Seq<char>| echod_concrete_spec::state::NoteV::Unblock {
+            address, promise: echod_concrete_spec::handler::spec_record(
+                echod_concrete_spec::handler::spec_string(awaited), map[awaited].promise)
+        });
+        let notes = listeners.take(count as int).map_values(|address: Seq<char>| echod_concrete_spec::state::NoteV::Unblock {
+            address, promise: echod_concrete_spec::handler::spec_record(
+                echod_concrete_spec::handler::spec_string(awaited), map[awaited].promise)
+        });
+        assert(notes =~= prefix_notes + step_notes);
+        assert(super::relation::note_sends(notes) =~= super::relation::note_sends(prefix_notes) + super::relation::note_sends(step_notes));
+    }
+    assert(projected.dom() =~= map.dom());
+    if deadlines_projected(map, now) {
+        assert forall|id: Seq<char>| #[trigger] projected.contains_key(id)
+            && projected[id].promise.state == echod_types::PromiseState::Pending implies now < projected[id].promise.timeout_at by {
+            assert(map.contains_key(id));
+            if id != awaited { assert(projected[id] == map[id]); }
+        };
+    }
+}
+
+pub(crate) proof fn lemma_timed_listener_drain_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, awaited: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        finite_store(current),
+        map.dom().finite(),
+        map.contains_key(awaited),
+        map[awaited].promise.state != echod_types::PromiseState::Pending,
+        map[awaited].promise.callbacks.len() == 0,
+    ensures ({
+        let listeners = map[awaited].promise.listeners;
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_listener_plan(current, awaited, listeners, listeners.len(), now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_listeners(map, awaited);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& (deadlines_projected(map, now) ==> deadlines_projected(projected, now))
+        &&& super::work::sends_of(sends) == super::relation::note_sends(notes)
+    }),
+{
+    let listeners = map[awaited].promise.listeners;
+    lemma_timed_listener_prefix_agrees(config, current, map, origin, awaited, listeners.len(), now);
+    assert(listeners.skip(listeners.len() as int) =~= Seq::<Seq<char>>::empty());
+    assert(listeners.take(listeners.len() as int) =~= listeners);
+}
+
+pub(crate) open spec fn deadlines_projected(map: Map<Seq<char>, echod_concrete_spec::state::ObjV>, now: u64) -> bool {
+    forall|id: Seq<char>| #[trigger] map.contains_key(id) && map[id].promise.state == echod_types::PromiseState::Pending
+        ==> now < map[id].promise.timeout_at
+}
+
+pub(crate) proof fn lemma_timed_callback_agrees(
+    config: Config, current: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, awaited: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, origin, current),
+        finite_store(current),
+        map.dom().finite(),
+        map.contains_key(awaited),
+        map[awaited].promise.state != echod_types::PromiseState::Pending,
+        map[awaited].promise.callbacks.len() > 0,
+        deadlines_projected(map, now),
+    ensures ({
+        let awaiter = map[awaited].promise.callbacks[0];
+        let (next, sends) = echod_abstract_spec::handler::spec_drain_timed_callback(config, current, awaited, awaiter, now);
+        let (projected, notes) = echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, 1, now, config.retry_timeout);
+        &&& projected.dom() == map.dom()
+        &&& projected[awaited].promise == echod_concrete_spec::state::PromV {
+            callbacks: map[awaited].promise.callbacks.skip(1), ..map[awaited].promise
+        }
+        &&& forall|id: Seq<char>| map.contains_key(id) && id != awaited ==> #[trigger] projected[id].promise == map[id].promise
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(current, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == current.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends) == super::relation::note_sends(notes)
+    }),
+{
+    reveal_with_fuel(echod_concrete_spec::handler::spec_drain_callbacks, 2);
+    let awaiter = map[awaited].promise.callbacks[0];
+    super::work::lemma_callback_transition(config, echod_concrete_spec::handler::spec_origin_key(origin),
+        origin, map, current, now, awaited);
+    let raw_map = echod_concrete_spec::handler::spec_step_object(map, awaited, now, config.retry_timeout).0;
+    let raw = echod_abstract_spec::handler::spec_callback(current, awaited, awaiter, now);
+    assert(echod_types::origin(awaiter) == origin);
+    if map.contains_key(awaiter) && map[awaiter].task is Some
+        && map[awaiter].task.unwrap().state == echod_types::TaskState::Suspended {
+        assert(awaiter != awaited);
+        assert(map[awaiter].promise.state == echod_types::PromiseState::Pending);
+        assert(now < map[awaiter].promise.timeout_at);
+        assert(raw_map[awaiter].promise == map[awaiter].promise);
+        assert(raw_map[awaiter].task.unwrap().state == echod_types::TaskState::Pending);
+        lemma_timed_projection_key_agrees(config, raw.next, awaiter, raw_map[awaiter], now);
+        let step = spec_project_timed_key(config, raw.next, awaiter, now);
+        assert(step == echod_abstract_spec::handler::spec_retry(config, raw.next, awaiter, now));
+        let projected = spec_project_due_object(raw_map[awaiter], now, config.retry_timeout);
+        assert(projected.promise.callbacks == raw_map[awaiter].promise.callbacks);
+        super::work::lemma_one_changed(raw_map, origin, raw.next, awaiter, projected,
+            step.next.promises[awaiter], abstract_task(step.next, awaiter), step.next);
+        super::work::lemma_sends_execute(awaiter, map[awaiter].task.unwrap().version);
+        assert(raw_map.insert(awaiter, projected).dom() =~= map.dom());
+        assert(echod_abstract_spec::handler::spec_drain_timed_callback(config, current, awaited, awaiter, now)
+            == (step.next, step.send));
+        assert(echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, 1, now, config.retry_timeout)
+            == (raw_map.insert(awaiter, projected),
+                seq![echod_concrete_spec::state::NoteV::Execute { id: awaiter, version: map[awaiter].task.unwrap().version }]));
+    } else {
+        super::work::lemma_sends_none();
+        assert(!(current.tasks.contains_key(awaiter) && current.tasks[awaiter].state == echod_types::TaskState::Suspended));
+        assert(echod_abstract_spec::handler::spec_drain_timed_callback(config, current, awaited, awaiter, now) == (raw.next, Seq::empty()));
+        assert(echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, 1, now, config.retry_timeout)
+            == (raw_map, Seq::empty()));
+    }
+    let projected = echod_concrete_spec::handler::spec_drain_callbacks(map, awaited, 1, now, config.retry_timeout).0;
+    assert forall|id: Seq<char>| map.contains_key(id) && id != awaited
+        implies #[trigger] projected[id].promise == map[id].promise by {
+        if id == awaiter {
+            if map[id].promise.state == echod_types::PromiseState::Pending {
+                assert(now < map[id].promise.timeout_at);
+            }
+        }
+    };
+    assert forall|id: Seq<char>| #[trigger] projected.contains_key(id)
+        && projected[id].promise.state == echod_types::PromiseState::Pending implies now < projected[id].promise.timeout_at by {
+        assert(map.contains_key(id));
+        if id != awaited && id != awaiter { assert(projected[id] == map[id]); }
+        assert(projected[id].promise.state == map[id].promise.state);
+        assert(projected[id].promise.timeout_at == map[id].promise.timeout_at);
+    };
+}
+
+pub(crate) proof fn lemma_key_orders_agree(a: Seq<char>, b: Seq<char>)
+    ensures
+        echod_concrete_spec::handler::spec_before(a, b) == echod_abstract_spec::handler::spec_before(a, b),
+        echod_concrete_spec::handler::spec_before(b, a) == echod_abstract_spec::handler::spec_before(b, a),
+        a == b || echod_abstract_spec::handler::spec_before(a, b) || echod_abstract_spec::handler::spec_before(b, a),
+    decreases a.len() + b.len(),
+{
+    if a.len() > 0 && b.len() > 0 && a[0] == b[0] {
+        lemma_key_orders_agree(a.drop_first(), b.drop_first());
+        if a.drop_first() == b.drop_first() {
+            assert(a.len() == b.len());
+            assert forall|i: int| 0 <= i < a.len() implies #[trigger] a[i] == b[i] by {
+                if i > 0 {
+                    assert(a[i] == a.drop_first()[i - 1]);
+                    assert(b[i] == b.drop_first()[i - 1]);
+                }
+            };
+            assert(a =~= b);
+        }
+    } else if a.len() == 0 && b.len() == 0 {
+        assert(a =~= b);
+    }
+}
+
+pub(crate) proof fn lemma_stable_key_orders_agree(keys: Set<Seq<char>>)
+    ensures
+        echod_concrete_spec::handler::spec_sorted(keys) == echod_abstract_spec::handler::spec_sorted(keys),
+    decreases keys.len(),
+{
+    if keys.len() > 0 {
+        echod_abstract_spec::property_proof::lemma_least_exists(keys);
+        let witness = choose|k: Seq<char>| echod_abstract_spec::handler::least(keys, k);
+        assert forall|other: Seq<char>| keys.contains(other) implies !echod_concrete_spec::handler::spec_before(other, witness) by {
+            lemma_key_orders_agree(other, witness);
+        };
+        assert(exists|candidate: Seq<char>| keys.contains(candidate)
+            && forall|other: Seq<char>| keys.contains(other) ==> !echod_concrete_spec::handler::spec_before(other, candidate));
+        reveal(echod_concrete_spec::handler::spec_min_key);
+        reveal(echod_abstract_spec::handler::spec_min_key);
+        let concrete = echod_concrete_spec::handler::spec_min_key(keys);
+        let abstract_key = echod_abstract_spec::handler::spec_min_key(keys);
+        lemma_key_orders_agree(concrete, abstract_key);
+        assert(concrete == abstract_key);
+        lemma_stable_key_orders_agree(keys.remove(concrete));
+    }
+}
+
+pub(crate) proof fn lemma_timed_projection_key_agrees(
+    config: Config, current: StoreV, id: Seq<char>,
+    object: echod_concrete_spec::state::ObjV, now: u64,
+)
+    requires
+        current.promises.contains_key(id),
+        super::interpretation::object_rel(object, current.promises[id], super::interpretation::abstract_task(current, id)),
+    ensures ({
+        let result = echod_abstract_spec::handler::spec_project_timed_key(config, current, id, now);
+        &&& result.next.promises.contains_key(id)
+        &&& super::interpretation::object_rel(
+            echod_concrete_spec::handler::spec_project_due_object(object, now, config.retry_timeout),
+            result.next.promises[id], super::interpretation::abstract_task(result.next, id))
+        &&& result.send == if echod_concrete_spec::handler::spec_due_offer(object, now) {
+            seq![echod_types::DispatchV::Execute { id, version: object.task.unwrap().version }]
+        } else { Seq::empty() }
+        &&& result.work.len() == 0
+        &&& result.next.schedules == current.schedules
+        &&& result.next.promises == current.promises.insert(id, result.next.promises[id])
+        &&& result.next.tasks == match abstract_task(result.next, id) {
+            Some(task) => current.tasks.insert(id, task),
+            None => current.tasks.remove(id),
+        }
+    }),
+{
+    super::interpretation::lemma_project_object(object, current.promises[id],
+        super::interpretation::abstract_task(current, id), now);
+    super::interpretation::lemma_sat_add(now, config.retry_timeout);
+    match object.task {
+        Some(_) => {},
+        None => {
+            assert(current.tasks.remove(id) =~= current.tasks);
+        },
+    }
+    let result = spec_project_timed_key(config, current, id, now);
+    assert(result.next.promises =~= current.promises.insert(id, result.next.promises[id]));
+    match abstract_task(result.next, id) {
+        Some(task) => { assert(result.next.tasks =~= current.tasks.insert(id, task)); },
+        None => { assert(result.next.tasks =~= current.tasks.remove(id)); },
+    }
+}
+
+pub(crate) proof fn lemma_project_prefix_keeps_unvisited(
+    map: Map<Seq<char>, echod_concrete_spec::state::ObjV>, keys: Seq<Seq<char>>,
+    count: nat, now: u64, retry_timeout: u64, unvisited: Seq<char>,
+)
+    requires
+        count <= keys.len(),
+    ensures
+        spec_project_keys(map, keys, count, now, retry_timeout).dom() == map.dom(),
+        (forall|i: int| 0 <= i < count ==> #[trigger] keys[i] != unvisited) && map.contains_key(unvisited)
+            ==> spec_project_keys(map, keys, count, now, retry_timeout)[unvisited] == map[unvisited],
+    decreases count,
+{
+    if count > 0 {
+        lemma_project_prefix_keeps_unvisited(map, keys, (count - 1) as nat, now, retry_timeout, unvisited);
+        let prior = spec_project_keys(map, keys, (count - 1) as nat, now, retry_timeout);
+        let next = spec_project_keys(map, keys, count, now, retry_timeout);
+        assert(next.dom() =~= prior.dom());
+        if forall|i: int| 0 <= i < count ==> #[trigger] keys[i] != unvisited {
+            assert(keys[count as int - 1] != unvisited);
+        }
+    }
+}
+
+pub(crate) proof fn lemma_visited_deadline_projected(
+    map: Map<Seq<char>, echod_concrete_spec::state::ObjV>, keys: Seq<Seq<char>>,
+    count: nat, now: u64, retry_timeout: u64, id: Seq<char>,
+)
+    requires
+        count <= keys.len(),
+        map.contains_key(id),
+        exists|i: int| 0 <= i < count && #[trigger] keys[i] == id,
+    ensures ({
+        let projected = spec_project_keys(map, keys, count, now, retry_timeout);
+        projected.contains_key(id)
+            && (projected[id].promise.state != echod_types::PromiseState::Pending || now < projected[id].promise.timeout_at)
+    }),
+    decreases count,
+{
+    let i = choose|i: int| 0 <= i < count && #[trigger] keys[i] == id;
+    assert(count > 0);
+    let n = (count - 1) as nat;
+    lemma_project_prefix_keeps_unvisited(map, keys, n, now, retry_timeout, id);
+    if keys[n as int] != id {
+        assert(i < n);
+        lemma_visited_deadline_projected(map, keys, n, now, retry_timeout, id);
+    }
+}
+
+pub(crate) proof fn lemma_timed_projection_keys_agree(
+    config: Config, original: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    origin: Seq<char>, keys: Seq<Seq<char>>, count: nat, now: u64,
+)
+    requires
+        origin_rel(map, origin, original),
+        finite_store(original),
+        map.dom().finite(),
+        count <= keys.len(),
+        keys.no_duplicates(),
+        forall|i: int| 0 <= i < keys.len() ==> map.contains_key(#[trigger] keys[i]),
+    ensures ({
+        let projected = spec_project_keys(map, keys, count, now, config.retry_timeout);
+        let (next, sends) = spec_project_timed_keys(config, original, keys, count, now);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, origin, next)
+        &&& changed_within(original, next, origin)
+        &&& finite_store(next)
+        &&& next.schedules == original.schedules
+        &&& super::work::sends_of(sends) == super::relation::note_sends(spec_project_offers(map, keys, count, now))
+    }),
+    decreases count,
+{
+    super::work::lemma_sends_none();
+    if count > 0 {
+        let n = (count - 1) as nat;
+        lemma_timed_projection_keys_agree(config, original, map, origin, keys, n, now);
+        let id = keys[n as int];
+        assert forall|i: int| 0 <= i < n implies #[trigger] keys[i] != id by {
+            assert(keys[i] != keys[n as int]);
+        };
+        lemma_project_prefix_keeps_unvisited(map, keys, n, now, config.retry_timeout, id);
+        let prior = spec_project_keys(map, keys, n, now, config.retry_timeout);
+        let (before, sends) = spec_project_timed_keys(config, original, keys, n, now);
+        assert(echod_types::origin(id) == origin);
+        lemma_timed_projection_key_agrees(config, before, id, prior[id], now);
+        let step = spec_project_timed_key(config, before, id, now);
+        let projected = spec_project_due_object(prior[id], now, config.retry_timeout);
+        assert(projected.promise.callbacks == prior[id].promise.callbacks);
+        super::work::lemma_one_changed(prior, origin, before, id, projected, step.next.promises[id],
+            abstract_task(step.next, id), step.next);
+        assert(spec_project_keys(map, keys, count, now, config.retry_timeout).dom() =~= map.dom());
+        assert(super::work::sends_of(sends + step.send) =~=
+            super::work::sends_of(sends) + super::work::sends_of(step.send));
+        let offers = spec_project_offers(map, keys, n, now);
+        if echod_concrete_spec::handler::spec_due_offer(map[id], now) {
+            super::work::lemma_sends_execute(id, map[id].task.unwrap().version);
+            let offer = echod_concrete_spec::state::NoteV::Execute { id, version: map[id].task.unwrap().version };
+            assert(super::relation::note_sends(offers.push(offer)) =~=
+                super::relation::note_sends(offers) + super::relation::note_sends(seq![offer]));
+        }
+    }
+}
+
+pub(crate) proof fn lemma_timed_origin_projection_agrees(
+    config: Config, original: StoreV, map: Map<Seq<char>, echod_concrete_spec::state::ObjV>,
+    document: Seq<char>, now: u64,
+)
+    requires
+        origin_rel(map, echod_types::origin(document), original),
+        finite_store(original),
+        map.dom().finite(),
+    ensures ({
+        let projected = echod_concrete_spec::handler::spec_project_workflow(map, now, config.retry_timeout);
+        let (next, sends) = echod_abstract_spec::handler::spec_project_timed_origin(config, original, document, now);
+        &&& projected.dom() == map.dom()
+        &&& origin_rel(projected, echod_types::origin(document), next)
+        &&& changed_within(original, next, echod_types::origin(document))
+        &&& finite_store(next)
+        &&& next.schedules == original.schedules
+        &&& deadlines_projected(projected, now)
+        &&& super::work::sends_of(sends) == super::relation::note_sends(
+            spec_project_offers(map, echod_concrete_spec::handler::spec_sorted_present(map), map.dom().len(), now))
+    }),
+{
+    assert(map.dom() =~= original.promises.dom().filter(|id: Seq<char>| echod_types::origin(id) == echod_types::origin(document)));
+    lemma_stable_key_orders_agree(map.dom());
+    super::work::lemma_c_sorted(map.dom());
+    super::effects_proof::lemma_sorted_no_duplicates(map.dom());
+    let keys = echod_concrete_spec::handler::spec_sorted_present(map);
+    lemma_timed_projection_keys_agree(config, original, map, echod_types::origin(document), keys, keys.len(), now);
+    let projected = echod_concrete_spec::handler::spec_project_workflow(map, now, config.retry_timeout);
+    assert forall|id: Seq<char>| #[trigger] projected.contains_key(id)
+        && projected[id].promise.state == echod_types::PromiseState::Pending implies now < projected[id].promise.timeout_at by {
+        assert(map.contains_key(id));
+        assert(keys.contains(id));
+        let i = choose|i: int| 0 <= i < keys.len() && #[trigger] keys[i] == id;
+        lemma_visited_deadline_projected(map, keys, keys.len(), now, config.retry_timeout, id);
+    };
+}
+
+pub(crate) open spec fn document_result(work: TimedWorkV, doc: DocumentBodyV, read_committed_at: u64) -> (DocumentBodyV, Response) {
+    let (next, response) = spec_handle(doc, spec_timed_request(work), spec_timed_evaluation_time(work, read_committed_at));
+    match (work.stage, response) {
+        (TimedStage::DetachedCheck { inner, .. }, Response::Status(status)) =>
+            (next, Response::TaskFence(TaskFenceRes { status: status.status,
+                action: if status.status == 200 { Some(TaskFenceInnerRes::Create(inner)) } else { None } })),
+        _ => (next, response),
+    }
+}
+
+pub(crate) open spec fn request_document_result(
+    config: Config, work: TimedWorkV, doc: DocumentBodyV, read_committed_at: u64,
+) -> (DocumentBodyV, Response, Seq<echod_concrete_spec::state::NoteV>) {
+    let (next, response, _, notes) = echod_concrete_spec::handler::spec_request_transition(
+        doc, spec_timed_request(work), spec_timed_evaluation_time(work, read_committed_at), config.retry_timeout, 0);
+    let wrapped = match (work.stage, response) {
+        (TimedStage::DetachedCheck { inner, .. }, Response::Status(status)) =>
+            Response::TaskFence(TaskFenceRes { status: status.status,
+                action: if status.status == 200 { Some(TaskFenceInnerRes::Create(inner)) } else { None } }),
+        _ => response,
+    };
+    (next, wrapped, notes)
+}
+
+pub(crate) proof fn lemma_timed_request_agrees(
+    config: Config, work: TimedWorkV, key: Seq<char>, doc: DocumentBodyV,
+    current: StoreV, read_committed_at: u64,
+)
+    requires
+        spec_key(spec_timed_request(work)) == Some(key), doc_rel(key, doc, current), finite_store(current),
+    ensures ({
+        let outcomes = echod_abstract_spec::handler::spec_timed_request_outcomes(config, work, current, read_committed_at);
+        let (next, response, notes) = request_document_result(config, work, doc, read_committed_at);
+        &&& outcomes.len() == 1
+        &&& outcomes[0].resp == response
+        &&& doc_rel(key, next, outcomes[0].next)
+        &&& others_kept(key, current, outcomes[0].next)
+        &&& finite_store(outcomes[0].next)
+        &&& outcomes[0].work.len() == 0
+        &&& super::work::sends_of(outcomes[0].send).to_multiset() == super::relation::note_sends(notes).to_multiset()
+    }),
+{
+    let request = spec_timed_request(work);
+    let now = spec_timed_evaluation_time(work, read_committed_at);
+    match echod_abstract_spec::handler::spec_workflow_id(request) {
+        Some(document) => {
+            assert(spec_key(request) == Some(echod_concrete_spec::handler::spec_origin_key(echod_types::origin(document))));
+            super::interpretation::lemma_origin_doc(key, echod_types::origin(document), doc, current);
+            let map = echod_concrete_spec::handler::spec_workflow_map(doc);
+            lemma_bulk_timed_origin_agrees(config, current, map, document, now);
+            let (prepared, sends) = echod_abstract_spec::handler::spec_bulk_timed_origin(config, current, document, now);
+            let (swept, notes) = echod_concrete_spec::handler::spec_bulk_workflow(map, now, config.retry_timeout);
+            super::interpretation::lemma_others_kept_within(current, prepared, echod_types::origin(document));
+            lemma_timed_raw_handler_agrees(config, work, key, DocumentBodyV::Workflow(swept), prepared, read_committed_at);
+            let raw = spec_timed_handler_outcomes(config, work, prepared, read_committed_at);
+            let actual = echod_abstract_spec::handler::spec_timed_request_outcomes(config, work, current, read_committed_at);
+            assert(actual[0].send =~= sends);
+            assert forall|other: Seq<char>, other_doc: DocumentBodyV| other != key && doc_rel(other, other_doc, current)
+                implies #[trigger] doc_rel(other, other_doc, actual[0].next) by {
+                assert(doc_rel(other, other_doc, prepared));
+            };
+        },
+        None => {
+            match request {
+                Request::ScheduleGet(q) => super::interpretation::lemma_schedule_doc(key, q.id@, doc, current),
+                Request::ScheduleCreate(q) => super::interpretation::lemma_schedule_doc(key, q.id@, doc, current),
+                Request::ScheduleDelete(q) => super::interpretation::lemma_schedule_doc(key, q.id@, doc, current),
+                _ => { assert(false); },
+            }
+            lemma_timed_raw_handler_agrees(config, work, key, doc, current, read_committed_at);
+            super::work::lemma_sends_none();
+        },
+    }
+}
+
+pub(crate) proof fn lemma_timed_pure_request_agrees(
+    config: Config, work: TimedWorkV, current: StoreV, read_committed_at: u64,
+)
+    requires spec_key(spec_timed_request(work)) == None,
+    ensures ({
+        let outcomes = echod_abstract_spec::handler::spec_timed_request_outcomes(config, work, current, read_committed_at);
+        &&& outcomes.len() == 1
+        &&& outcomes[0].next == current
+        &&& outcomes[0].resp == echod_concrete_spec::handler::spec_pure(spec_timed_request(work))
+        &&& outcomes[0].work.len() == 0
+        &&& outcomes[0].send.len() == 0
+    }),
+{
+    match spec_timed_request(work) {
+        Request::TaskHeartbeat(q) => { assert(q.tasks@.len() == 0); },
+        _ => { assert(false); },
+    }
+}
+
+pub(crate) proof fn lemma_timed_raw_handler_agrees(
+    config: Config, work: TimedWorkV, key: Seq<char>, doc: DocumentBodyV, current: StoreV, read_committed_at: u64,
+)
+    requires
+        spec_key(spec_timed_request(work)) == Some(key),
+        doc_rel(key, doc, current),
+        finite_store(current),
+    ensures ({
+        let outcomes = spec_timed_handler_outcomes(config, work, current, read_committed_at);
+        let (next, response) = document_result(work, doc, read_committed_at);
+        &&& outcomes.len() == 1
+        &&& outcomes[0].resp == response
+        &&& doc_rel(key, next, outcomes[0].next)
+        &&& others_kept(key, current, outcomes[0].next)
+        &&& finite_store(outcomes[0].next)
+        &&& outcomes[0].work.len() == 0
+        &&& outcomes[0].send.len() == 0
+    }),
+{
+    super::requests::lemma_request_agrees(config, spec_timed_request(work), key, doc, current,
+        spec_timed_evaluation_time(work, read_committed_at));
+    match work.stage {
+        TimedStage::DetachedCheck { check, .. } => {
+            match echod_abstract_spec::handler::spec_held(current, check.id@, check.version,
+                spec_timed_evaluation_time(work, read_committed_at)) {
+                echod_abstract_spec::state::SpecHeld::Missing => {},
+                echod_abstract_spec::state::SpecHeld::Stale => {},
+                echod_abstract_spec::state::SpecHeld::Ok(_) => {},
+            }
+        },
+        _ => {},
+    }
+}
+}
+}
 
 mod effects_proof {
 //! Local correspondence between imperative notifications and document effects.
@@ -11935,7 +13355,7 @@ proof fn lemma_unblock_notes(
 }
 
 
-proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
+pub(super) proof fn lemma_sorted_no_duplicates(keys: Set<Seq<char>>)
     ensures
         echod_concrete_spec::handler::spec_sorted(keys).no_duplicates(),
     decreases keys.len(),
@@ -12108,8 +13528,7 @@ proof fn lemma_committed_notes_match(
 }
 
 
-/// Complete endpoint correspondence for one atomic request transition.
-#[verifier::rlimit(40)]
+/// Request notifications preserve the complete pre-handler sweep, without duplicate keys.
 pub proof fn lemma_request_transition_effects(
     document: StoredDocumentV,
     request: Request,
@@ -12124,26 +13543,15 @@ pub proof fn lemma_request_transition_effects(
         safe_effect_config(now, retry_timeout),
     ensures
         ({
-            let final_document =
-                on_request(document, request, now, retry_timeout, limit);
             let (_, _, _, notes) = spec_request_transition(
-                spec_stored_body(document),
-                request,
-                now,
-                retry_timeout,
-                limit,
+                spec_stored_body(document), request, now, retry_timeout, limit,
             );
-            effects_match(document, final_document, notes)
+            echod_concrete_spec::property_claim::request_effects_match(
+                spec_stored_body(document), now, retry_timeout, notes,
+            )
         }),
 {
     let initial_body = spec_stored_body(document);
-    let (final_body, response, _, notes) = spec_request_transition(
-        initial_body,
-        request,
-        now,
-        retry_timeout,
-        limit,
-    );
     assert(match initial_body {
         DocumentBodyV::Workflow(old) =>
             forall|id: Seq<char>| old.contains_key(id) ==>
@@ -12194,99 +13602,14 @@ pub proof fn lemma_request_transition_effects(
             StoredDocumentV::Schedule(_) => {},
         }
     };
-    if spec_request_commits(
-        initial_body,
-        request,
-        now,
-        retry_timeout,
-        limit,
-    ) {
-        assert(notes == spec_committed_notes(initial_body, final_body, now));
-        lemma_committed_notes_match(initial_body, final_body, now);
-        match (document, final_body) {
-            (StoredDocumentV::Workflow(old), DocumentBodyV::Workflow(new)) => {
-                assert(on_request(
-                    StoredDocumentV::Workflow(old),
-                    request,
-                    now,
-                    retry_timeout,
-                    limit,
-                ) == echod_concrete_spec::handler::spec_advance_stored(
-                    StoredDocumentV::Workflow(old),
-                    DocumentBodyV::Workflow(new),
-                    now,
-                ));
-                assert(document_effects(
-                    StoredDocumentV::Workflow(old),
-                    on_request(
-                        StoredDocumentV::Workflow(old),
-                        request,
-                        now,
-                        retry_timeout,
-                        limit,
-                    ),
-                ) == workflow_effects(old.objects, new, now));
-            },
-            (StoredDocumentV::Schedule(old), DocumentBodyV::Schedule(new)) => {
-                assert(document_effects(
-                    StoredDocumentV::Schedule(old),
-                    on_request(
-                        StoredDocumentV::Schedule(old),
-                        request,
-                        now,
-                        retry_timeout,
-                        limit,
-                    ),
-                ) == ISet::<ProtocolEffectV>::empty());
-            },
-            _ => {},
-        }
-    } else {
-        assert(final_body == initial_body);
-        if response == spec_unavailable(request) {
-            assert(notes =~= Seq::<NoteV>::empty());
-            assert(note_effects(notes) =~= ISet::<ProtocolEffectV>::empty());
-            assert(note_effect_keys(notes) =~= Seq::<ProtocolEffectKeyV>::empty());
-        } else {
-            match initial_body {
-                DocumentBodyV::Workflow(_) => {
-                    assert(notes == spec_committed_notes(initial_body, final_body, now));
-                },
-                DocumentBodyV::Schedule(_) => {
-                    assert(notes =~= Seq::<NoteV>::empty());
-                    assert(spec_committed_notes(initial_body, final_body, now)
-                        =~= Seq::<NoteV>::empty());
-                },
-            }
-            lemma_committed_notes_match(initial_body, final_body, now);
-        }
-        assert(on_request(document, request, now, retry_timeout, limit) == document);
-        assert(document_effects(document, document)
-            =~= ISet::<ProtocolEffectV>::empty()) by {
-            match document {
-                StoredDocumentV::Workflow(workflow) => {
-                    assert forall|effect: ProtocolEffectV|
-                        !workflow_effects(
-                            workflow.objects,
-                            workflow.objects,
-                            workflow.committed_at,
-                        ).contains(effect) by {
-                        match effect {
-                            ProtocolEffectV::Execute { .. } => {},
-                            ProtocolEffectV::Unblock { .. } => {},
-                        }
-                    };
-                },
-                StoredDocumentV::Schedule(_) => {},
-            }
-        };
+    match initial_body {
+        DocumentBodyV::Workflow(objects) => {
+            echod_concrete_spec::property_proof::lemma_bulk_notifications_are_unique(objects, now, retry_timeout);
+        },
+        DocumentBodyV::Schedule(_) => {
+            assert(note_effect_keys(Seq::<NoteV>::empty()) =~= Seq::empty());
+        },
     }
-    assert(note_effects(notes)
-        == document_effects(
-            document,
-            on_request(document, request, now, retry_timeout, limit),
-        ));
-    assert(note_effect_keys(notes).no_duplicates());
 }
 
 } // verus!

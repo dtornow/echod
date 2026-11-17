@@ -47,6 +47,123 @@ use crate::state::{
 };
 
 verus! {
+pub fn admit_timed(call: echod_types::protocol::TimedCall, observed_fleet_at: Time) -> (work: crate::state::TimedWork)
+    ensures work@ == spec_admit_timed(call, observed_fleet_at),
+{
+    let admitted_at = if call.pinned || call.offered_at > observed_fleet_at { call.offered_at } else { observed_fleet_at };
+    let stage = match crate::rover::detached_admission(&call.call.request) {
+        None => echod_abstract_spec::state::TimedStage::Whole,
+        Some((create, check)) => echod_abstract_spec::state::TimedStage::DetachedCreate { create, check },
+    };
+    crate::state::TimedWork { call, admitted_at, stage }
+}
+
+pub fn timed_evaluation_time(work: &crate::state::TimedWork, read_committed_at: Time) -> (now: Time)
+    ensures now == spec_timed_evaluation_time(work@, read_committed_at),
+{
+    if read_committed_at > work.admitted_at { read_committed_at } else { work.admitted_at }
+}
+
+pub fn timed_handler_outcomes(
+    config: &Config, work: &crate::state::TimedWork, current: &Store, read_committed_at: Time,
+) -> (outcomes: Vec<Out>)
+    ensures outs_v(outcomes@) == spec_timed_handler_outcomes(*config, work@, current@, read_committed_at),
+{
+    let now = timed_evaluation_time(work, read_committed_at);
+    match &work.stage {
+        echod_abstract_spec::state::TimedStage::Whole => Handlers(config).handler(&work.call.call.request, current, now),
+        echod_abstract_spec::state::TimedStage::DetachedCreate { create, .. } =>
+            Handlers(config).handler(&Request::PromiseCreate(crate::runtime::copy(create)), current, now),
+        echod_abstract_spec::state::TimedStage::DetachedCheck { check, inner } => {
+            let pending = crate::state::DetachedFence {
+                call: crate::runtime::copy(&work.call.call), check: crate::runtime::copy(check),
+                inner: crate::runtime::copy(inner), now,
+            };
+            Handlers(config).detached_fence(&pending, current)
+        },
+    }
+}
+
+pub fn timed_request(work: &crate::state::TimedWork) -> (request: Request)
+    ensures request == spec_timed_request(work@),
+{
+    match &work.stage {
+        echod_abstract_spec::state::TimedStage::Whole => copy(&work.call.call.request),
+        echod_abstract_spec::state::TimedStage::DetachedCreate { create, .. } => Request::PromiseCreate(copy(create)),
+        echod_abstract_spec::state::TimedStage::DetachedCheck { check, .. } => Request::TaskFenceCheck(copy(check)),
+    }
+}
+
+fn workflow_id(request: &Request) -> (id: Option<Id>)
+    ensures match id {
+        Some(id) => spec_workflow_id(*request) == Some(id@),
+        None => spec_workflow_id(*request) == None,
+    },
+{
+    match request {
+        Request::PromiseGet(q) => Some(q.id.clone()),
+        Request::PromiseCreate(q) => Some(q.id.clone()),
+        Request::PromiseSettle(q) => Some(q.id.clone()),
+        Request::PromiseRegisterCallback(q) => Some(q.awaited.clone()),
+        Request::PromiseRegisterListener(q) => Some(q.awaited.clone()),
+        Request::TaskGet(q) => Some(q.id.clone()),
+        Request::TaskCreate(q) => Some(q.action.id.clone()),
+        Request::TaskAcquire(q) => Some(q.id.clone()),
+        Request::TaskFulfill(q) => Some(q.id.clone()),
+        Request::TaskRelease(q) => Some(q.id.clone()),
+        Request::TaskHalt(q) => Some(q.id.clone()),
+        Request::TaskContinue(q) => Some(q.id.clone()),
+        Request::TaskFence(q) => Some(q.id.clone()),
+        Request::TaskFenceCheck(q) => Some(q.id.clone()),
+        Request::TaskSuspend(q) => Some(q.id.clone()),
+        Request::TaskHeartbeat(q) => if q.tasks.is_empty() { None } else { Some(q.tasks[0].id.clone()) },
+        Request::ScheduleGet(_) | Request::ScheduleCreate(_) | Request::ScheduleDelete(_) => None,
+    }
+}
+
+pub fn timed_request_outcomes(
+    config: &Config, work: &crate::state::TimedWork, current: &Store, read_committed_at: Time,
+) -> (outcomes: Vec<Out>)
+    ensures outs_v(outcomes@) == spec_timed_request_outcomes(*config, work@, current@, read_committed_at),
+{
+    let now = timed_evaluation_time(work, read_committed_at);
+    let request = timed_request(work);
+    let (prepared, mut send) = match workflow_id(&request) {
+        Some(document) => Handlers(config).bulk_timed_origin(current, &document, now),
+        None => (copy_store(current), Vec::new()),
+    };
+    let mut raw = timed_handler_outcomes(config, work, &prepared, read_committed_at);
+    proof { lemma_timed_handler_singleton(*config, work@, prepared@, read_committed_at); }
+    let ghost raw_outcomes = outs_v(raw@);
+    let mut out = raw.remove(0);
+    let ghost original = out@;
+    let ghost prefix = send@;
+    let ghost suffix = out.send@;
+    send.append(&mut out.send);
+    proof { assert(crate::projection::sends(send@) =~= crate::projection::sends(prefix) + crate::projection::sends(suffix)); }
+    out.send = send;
+    proof { assert(raw_outcomes =~= seq![original]); }
+    one(out)
+}
+
+pub fn continue_timed(work: &crate::state::TimedWork, response: &Response) -> (next: Option<crate::state::TimedWork>)
+    ensures match next {
+        None => spec_continue_timed(work@, *response) == None,
+        Some(next) => spec_continue_timed(work@, *response) == Some(next@),
+    },
+{
+    match (&work.stage, response) {
+        (echod_abstract_spec::state::TimedStage::DetachedCreate { check, .. }, Response::Promise(inner)) =>
+            Some(crate::state::TimedWork {
+                call: crate::runtime::copy(&work.call), admitted_at: work.admitted_at,
+                stage: echod_abstract_spec::state::TimedStage::DetachedCheck {
+                    check: crate::runtime::copy(check), inner: crate::runtime::copy(inner),
+                },
+            }),
+        _ => None,
+    }
+}
+
 
 /// The awaited ids of a suspend's actions.
 fn awaited_ids(actions: &Vec<PromiseRegisterCallbackReq>) -> (ids: Vec<Id>)
@@ -648,6 +765,23 @@ impl<'cfg> Handlers<'cfg> {
         let outs = one(Out { resp: rec, next: n, work: Vec::new(), send: Vec::new(), marks: marked(mk("schedule created")) });
         proof { assert(outs_v(outs@) =~~= spec_schedule_create(*req, s@, now)); }
         outs
+    }
+
+    pub(crate) fn detached_fence(&self, pending: &crate::state::DetachedFence, s: &Store) -> (outs: Vec<Out>)
+        ensures
+            outs_v(outs@) == spec_detached_fence(pending@, s@),
+    {
+        broadcast use group_exec_views;
+        let code = match self.held(s, &pending.check.id, pending.check.version, pending.now) {
+            Err(code) => code,
+            Ok(_) => 200,
+        };
+        let action = if code == 200 {
+            Some(TaskFenceInnerRes::Create(copy(&pending.inner)))
+        } else {
+            None
+        };
+        status(fence_res(code, action), mk("detached fence check"), s)
     }
 
     /// `task.fence` with no action: the check alone.

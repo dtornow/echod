@@ -5,6 +5,11 @@
 
 use vstd::prelude::*;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_verified_text_spec_starts_with as spec_starts_with,
+};
+
 verus! {
 
 /// A copy of a string.
@@ -29,9 +34,7 @@ pub fn strip_prefix(s: &str, p: &str) -> (r: Option<String>)
 }
 
 /// Does `s` start with `p`?
-pub open spec fn spec_starts_with(s: Seq<char>, p: Seq<char>) -> bool {
-    s.len() >= p.len() && s.subrange(0, p.len() as int) == p
-}
+
 
 /// `str::starts_with`, stated.
 #[verifier::external_body]

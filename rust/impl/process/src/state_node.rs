@@ -36,7 +36,7 @@
 //! over. The bytes of an announcement and of the configuration are
 //! `codec`, plain Rust over serde, stated once each.
 
-use vstd::contrib::make_spec_type;
+
 use vstd::prelude::*;
 
 use crate::concrete::store::before;
@@ -55,12 +55,119 @@ use crate::verified::node_spec::ANode;
 #[cfg(not(verus_keep_ghost))]
 use serde::{Deserialize, Serialize};
 
-verus! {
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionAnnouncementV as AnnouncementSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionConfigurationV as ConfigurationSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionRosterV as RosterSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionMembersV as MembersSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionNodeStateV as NodeSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionRefreshV as RefreshSpec;
 
-#[make_spec_type]
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_state_node_spec_roster_insert as spec_roster_insert,
+    production_state_node_spec_roster_ids as spec_roster_ids,
+    production_state_node_spec_members_new as spec_members_new,
+    production_state_node_spec_node_new as spec_node_new,
+    production_state_node_spec_announcement_bytes as spec_announcement_bytes,
+    production_state_node_spec_parse_announcement as spec_parse_announcement,
+    production_state_node_spec_configuration_bytes as spec_configuration_bytes,
+    production_state_node_spec_parse_configuration as spec_parse_configuration,
+};
+
+verus! {
+#[cfg(verus_keep_ghost)]
+impl DeepView for Announcement {
+    type V = AnnouncementSpec;
+    open spec fn deep_view(&self) -> AnnouncementSpec {
+        AnnouncementSpec {
+            id: self.id.deep_view(),
+            url: self.url.deep_view(),
+            at: self.at.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Announcement {
+    type V = AnnouncementSpec;
+    open spec fn view(&self) -> AnnouncementSpec { self.deep_view() }
+}
+#[cfg(verus_keep_ghost)]
+impl DeepView for Configuration {
+    type V = ConfigurationSpec;
+    open spec fn deep_view(&self) -> ConfigurationSpec {
+        ConfigurationSpec {
+            epoch: self.epoch.deep_view(),
+            members: self.members.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Configuration {
+    type V = ConfigurationSpec;
+    open spec fn view(&self) -> ConfigurationSpec { self.deep_view() }
+}
+#[cfg(verus_keep_ghost)]
+impl DeepView for Roster {
+    type V = RosterSpec;
+    open spec fn deep_view(&self) -> RosterSpec {
+        RosterSpec {
+            entries: self.entries.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Roster {
+    type V = RosterSpec;
+    open spec fn view(&self) -> RosterSpec { self.deep_view() }
+}
+#[cfg(verus_keep_ghost)]
+impl DeepView for Members {
+    type V = MembersSpec;
+    open spec fn deep_view(&self) -> MembersSpec {
+        MembersSpec {
+            me: self.me.deep_view(),
+            heartbeat_ms: self.heartbeat_ms.deep_view(),
+            ttl: self.ttl.deep_view(),
+            nodes: self.nodes.deep_view(),
+            etag: self.etag.deep_view(),
+            next_heartbeat: self.next_heartbeat.deep_view(),
+            refresh: self.refresh.deep_view(),
+            read_once: self.read_once.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Members {
+    type V = MembersSpec;
+    open spec fn view(&self) -> MembersSpec { self.deep_view() }
+}
+#[cfg(verus_keep_ghost)]
+impl DeepView for Node {
+    type V = NodeSpec;
+    open spec fn deep_view(&self) -> NodeSpec {
+        NodeSpec {
+            core: self.core.deep_view(),
+            members: self.members.deep_view(),
+            fleet_at: self.fleet_at.deep_view(),
+        }
+    }
+}
+#[cfg(verus_keep_ghost)]
+impl View for Node {
+    type V = NodeSpec;
+    open spec fn view(&self) -> NodeSpec { self.deep_view() }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize))]
+
+
 pub struct Announcement {
     pub id: String,
     pub url: String,
@@ -78,7 +185,6 @@ impl Announcement {
 }
 
 /// The configuration object: the members, and the epoch it was written in.
-#[make_spec_type]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[verifier::allow(autoderive_clone_without_spec)]
 #[cfg_attr(not(verus_keep_ghost), derive(Serialize, Deserialize, Default))]
@@ -95,30 +201,15 @@ pub type Announced = (String, Announcement);
 #[cfg(verus_keep_ghost)]
 pub type AnnouncedSpec = (Seq<char>, AnnouncementSpec);
 
-#[make_spec_type]
 pub struct Roster {
     pub entries: Vec<Announced>,
 }
 
 /// `id, a` filed in id order, in place of any announcement under `id`.
-pub open spec fn spec_roster_insert(s: Seq<AnnouncedSpec>, id: Seq<char>, a: AnnouncementSpec) -> Seq<AnnouncedSpec>
-    decreases s.len(),
-{
-    if s.len() == 0 {
-        seq![(id, a)]
-    } else if s[0].0 == id {
-        seq![(id, a)] + s.drop_first()
-    } else if spec_before(id, s[0].0) {
-        seq![(id, a)] + s
-    } else {
-        seq![s[0]] + spec_roster_insert(s.drop_first(), id, a)
-    }
-}
+
 
 /// The ids, in order.
-pub open spec fn spec_roster_ids(s: Seq<AnnouncedSpec>) -> Seq<Seq<char>> {
-    s.map_values(|e: AnnouncedSpec| e.0)
-}
+
 
 proof fn lemma_roster_insert_step(s: Seq<AnnouncedSpec>, id: Seq<char>, a: AnnouncementSpec, i: int)
     requires
@@ -350,14 +441,7 @@ pub enum Refresh {
     Writing { op: OpId, next: Configuration },
 }
 
-#[cfg(verus_keep_ghost)]
-pub ghost enum RefreshSpec {
-    Announcing { op: OpId, now: u64 },
-    Listing { op: OpId, now: u64 },
-    Reading { pending: Map<OpId, bool>, nodes: RosterSpec, now: u64, failed: Option<StoreErrorSpec> },
-    Config { op: OpId, nodes: RosterSpec },
-    Writing { op: OpId, next: ConfigurationSpec },
-}
+
 
 #[cfg(verus_keep_ghost)]
 impl DeepView for Refresh {
@@ -373,15 +457,7 @@ impl DeepView for Refresh {
     }
 }
 
-#[cfg(verus_keep_ghost)]
-impl RefreshSpec {
-    pub open spec fn expects(self, op: OpId) -> bool {
-        match self {
-            RefreshSpec::Announcing { op: o, .. } | RefreshSpec::Listing { op: o, .. } | RefreshSpec::Config { op: o, .. } | RefreshSpec::Writing { op: o, .. } => o == op,
-            RefreshSpec::Reading { pending, .. } => pending.contains_key(op),
-        }
-    }
-}
+
 
 impl Refresh {
     pub fn expects(&self, op: OpId) -> (r: bool)
@@ -395,7 +471,6 @@ impl Refresh {
     }
 }
 
-#[make_spec_type]
 pub struct Members {
     pub me: Announcement,
     pub heartbeat_ms: u64,
@@ -409,29 +484,9 @@ pub struct Members {
     pub read_once: bool,
 }
 
-pub open spec fn spec_members_new(cfg: crate::config::ConfigSpec) -> MembersSpec {
-    MembersSpec {
-        me: AnnouncementSpec { id: cfg.node_id, url: cfg.url, at: 0 },
-        heartbeat_ms: cfg.heartbeat_ms,
-        ttl: cfg.node_ttl_ms,
-        nodes: RosterSpec { entries: Seq::empty() },
-        etag: None,
-        next_heartbeat: None,
-        refresh: None,
-        read_once: false,
-    }
-}
 
-#[cfg(verus_keep_ghost)]
-impl MembersSpec {
-    pub open spec fn refreshing(self) -> bool {
-        self.refresh is Some
-    }
 
-    pub open spec fn wake_at(self) -> Option<u64> {
-        if self.refreshing() { None } else { self.next_heartbeat }
-    }
-}
+
 
 impl Members {
     pub fn new(cfg: &Config) -> (r: Members)
@@ -467,23 +522,13 @@ impl Members {
 
 /// What this process holds of the fleet: the proved membership core, the
 /// refresh in progress, and the latest instant any announcement carried.
-#[make_spec_type]
 pub struct Node {
     pub core: NodeCore,
     pub members: Members,
     pub fleet_at: u64,
 }
 
-pub open spec fn spec_node_new(cfg: crate::config::ConfigSpec) -> NodeSpec {
-    NodeSpec {
-        core: ANode {
-            id: cfg.node_id, ttl: cfg.node_ttl_ms as nat, read_any: false, epoch: 0,
-            members: Seq::empty(), last_read: 0, cache: Map::empty(), armed: Map::empty(),
-        },
-        members: spec_members_new(cfg),
-        fleet_at: 0,
-    }
-}
+
 
 impl Node {
     pub fn new(cfg: &Config) -> (r: Node)
@@ -502,12 +547,12 @@ impl Node {
 // The bytes, stated
 // ---------------------------------------------------------------------------
 
-pub uninterp spec fn spec_announcement_bytes(a: AnnouncementSpec) -> Seq<u8>;
-pub uninterp spec fn spec_parse_announcement(bytes: Seq<u8>) -> Option<AnnouncementSpec>;
-pub uninterp spec fn spec_configuration_bytes(c: ConfigurationSpec) -> Seq<u8>;
+
+
+
 /// What the configuration object says; bytes that do not parse say the
 /// default: epoch 0, no members.
-pub uninterp spec fn spec_parse_configuration(bytes: Seq<u8>) -> ConfigurationSpec;
+
 
 pub assume_specification [codec::announcement_bytes](a: &Announcement) -> (r: Vec<u8>)
     ensures

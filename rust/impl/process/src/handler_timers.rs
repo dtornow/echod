@@ -35,6 +35,32 @@ use crate::verified::node_spec::spec_owner;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::store::{StoreErrorSpec, StoreReqSpec};
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_handler_timers_spec_horizon as spec_horizon,
+    production_handler_timers_spec_owns as spec_owns,
+    production_handler_timers_spec_owns_entry as spec_owns_entry,
+    production_handler_timers_spec_owns_key as spec_owns_key,
+    production_handler_timers_spec_with_timers as spec_with_timers,
+    production_handler_timers_spec_timers_start as spec_timers_start,
+    production_handler_timers_spec_timers_membership_changed as spec_timers_membership_changed,
+    production_handler_timers_spec_timers_run as spec_timers_run,
+    production_handler_timers_spec_reload as spec_reload,
+    production_handler_timers_spec_take_bucket as spec_take_bucket,
+    production_handler_timers_spec_list_buckets as spec_list_buckets,
+    production_handler_timers_spec_timers_completed as spec_timers_completed,
+    production_handler_timers_spec_prefixes_listed as spec_prefixes_listed,
+    production_handler_timers_spec_bucket_listed as spec_bucket_listed,
+    production_handler_timers_spec_extended as spec_extended,
+    production_handler_timers_spec_relisted as spec_relisted,
+    production_handler_timers_spec_reloaded as spec_reloaded,
+    production_handler_timers_spec_listing_failed as spec_listing_failed,
+    production_handler_timers_spec_fire_due as spec_fire_due,
+    production_handler_timers_spec_dispatch_due as spec_dispatch_due,
+    production_handler_timers_spec_timer_fire as spec_timer_fire,
+    production_handler_timers_spec_timer_fired as spec_timer_fired,
+};
+
 verus! {
 
 // ---------------------------------------------------------------------------
@@ -44,312 +70,68 @@ verus! {
 /// The bucket a node must have loaded at `now`: the one after the current,
 /// so a deadline in the next bucket is in the wheel before the clock gets
 /// there.
-pub open spec fn spec_horizon(s: S, now: u64) -> u64 {
-    spec_bucket_of(now.saturating_add(s.keys.bucket_ms), s.keys.bucket_ms)
-}
+
 
 /// Does this node own `target` per the members it holds? No while nobody
 /// is a member yet.
-pub open spec fn spec_owns(s: S, target: Seq<char>) -> bool {
-    spec_owner(s.node.core.members, target) == Some(s.cfg.node_id)
-}
 
-pub open spec fn spec_owns_entry(s: S, e: TimerEntrySpec) -> bool {
-    spec_owns(s, e.target())
-}
 
-pub open spec fn spec_owns_key(s: S, key: Seq<char>) -> bool {
-    match spec_parse_timer_key(key) {
-        Some(e) => spec_owns_entry(s, e),
-        None => false,
-    }
-}
 
-pub open spec fn spec_with_timers(s: S, t: TimersSpec) -> S {
-    S { timers: t, ..s }
-}
+
+
+
+
 
 /// The first configuration is read: load, then fire from the wheel.
-#[verifier::opaque]
-pub open spec fn spec_timers_start(s: S, now: u64) -> S {
-    let s = spec_with_timers(s, TimersSpec { started: true, bucket_ms: s.keys.bucket_ms, reload_pending: true, ..s.timers });
-    spec_timers_run(s, now)
-}
 
-#[verifier::opaque]
-pub open spec fn spec_timers_membership_changed(s: S) -> S {
-    spec_with_timers(s, TimersSpec { reload_pending: true, ..s.timers })
-}
+
+
 
 /// Load what is owed, else fire what is due.
-#[verifier::opaque]
-pub open spec fn spec_timers_run(s: S, now: u64) -> S {
-    if !s.timers.started || s.timers.listing is Some {
-        s
-    } else if s.timers.backoff_until is Some && now < s.timers.backoff_until->Some_0 {
-        s
-    } else {
-        let s = spec_with_timers(s, TimersSpec { backoff_until: None, ..s.timers });
-        if s.timers.reload_pending {
-            spec_reload(s, now)
-        } else if s.timers.loaded_through is Some && s.timers.loaded_through->Some_0 < spec_horizon(s, now) {
-            let bucket = s.timers.loaded_through->Some_0.saturating_add(s.keys.bucket_ms);
-            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-            spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Extend { op, bucket }), ..s.timers })
-        } else if s.timers.closed_through is Some && s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms) < spec_bucket_of(now, s.keys.bucket_ms) {
-            let bucket = s.timers.closed_through->Some_0.saturating_add(s.keys.bucket_ms);
-            let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-            spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Relist { op, bucket }), ..s.timers })
-        } else if s.timers.loaded_through is Some {
-            spec_fire_due(s, now)
-        } else {
-            s
-        }
-    }
-}
+
 
 /// The full load: every bucket at or before the horizon, this node's
 /// share. Keys for targets that are no longer this node's leave the wheel;
 /// their owner lists them.
-pub open spec fn spec_reload(s: S, now: u64) -> S {
-    let horizon = spec_horizon(s, now);
-    let armed = s.timers.wheel.armed.filter(|k: SlotSpec| spec_owns_key(s, k.1));
-    let s = spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed }, ..s.timers });
-    let (s, op) = spec_store(s, StoreReqSpec::ListPrefixes { prefix: spec_timer_prefix(s.keys.prefix) }, Owner::Timers);
-    spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Prefixes { op, horizon }), ..s.timers })
-}
+
 
 /// Take this node's share of a listed bucket into the wheel; `n` counts
 /// the keys taken so far.
-pub open spec fn spec_take_bucket(s: S, keys: Seq<Seq<char>>, n: nat) -> (S, nat)
-    decreases keys.len(),
-{
-    if keys.len() == 0 {
-        (s, n)
-    } else {
-        let key = keys[0];
-        let (s, n) = match spec_parse_timer_key(key) {
-            Some(e) => {
-                if spec_owns_entry(s, e) {
-                    (spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed: spec_arm(s.timers.wheel.armed, e.deadline(), key) }, ..s.timers }), n + 1)
-                } else {
-                    (s, n)
-                }
-            },
-            None => (s, n),
-        };
-        spec_take_bucket(s, keys.drop_first(), n)
-    }
-}
+
 
 /// List every bucket at or before the horizon; `pending` collects the ops.
-pub open spec fn spec_list_buckets(s: S, prefixes: Seq<Seq<char>>, horizon: u64, pending: Map<OpId, u64>) -> (S, Map<OpId, u64>)
-    decreases prefixes.len(),
-{
-    if prefixes.len() == 0 {
-        (s, pending)
-    } else {
-        let (s, pending) = match spec_parse_bucket_prefix(s.keys.prefix, prefixes[0]) {
-            Some(bucket) => {
-                if bucket <= horizon {
-                    let (s, op) = spec_store(s, StoreReqSpec::List { prefix: spec_bucket_prefix(s.keys.prefix, bucket), max_keys: usize::MAX }, Owner::Timers);
-                    (s, pending.insert(op, bucket))
-                } else {
-                    (s, pending)
-                }
-            },
-            None => (s, pending),
-        };
-        spec_list_buckets(s, prefixes.drop_first(), horizon, pending)
-    }
-}
 
-#[verifier::opaque]
-pub open spec fn spec_timers_completed(s: S, op: OpId, outcome: StoreRes) -> S {
-    match s.timers.listing {
-        None => s,
-        Some(listing) => {
-            if !listing.expects(op) {
-                s
-            } else {
-                let s = spec_with_timers(s, TimersSpec { listing: None, ..s.timers });
-                let now = spec_now(s);
-                match listing {
-                    ListingSpec::Prefixes { horizon, .. } => spec_prefixes_listed(s, horizon, now, outcome),
-                    ListingSpec::Buckets { pending, horizon, loaded, failed } => spec_bucket_listed(s, pending.remove(op), horizon, loaded, failed, now, outcome),
-                    ListingSpec::Extend { bucket, .. } => spec_extended(s, bucket, now, outcome),
-                    ListingSpec::Relist { bucket, .. } => spec_relisted(s, bucket, now, outcome),
-                }
-            }
-        },
-    }
-}
+
+
 
 /// The bucket prefixes are listed: list each bucket up to the horizon.
-#[verifier::opaque]
-pub open spec fn spec_prefixes_listed(s: S, horizon: u64, now: u64, outcome: StoreRes) -> S {
-    match outcome {
-        StoreRes::ListPrefixes { result: Ok(prefixes) } => {
-            let (s, pending) = spec_list_buckets(s, prefixes.deep_view(), horizon, Map::empty());
-            if pending =~= Map::<OpId, u64>::empty() {
-                spec_reloaded(s, horizon, 0, now)
-            } else {
-                spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Buckets { pending, horizon, loaded: 0, failed: None }), ..s.timers })
-            }
-        },
-        StoreRes::ListPrefixes { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
-        _ => spec_listing_failed(s, spec_unexpected(), now),
-    }
-}
+
 
 /// One bucket of the full load is listed.
-#[verifier::opaque]
-pub open spec fn spec_bucket_listed(s: S, pending: Map<OpId, u64>, horizon: u64, loaded: usize, failed: Option<StoreErrorSpec>, now: u64, outcome: StoreRes) -> S {
-    let (s, loaded, failed) = match outcome {
-        StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
-            (s, loaded.saturating_add(n as usize), failed)
-        },
-        StoreRes::List { result: Err(e) } => (s, loaded, Some(e.deep_view())),
-        _ => (s, loaded, Some(spec_unexpected())),
-    };
-    if !(pending =~= Map::<OpId, u64>::empty()) {
-        spec_with_timers(s, TimersSpec { listing: Some(ListingSpec::Buckets { pending, horizon, loaded, failed }), ..s.timers })
-    } else {
-        match failed {
-            Some(e) => spec_listing_failed(s, e, now),
-            None => spec_reloaded(s, horizon, loaded, now),
-        }
-    }
-}
+
 
 /// The next bucket is listed: the horizon moves.
-#[verifier::opaque]
-pub open spec fn spec_extended(s: S, bucket: u64, now: u64, outcome: StoreRes) -> S {
-    match outcome {
-        StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
-            let s = spec_note(s, NoteSpec::BucketLoaded { bucket, deadlines: n as usize });
-            let s = spec_note(s, NoteSpec::TimerListing { ok: true });
-            let s = spec_with_timers(s, TimersSpec { loaded_through: Some(bucket), ..s.timers });
-            spec_timers_run(s, now)
-        },
-        StoreRes::List { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
-        _ => spec_listing_failed(s, spec_unexpected(), now),
-    }
-}
+
 
 /// A past bucket is listed again: it is closed.
-#[verifier::opaque]
-pub open spec fn spec_relisted(s: S, bucket: u64, now: u64, outcome: StoreRes) -> S {
-    match outcome {
-        StoreRes::List { result: Ok(keys) } => {
-            let (s, n) = spec_take_bucket(s, keys.deep_view(), 0);
-            let s = spec_note(s, NoteSpec::BucketLoaded { bucket, deadlines: n as usize });
-            let s = spec_note(s, NoteSpec::TimerListing { ok: true });
-            let s = spec_with_timers(s, TimersSpec { closed_through: Some(bucket), ..s.timers });
-            spec_timers_run(s, now)
-        },
-        StoreRes::List { result: Err(e) } => spec_listing_failed(s, e.deep_view(), now),
-        _ => spec_listing_failed(s, spec_unexpected(), now),
-    }
-}
 
-#[verifier::opaque]
-pub open spec fn spec_reloaded(s: S, horizon: u64, loaded: usize, now: u64) -> S {
-    let s = spec_with_timers(s, TimersSpec {
-        loaded_through: Some(horizon),
-        closed_through: Some(spec_bucket_of(now, s.keys.bucket_ms).saturating_sub(s.keys.bucket_ms)),
-        reload_pending: false,
-        ..s.timers
-    });
-    let s = spec_note(s, NoteSpec::TimerListing { ok: true });
-    let s = spec_note(s, NoteSpec::TimersLoaded { deadlines: loaded, wheel: s.timers.wheel.armed.len() as usize, epoch: s.node.core.epoch as u64 });
-    spec_timers_run(s, now)
-}
 
-#[verifier::opaque]
-pub open spec fn spec_listing_failed(s: S, e: StoreErrorSpec, now: u64) -> S {
-    let s = spec_note(s, NoteSpec::TimerListing { ok: false });
-    let s = spec_note(s, NoteSpec::ListingFailed { error: spec_error_text(e) });
-    spec_with_timers(s, TimersSpec { backoff_until: Some(now.saturating_add(RELIST_AFTER_MS)), ..s.timers })
-}
+
+
+
 
 /// Fire what is due, with a bound on how many sweeps run at once.
-#[verifier::opaque]
-pub open spec fn spec_fire_due(s: S, now: u64) -> S {
-    let (due, rest) = spec_take_due(s.timers.wheel.armed, now);
-    let s = spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed: rest }, backlog: s.timers.backlog + due, ..s.timers });
-    spec_dispatch_due(s, now, s.timers.backlog.len())
-}
+
 
 /// Fire the backlog, oldest first, while a sweep may start. `fuel` bounds
 /// the steps: the backlog's length, which a fire never grows.
-pub open spec fn spec_dispatch_due(s: S, now: u64, fuel: nat) -> S
-    decreases fuel,
-{
-    if fuel > 0 && s.timers.inflight < CONCURRENCY && s.timers.backlog.len() > 0 {
-        let (at, key) = s.timers.backlog[0];
-        let s = spec_with_timers(s, TimersSpec { backlog: s.timers.backlog.drop_first(), ..s.timers });
-        spec_dispatch_due(spec_timer_fire(s, key, at, now), now, (fuel - 1) as nat)
-    } else {
-        s
-    }
-}
+
 
 /// Fire one key: sweep its target if this node owns it, then collect it.
-#[verifier::opaque]
-pub open spec fn spec_timer_fire(s: S, key: Seq<char>, at: u64, now: u64) -> S {
-    match spec_parse_timer_key(key) {
-        None => spec_note(s, NoteSpec::KeyUnparseable { key }),
-        Some(entry) => {
-            let kind = match entry {
-                TimerEntrySpec::Origin { .. } => TimerKind::Origin,
-                TimerEntrySpec::Schedule { .. } => TimerKind::Schedule,
-            };
-            let lag = now.saturating_sub(at);
-            let owns = spec_owns_entry(s, entry);
-            if !owns || !crate::verified::node_spec::spec_acts(s.node.core, entry.target(), now as nat) {
-                let s = if owns {
-                    spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed: spec_arm(s.timers.wheel.armed, spec_max(now, at).saturating_add(RETRY_AFTER_MS), key) }, ..s.timers })
-                } else {
-                    s
-                };
-                spec_note(s, NoteSpec::TimerFire { kind, outcome: FireOutcome::Deferred, lag_ms: lag })
-            } else {
-                let s = spec_with_timers(s, TimersSpec { inflight: s.timers.inflight.saturating_add(1), ..s.timers });
-                let firing = FiringSpec { key, at, kind, lag };
-                match entry {
-                    TimerEntrySpec::Origin { origin, deadline, token, by } => {
-                        let fired = AFired { key: AKey { origin, at: deadline as nat, token: token as nat }, by };
-                        spec_submit(s, TargetSpec::Origin(origin), WorkSpec::Sweep { fired: Some(fired), now }, Some(firing), false)
-                    },
-                    TimerEntrySpec::Schedule { id, deadline, token, by } => {
-                        let fired = AFired { key: AKey { origin: "sched:"@ + id, at: deadline as nat, token: token as nat }, by };
-                        spec_submit(s, TargetSpec::Schedule(id), WorkSpec::Fire { schedule: id, fired: Some(fired), now }, Some(firing), false)
-                    },
-                }
-            }
-        },
-    }
-}
+
 
 /// The flight a key fired is over.
-#[verifier::opaque]
-pub open spec fn spec_timer_fired(s: S, firing: FiringSpec, now: u64, r: Result<Fired, Seq<char>>) -> S {
-    let s = spec_with_timers(s, TimersSpec { inflight: s.timers.inflight.saturating_sub(1), ..s.timers });
-    let rearm = spec_max(now, firing.at).saturating_add(RETRY_AFTER_MS);
-    let (s, outcome) = match r {
-        Ok(Fired::Deleted) => (s, FireOutcome::Deleted),
-        Ok(Fired::Kept) => (spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed: spec_arm(s.timers.wheel.armed, rearm, firing.key) }, ..s.timers }), FireOutcome::Kept),
-        Err(e) => {
-            let s = spec_note(s, NoteSpec::FireFailed { key: firing.key, error: e });
-            (spec_with_timers(s, TimersSpec { wheel: TimerWheelSpec { armed: spec_arm(s.timers.wheel.armed, rearm, firing.key) }, ..s.timers }), FireOutcome::Failed)
-        },
-    };
-    let s = spec_note(s, NoteSpec::TimerFire { kind: firing.kind, outcome, lag_ms: firing.lag });
-    spec_dispatch_due(s, now, s.timers.backlog.len())
-}
+
 
 // ---------------------------------------------------------------------------
 // Run

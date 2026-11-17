@@ -17,6 +17,36 @@ use rover_spec::rover::comm::Time;
 use crate::handler::{on_request,request_document,record_effect,note_effect,note_effects,note_effect_keys};
 
 verus! {
+pub open spec fn production_document_canonical(data: crate::state::ProductionDocumentData) -> bool {
+    match data {
+        crate::state::ProductionDocumentData::Schedule(_) => true,
+        crate::state::ProductionDocumentData::Workflow(entries) => {
+            let map = crate::handler::production_document_data_rows(entries.deep_view());
+            &&& entries@.map_values(|e: (String, crate::state::ProductionObjectData)| e.0@)
+                == crate::handler::spec_sorted_present(map)
+            &&& forall|i: int| 0 <= i < entries.len() ==> {
+                map.contains_key(entries[i].0@) && map[entries[i].0@] == entries[i].1.deep_view()
+            }
+        },
+    }
+}
+
+pub open spec fn production_debug_canonical(data: crate::state::ProductionDebugData) -> bool {
+    match data {
+        crate::state::ProductionDebugData::Snap { origins, .. } =>
+            forall|i: int| 0 <= i < origins.len() ==> production_document_canonical(#[trigger] origins[i]),
+        _ => true,
+    }
+}
+
+pub open spec fn production_effect_canonical(data: crate::state::ProductionEffectData) -> bool {
+    match data {
+        crate::state::ProductionEffectData::Reply { response: Ok(crate::state::ProductionAnswerData::Debug { body, .. }), .. } =>
+            production_debug_canonical(body),
+        _ => true,
+    }
+}
+
 pub open spec fn unique<T>(values: Seq<T>) -> bool {
     forall|i: int, j: int|
         0 <= i < values.len() && 0 <= j < values.len()
@@ -261,6 +291,33 @@ pub open spec fn effects_match(
     notes: Seq<NoteV>,
 ) -> bool {
     &&& note_effects(notes) == document_effects(before, after)
+    &&& note_effect_keys(notes).no_duplicates()
+}
+
+pub open spec fn collected_offers_valid(
+    map: Map<Seq<char>, crate::state::ObjV>,
+    notes: Seq<crate::state::NoteV>,
+) -> bool {
+    &&& note_effect_keys(notes).no_duplicates()
+    &&& forall|i: int| 0 <= i < notes.len() ==> match #[trigger] notes[i] {
+        crate::state::NoteV::Execute { id, version } =>
+            map.contains_key(id) && map[id].task is Some
+            && map[id].task.unwrap().state == TaskState::Pending
+            && map[id].task.unwrap().version == version,
+        _ => false,
+    }
+}
+
+pub open spec fn request_effects_match(
+    before: DocumentBodyV,
+    now: Time,
+    retry_timeout: u64,
+    notes: Seq<NoteV>,
+) -> bool {
+    &&& notes == match before {
+        DocumentBodyV::Workflow(objects) => crate::handler::spec_bulk_workflow(objects, now, retry_timeout).1,
+        DocumentBodyV::Schedule(_) => Seq::empty(),
+    }
     &&& note_effect_keys(notes).no_duplicates()
 }
 

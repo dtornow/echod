@@ -1239,6 +1239,8 @@ dependencies = [
  "prometheus-client",
  "reqwest 0.12.28",
  "resonate-core",
+ "rover-exec",
+ "rover-spec",
  "serde",
  "serde_json",
  "tokio",

@@ -17,6 +17,229 @@ use crate::property_proof::{lemma_min_key};
 use crate::axioms::*;
 
 verus! {
+pub open spec fn spec_install_origin_map<V>(live: Map<Chars, V>, evaluated: Map<Chars, V>, workflow: Chars) -> Map<Chars, V> {
+    Map::new(
+        live.dom().filter(|id: Chars| origin(id) != workflow)
+            .union(evaluated.dom().filter(|id: Chars| origin(id) == workflow)),
+        |id: Chars| if origin(id) == workflow { evaluated[id] } else { live[id] },
+    )
+}
+
+pub open spec fn spec_install_origin(live: StoreV, evaluated: StoreV, workflow: Chars) -> StoreV {
+    StoreV {
+        promises: spec_install_origin_map(live.promises, evaluated.promises, workflow),
+        tasks: spec_install_origin_map(live.tasks, evaluated.tasks, workflow),
+        schedules: live.schedules,
+    }
+}
+
+pub open spec fn spec_install_schedule(live: StoreV, evaluated: StoreV, id: Chars) -> StoreV {
+    StoreV {
+        schedules: if evaluated.schedules.contains_key(id) {
+            live.schedules.insert(id, evaluated.schedules[id])
+        } else { live.schedules.remove(id) },
+        ..live
+    }
+}
+
+pub open spec fn spec_admit_timed(
+    call: echod_types::protocol::TimedCall, observed_fleet_at: Time,
+) -> crate::state::TimedWorkV {
+    let admitted_at = if call.pinned || call.offered_at > observed_fleet_at { call.offered_at } else { observed_fleet_at };
+    let stage = match spec_detached_admission(call.call.request) {
+        None => crate::state::TimedStage::Whole,
+        Some((create, check)) => crate::state::TimedStage::DetachedCreate { create, check },
+    };
+    crate::state::TimedWorkV { call, admitted_at, stage }
+}
+
+pub open spec fn spec_timed_evaluation_time(work: crate::state::TimedWorkV, read_committed_at: Time) -> Time {
+    if read_committed_at > work.admitted_at { read_committed_at } else { work.admitted_at }
+}
+
+pub open spec fn spec_timed_request(work: crate::state::TimedWorkV) -> Request {
+    match work.stage {
+        crate::state::TimedStage::Whole => work.call.call.request,
+        crate::state::TimedStage::DetachedCreate { create, .. } => Request::PromiseCreate(create),
+        crate::state::TimedStage::DetachedCheck { check, .. } => Request::TaskFenceCheck(check),
+    }
+}
+
+pub open spec fn spec_workflow_id(request: Request) -> Option<Chars> {
+    match request {
+        Request::PromiseGet(q) => Some(q.id@),
+        Request::PromiseCreate(q) => Some(q.id@),
+        Request::PromiseSettle(q) => Some(q.id@),
+        Request::PromiseRegisterCallback(q) => Some(q.awaited@),
+        Request::PromiseRegisterListener(q) => Some(q.awaited@),
+        Request::TaskGet(q) => Some(q.id@),
+        Request::TaskCreate(q) => Some(q.action.id@),
+        Request::TaskAcquire(q) => Some(q.id@),
+        Request::TaskFulfill(q) => Some(q.id@),
+        Request::TaskRelease(q) => Some(q.id@),
+        Request::TaskHalt(q) => Some(q.id@),
+        Request::TaskContinue(q) => Some(q.id@),
+        Request::TaskFence(q) => Some(q.id@),
+        Request::TaskFenceCheck(q) => Some(q.id@),
+        Request::TaskSuspend(q) => Some(q.id@),
+        Request::TaskHeartbeat(q) => if q.tasks@.len() == 0 { None } else { Some(q.tasks@[0].id@) },
+        Request::ScheduleGet(_) | Request::ScheduleCreate(_) | Request::ScheduleDelete(_) => None,
+    }
+}
+
+pub open spec fn spec_timed_request_outcomes(
+    config: Config, work: crate::state::TimedWorkV, current: StoreV, read_committed_at: Time,
+) -> Seq<OutV> {
+    let now = spec_timed_evaluation_time(work, read_committed_at);
+    let (prepared, sends) = match spec_workflow_id(spec_timed_request(work)) {
+        Some(document) => spec_bulk_timed_origin(config, current, document, now),
+        None => (current, Seq::empty()),
+    };
+    spec_timed_handler_outcomes(config, work, prepared, read_committed_at)
+        .map_values(|out: OutV| OutV { send: sends + out.send, ..out })
+}
+
+pub open spec fn spec_project_timed_key(config: Config, s: StoreV, id: Seq<char>, now: Time) -> InOutV {
+    if !s.promises.contains_key(id) || s.promises[id].state != PromiseState::Pending {
+        spec_noop(s)
+    } else if s.promises[id].timeout_at <= now {
+        spec_process_work(config, InternalV::PromiseTimeout(id), s, now)
+    } else if s.tasks.contains_key(id) {
+        let task = s.tasks[id];
+        if task.state == TaskState::Acquired && spec_lease_at(task) <= now {
+            let released = spec_lease(s, id, now);
+            spec_retry(config, released.next, id, now)
+        } else if task.state == TaskState::Pending && match task.retry_timeout_at { Some(at) => at <= now, None => false } {
+            spec_retry(config, s, id, now)
+        } else { spec_noop(s) }
+    } else { spec_noop(s) }
+}
+
+pub open spec fn spec_project_timed_keys(
+    config: Config, original: StoreV, keys: Seq<Chars>, count: nat, now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases count,
+{
+    if count == 0 { (original, Seq::empty()) } else {
+        let (prior, sends) = spec_project_timed_keys(config, original, keys, (count - 1) as nat, now);
+        let next = spec_project_timed_key(config, prior, keys[count as int - 1], now);
+        (next.next, sends + next.send)
+    }
+}
+
+pub open spec fn spec_timed_origin_keys(s: StoreV, document: Chars) -> Seq<Chars> {
+    spec_sorted(s.promises.dom().filter(|id: Chars| origin(id) == origin(document)))
+}
+
+pub open spec fn spec_project_timed_origin(config: Config, s: StoreV, document: Chars, now: Time) -> (StoreV, Seq<DispatchV>) {
+    let keys = spec_timed_origin_keys(s, document);
+    spec_project_timed_keys(config, s, keys, keys.len(), now)
+}
+
+pub open spec fn spec_drain_timed_callback(
+    config: Config, s: StoreV, awaited: Chars, awaiter: Chars, now: Time,
+) -> (StoreV, Seq<DispatchV>) {
+    let callback = spec_callback(s, awaited, awaiter, now);
+    if s.tasks.contains_key(awaiter) && s.tasks[awaiter].state == TaskState::Suspended {
+        let retry = spec_retry(config, callback.next, awaiter, now);
+        (retry.next, retry.send)
+    } else { (callback.next, callback.send) }
+}
+
+pub open spec fn spec_drain_timed_callback_plan(
+    config: Config, original: StoreV, awaited: Chars, awaiters: Seq<Chars>, count: nat, now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases count,
+{
+    if count == 0 { (original, Seq::empty()) } else {
+        let (prior, sends) = spec_drain_timed_callback_plan(config, original, awaited, awaiters, (count - 1) as nat, now);
+        let (next, more) = spec_drain_timed_callback(config, prior, awaited, awaiters[count as int - 1], now);
+        (next, sends + more)
+    }
+}
+
+pub open spec fn spec_drain_timed_listener_plan(
+    original: StoreV, awaited: Chars, addresses: Seq<Chars>, count: nat, now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases count,
+{
+    if count == 0 { (original, Seq::empty()) } else {
+        let (prior, sends) = spec_drain_timed_listener_plan(original, awaited, addresses, (count - 1) as nat, now);
+        let next = spec_listener(prior, awaited, addresses[count as int - 1], now);
+        (next.next, sends + next.send)
+    }
+}
+
+pub open spec fn spec_drain_timed_callbacks(config: Config, s: StoreV, awaited: Chars, now: Time) -> (StoreV, Seq<DispatchV>) {
+    if !s.promises.contains_key(awaited) || s.promises[awaited].state == PromiseState::Pending {
+        (s, Seq::empty())
+    } else {
+        let plan = pset_seq(s.promises[awaited].callbacks);
+        spec_drain_timed_callback_plan(config, s, awaited, plan, plan.len(), now)
+    }
+}
+
+pub open spec fn spec_drain_timed_listeners(s: StoreV, awaited: Chars, now: Time) -> (StoreV, Seq<DispatchV>) {
+    if !s.promises.contains_key(awaited) || s.promises[awaited].state == PromiseState::Pending {
+        (s, Seq::empty())
+    } else {
+        let plan = pset_seq(s.promises[awaited].listeners);
+        spec_drain_timed_listener_plan(s, awaited, plan, plan.len(), now)
+    }
+}
+
+pub open spec fn spec_drain_timed_callback_keys(
+    config: Config, original: StoreV, keys: Seq<Chars>, count: nat, now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases count,
+{
+    if count == 0 { (original, Seq::empty()) } else {
+        let (prior, sends) = spec_drain_timed_callback_keys(config, original, keys, (count - 1) as nat, now);
+        let (next, more) = spec_drain_timed_callbacks(config, prior, keys[count as int - 1], now);
+        (next, sends + more)
+    }
+}
+
+pub open spec fn spec_drain_timed_listener_keys(
+    original: StoreV, keys: Seq<Chars>, count: nat, now: Time,
+) -> (StoreV, Seq<DispatchV>)
+    decreases count,
+{
+    if count == 0 { (original, Seq::empty()) } else {
+        let (prior, sends) = spec_drain_timed_listener_keys(original, keys, (count - 1) as nat, now);
+        let (next, more) = spec_drain_timed_listeners(prior, keys[count as int - 1], now);
+        (next, sends + more)
+    }
+}
+
+pub open spec fn spec_bulk_timed_origin(config: Config, s: StoreV, document: Chars, now: Time) -> (StoreV, Seq<DispatchV>) {
+    let keys = spec_timed_origin_keys(s, document);
+    let (projected, offers) = spec_project_timed_keys(config, s, keys, keys.len(), now);
+    let (resumed, callbacks) = spec_drain_timed_callback_keys(config, projected, keys, keys.len(), now);
+    let (next, listeners) = spec_drain_timed_listener_keys(resumed, keys, keys.len(), now);
+    (next, offers + callbacks + listeners)
+}
+
+pub open spec fn spec_timed_handler_outcomes(
+    config: Config, work: crate::state::TimedWorkV, current: StoreV, read_committed_at: Time,
+) -> Seq<OutV> {
+    let now = spec_timed_evaluation_time(work, read_committed_at);
+    match work.stage {
+        crate::state::TimedStage::Whole => spec_handler(config, work.call.call.request, current, now),
+        crate::state::TimedStage::DetachedCreate { create, .. } => spec_handler(config, Request::PromiseCreate(create), current, now),
+        crate::state::TimedStage::DetachedCheck { check, inner } => spec_detached_fence(
+            crate::state::DetachedFenceV { call: work.call.call, check, inner, now }, current),
+    }
+}
+
+pub open spec fn spec_continue_timed(work: crate::state::TimedWorkV, response: Response) -> Option<crate::state::TimedWorkV> {
+    match (work.stage, response) {
+        (crate::state::TimedStage::DetachedCreate { check, .. }, Response::Promise(inner)) =>
+            Some(crate::state::TimedWorkV { stage: crate::state::TimedStage::DetachedCheck { check, inner }, ..work }),
+        _ => None,
+    }
+}
+
 #[via_fn]
 proof fn spec_sorted_decreases(keys: Set<Seq<char>>) {
     if keys.finite() && keys.len() > 0 {
@@ -711,6 +934,19 @@ pub open spec fn spec_fence(req: TaskFenceReq, s: StoreV, now: Time) -> Seq<OutV
     }
 }
 
+pub open spec fn spec_detached_fence(
+    pending: crate::state::DetachedFenceV,
+    s: StoreV,
+) -> Seq<OutV> {
+    let code = match spec_held(s, pending.check.id@, pending.check.version, pending.now) {
+        SpecHeld::Missing => 404u16,
+        SpecHeld::Stale => 409u16,
+        SpecHeld::Ok(_) => 200u16,
+    };
+    let action = if code == 200 { Some(TaskFenceInnerRes::Create(pending.inner)) } else { None };
+    spec_out(spec_fence_res(code, action), s)
+}
+
 pub open spec fn spec_refs_one_origin(refs: Seq<TaskRef>, j: int) -> bool
     decreases refs.len() - j,
 {
@@ -1235,6 +1471,7 @@ pub open spec fn spec_request_outcome(
         state: Proc {
             store: outcome.next,
             pending: before.pending + outcome.work,
+            detached: before.detached,
         },
         send: spec_send(call, outcome.resp, outcome.send),
     }
@@ -1256,6 +1493,7 @@ pub open spec fn spec_lose(
         state: Proc {
             store: outcome.next,
             pending: before.pending + outcome.work,
+            detached: before.detached,
         },
         send: spec_send(call, spec_unavailable(call.request), outcome.send),
     }
@@ -1295,6 +1533,7 @@ pub open spec fn spec_internal_result(
         state: Proc {
             store: outcome.next,
             pending: remove_at(before.pending, i) + outcome.work,
+            detached: before.detached,
         },
         send: outcome.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
@@ -1320,7 +1559,7 @@ pub open spec fn spec_run(config: Config, state: Proc, call: Call, now: Time) ->
 
 pub open spec fn spec_due_result(before: Proc, outcome: InOutV) -> StepResultV<Proc, Pid, Message> {
     StepResultV {
-        state: Proc { store: outcome.next, pending: before.pending + outcome.work },
+        state: Proc { store: outcome.next, pending: before.pending + outcome.work, detached: before.detached },
         send: outcome.send.map_values(|dispatch: DispatchV| (
             Pid::Outside,
             Message::Output(Output::Dispatch(lift_dispatch(dispatch))),
@@ -1457,17 +1696,89 @@ pub open spec fn spec_run_timeout(config: Config, state: Proc, now: Time) -> Seq
 pub open spec fn spec_service(config: Config, state: Proc, now: Time, event: ProcessEvent<Pid, Message>) -> Seq<StepResultV<Proc, Pid, Message>> {
     match event {
         ProcessEvent::Receive { sender: Pid::Outside, message: Message::Request(call) } => {
-            let outcomes = spec_handler(config, call.request, state.store, now);
-            spec_run(config, state, call, now) + spec_losses(state, call, outcomes) + seq![spec_shed(
-                state,
-                call,
-            )]
+            match spec_detached_admission(call.request) {
+                Some((create, check)) => {
+                    let outcomes = spec_handler(config, Request::PromiseCreate(create), state.store, now);
+                    spec_detached_starts(state, call, check, now, outcomes)
+                        + spec_losses(state, call, outcomes) + seq![spec_shed(state, call)]
+                },
+                None => {
+                    let outcomes = spec_handler(config, call.request, state.store, now);
+                    spec_run(config, state, call, now) + spec_losses(state, call, outcomes) + seq![spec_shed(state, call)]
+                },
+            }
         },
         ProcessEvent::Timeout => {
-            let results = spec_run_timeout(config, state, now);
+            let results = spec_run_timeout(config, state, now) + spec_detached_queue(state, 0);
             if results.len() == 0 { spec_idle(state) } else { results }
         },
         _ => spec_idle(state),
+    }
+}
+
+pub open spec fn spec_detached_admission(request: Request) -> Option<(PromiseCreateReq, TaskFenceCheckReq)> {
+    match request {
+        Request::TaskFence(req) => match req.action {
+            TaskFenceAction::Create(c) if !same_origin_spec(c.id@, req.id@) && c.timeout_at <= MAX_TIME => {
+                Some((c, TaskFenceCheckReq { id: req.id, version: req.version }))
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub open spec fn spec_detached_started(
+    before: Proc, call: Call, check: TaskFenceCheckReq, now: Time, outcome: OutV,
+) -> StepResultV<Proc, Pid, Message> {
+    match outcome.resp {
+        Response::Promise(inner) => StepResultV {
+            state: Proc {
+                store: outcome.next,
+                pending: before.pending + outcome.work,
+                detached: before.detached.push(crate::state::DetachedFenceV { call, check, inner, now }),
+            },
+            send: outcome.send.map_values(|d: DispatchV| (
+                Pid::Outside, Message::Output(Output::Dispatch(lift_dispatch(d))),
+            )),
+        },
+        _ => spec_request_outcome(before, call, outcome),
+    }
+}
+
+pub open spec fn spec_detached_completed(
+    before: Proc, i: int, outcome: OutV,
+) -> StepResultV<Proc, Pid, Message>
+    recommends 0 <= i < before.detached.len(),
+{
+    spec_request_outcome(
+        Proc { detached: remove_at(before.detached, i), ..before },
+        before.detached[i].call,
+        outcome,
+    )
+}
+
+pub open spec fn spec_detached_failed(before: Proc, i: int) -> StepResultV<Proc, Pid, Message>
+    recommends 0 <= i < before.detached.len(),
+{
+    spec_shed(Proc { detached: remove_at(before.detached, i), ..before }, before.detached[i].call)
+}
+
+pub open spec fn spec_detached_starts(
+    before: Proc, call: Call, check: TaskFenceCheckReq, now: Time, outcomes: Seq<OutV>,
+) -> Seq<StepResultV<Proc, Pid, Message>> {
+    outcomes.map_values(|outcome: OutV| spec_detached_started(before, call, check, now, outcome))
+}
+
+pub open spec fn spec_detached_queue(before: Proc, i: int) -> Seq<StepResultV<Proc, Pid, Message>>
+    decreases before.detached.len() - i,
+{
+    if i < 0 || i >= before.detached.len() {
+        Seq::empty()
+    } else {
+        let outcomes = spec_detached_fence(before.detached[i], before.store);
+        outcomes.map_values(|outcome: OutV| spec_detached_completed(before, i, outcome))
+            + seq![spec_detached_failed(before, i)] + spec_detached_queue(before, i + 1)
     }
 }
 }

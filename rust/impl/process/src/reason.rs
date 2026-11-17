@@ -20,17 +20,20 @@ use crate::concrete::document::{spec_workflow_map, DocumentBodyV};
 #[cfg(verus_keep_ghost)]
 use echod_types::AResponse;
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_reason_spec_reason as spec_reason,
+    production_reason_spec_status_of as spec_status_of,
+    production_reason_spec_target_of as spec_target_of,
+    production_reason_spec_object as spec_object,
+    production_reason_spec_any_missing as spec_any_missing,
+    production_reason_spec_reason_for as spec_reason_for,
+};
+
 verus! {
 
 /// What a status says when nothing more is known of why.
-pub open spec fn spec_reason(status: u16) -> Seq<char> {
-    if status == 400 { "Bad request"@ }
-    else if status == 403 { "Forbidden"@ }
-    else if status == 404 { "Not found"@ }
-    else if status == 409 { "Conflict"@ }
-    else if status == 422 { "Unprocessable"@ }
-    else { "Error"@ }
-}
+
 
 pub fn reason(status: u16) -> (r: &'static str)
     ensures
@@ -47,16 +50,7 @@ pub fn reason(status: u16) -> (r: &'static str)
 }
 
 /// The status a response carries.
-pub open spec fn spec_status_of(r: AResponse) -> u16 {
-    match r {
-        AResponse::Promise(p) => p.status,
-        AResponse::Schedule(c) => c.status,
-        AResponse::Status(st) => st.status,
-        AResponse::TaskGet(g) => g.status,
-        AResponse::TaskClaim(c) => c.status,
-        AResponse::TaskFence(f) => f.status,
-    }
-}
+
 
 pub fn status_of(r: &Response) -> (s: u16)
     ensures
@@ -74,17 +68,7 @@ pub fn status_of(r: &Response) -> (s: u16)
 
 /// The address the `resonate:target` tag names, if one does: the first
 /// such tag.
-pub open spec fn spec_target_of(tags: Seq<(String, String)>) -> Option<Seq<char>>
-    decreases tags.len(),
-{
-    if tags.len() == 0 {
-        None
-    } else if tags[0].0@ == "resonate:target"@ {
-        Some(tags[0].1@)
-    } else {
-        spec_target_of(tags.drop_first())
-    }
-}
+
 
 proof fn lemma_target_of_step(tags: Seq<(String, String)>, i: int)
     requires
@@ -131,9 +115,7 @@ pub fn target_of(tags: &Tags) -> (r: Option<String>)
 }
 
 /// `map[id]`, if the document holds it.
-pub open spec fn spec_object(doc: DocumentBodyV, id: Seq<char>) -> Option<crate::concrete::document::ObjV> {
-    if spec_workflow_map(doc).contains_key(id) { Some(spec_workflow_map(doc)[id]) } else { None }
-}
+
 
 fn object(doc: &DocumentBody, id: &String) -> (r: Option<Obj>)
     ensures
@@ -146,17 +128,7 @@ fn object(doc: &DocumentBody, id: &String) -> (r: Option<Obj>)
 }
 
 /// Does any action await a promise the document does not hold?
-pub open spec fn spec_any_missing(doc: DocumentBodyV, actions: Seq<echod_types::PromiseRegisterCallbackReq>) -> bool
-    decreases actions.len(),
-{
-    if actions.len() == 0 {
-        false
-    } else if spec_object(doc, actions[0].awaited@) is None {
-        true
-    } else {
-        spec_any_missing(doc, actions.drop_first())
-    }
-}
+
 
 proof fn lemma_any_missing_step(doc: DocumentBodyV, actions: Seq<echod_types::PromiseRegisterCallbackReq>, i: int)
     requires
@@ -204,59 +176,7 @@ fn any_missing(doc: &DocumentBody, actions: &Vec<echod_types::PromiseRegisterCal
 
 /// The words for `status` on `kind`, read off the document where the
 /// status has several causes.
-pub open spec fn spec_reason_for(kind: Seq<char>, req: Request, status: u16, doc: DocumentBodyV) -> Seq<char> {
-    if (kind == "promise.get"@ || kind == "promise.settle"@) && status == 404 {
-        "Promise not found"@
-    } else if (kind == "promise.register_callback"@ || kind == "promise.register_listener"@) && status == 404 {
-        "Awaited promise not found"@
-    } else if kind == "promise.register_callback"@ && status == 422 {
-        match req {
-            Request::PromiseRegisterCallback(c) => match spec_object(doc, c.awaiter@) {
-                None => "Awaiter promise not found"@,
-                Some(w) => if spec_target_of(w.promise.tags@) is None { "Awaiter promise has no resonate:target tag"@ } else { "Awaited promise is not awaitable"@ },
-            },
-            _ => "Awaited promise is not awaitable"@,
-        }
-    } else if kind == "promise.register_listener"@ && status == 422 {
-        "Awaited promise is not awaitable"@
-    } else if (kind == "task.get"@ || kind == "task.acquire"@ || kind == "task.release"@ || kind == "task.fulfill"@ || kind == "task.suspend"@ || kind == "task.fence"@ || kind == "task.halt"@ || kind == "task.continue"@) && status == 404 {
-        "Task not found"@
-    } else if kind == "task.create"@ && status == 409 {
-        "Already exists"@
-    } else if kind == "task.create"@ && status == 422 {
-        "The promise does not have a resonate:target tag"@
-    } else if kind == "task.acquire"@ && status == 409 {
-        match req {
-            Request::TaskAcquire(a) => match spec_object(doc, a.id@) {
-                Some(o) => match o.task {
-                    Some(t) => if t.state == TaskState::Pending { "Version mismatch"@ } else { "Task is not pending"@ },
-                    None => "Task is not pending"@,
-                },
-                None => "Task is not pending"@,
-            },
-            _ => "Task is not pending"@,
-        }
-    } else if (kind == "task.release"@ || kind == "task.fulfill"@) && status == 409 {
-        "Task version mismatch or invalid state"@
-    } else if kind == "task.suspend"@ && status == 409 {
-        "Task is not acquired or version mismatch"@
-    } else if kind == "task.suspend"@ && status == 422 {
-        match req {
-            Request::TaskSuspend(q) => if spec_any_missing(doc, q.actions@) { "Awaited promise not found"@ } else { "Awaited promise is not awaitable"@ },
-            _ => "Awaited promise is not awaitable"@,
-        }
-    } else if kind == "task.fence"@ && status == 409 {
-        "Version mismatch"@
-    } else if kind == "task.halt"@ && status == 409 {
-        "Task is fulfilled"@
-    } else if kind == "task.continue"@ && status == 409 {
-        "Task is not halted"@
-    } else if (kind == "schedule.get"@ || kind == "schedule.delete"@) && status == 404 {
-        "Schedule not found"@
-    } else {
-        spec_reason(status)
-    }
-}
+
 
 pub fn reason_for(kind: &str, req: &Request, status: u16, doc: &DocumentBody) -> (r: String)
     ensures

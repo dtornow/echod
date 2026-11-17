@@ -72,6 +72,7 @@ impl RoverSpec::Spec for Spec {
             Proc {
                 store: empty_store(),
                 pending: Seq::empty(),
+                detached: Seq::empty(),
             },
         )]
     }

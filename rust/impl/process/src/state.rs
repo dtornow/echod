@@ -9,7 +9,7 @@
 //! ensures it computes its `spec_*` on it. Theorem 1 is `on_event` in
 //! `handler.rs`: the process computes `spec_on_event`.
 
-use vstd::contrib::make_spec_type;
+
 use vstd::prelude::*;
 
 use crate::cache::{Cache, Cached};
@@ -35,29 +35,64 @@ use crate::verified::node::AKey;
 #[cfg(verus_keep_ghost)]
 use crate::concrete::store::StoreReqSpec;
 
-verus! {
-
-/// Who waits for a store call's answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Structural)]
-pub enum Owner {
-    Flight(FlightId),
-    Members,
-    Timers,
-    Debug,
-    /// Nobody: a best-effort call whose answer changes nothing.
-    Ignored,
-}
-
 #[cfg(verus_keep_ghost)]
-impl DeepView for Owner {
-    type V = Owner;
-    open spec fn deep_view(&self) -> Owner {
-        *self
+pub use echod_concrete_spec::state::ProductionStateV as StateSpec;
+
+pub use echod_types::ProductionOwner as Owner;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_state_spec_state_new as spec_state_new,
+    production_state_spec_now as spec_now,
+    production_state_spec_fresh as spec_fresh,
+    production_state_spec_acting as spec_acting,
+    production_state_spec_emit as spec_emit,
+    production_state_spec_note as spec_note,
+    production_state_spec_store as spec_store,
+    production_state_spec_token as spec_token,
+    production_state_spec_key_name as spec_key_name,
+    production_state_spec_forget_all as spec_forget_all,
+    production_state_spec_remember as spec_remember,
+    production_state_spec_forget_origin as spec_forget_origin,
+    production_state_spec_wake_moved as spec_wake_moved,
+};
+
+verus! {
+#[cfg(verus_keep_ghost)]
+impl DeepView for State {
+    type V = StateSpec;
+    open spec fn deep_view(&self) -> StateSpec {
+        StateSpec {
+            cfg: self.cfg.deep_view(),
+            keys: self.keys.deep_view(),
+            node: self.node.deep_view(),
+            timers: self.timers.deep_view(),
+            cache: self.cache.deep_view(),
+            clock: self.clock.deep_view(),
+            tokens: self.tokens.deep_view(),
+            next_op: self.next_op.deep_view(),
+            next_flight: self.next_flight.deep_view(),
+            ops: self.ops.deep_view(),
+            flights: self.flights.deep_view(),
+            debug: self.debug.deep_view(),
+            loops: self.loops.deep_view(),
+            out: self.out.deep_view(),
+            last_wake: self.last_wake.deep_view(),
+        }
     }
 }
+#[cfg(verus_keep_ghost)]
+impl View for State {
+    type V = StateSpec;
+    open spec fn view(&self) -> StateSpec { self.deep_view() }
+}
+
+
+/// Who waits for a store call's answer.
+
+
+
 
 /// The process. Every core transition uses `on_event`.
-#[make_spec_type]
 pub struct State {
     pub cfg: Config,
     pub keys: KeySpace,
@@ -89,102 +124,38 @@ pub type S = StateSpec;
 // What each step means
 // ---------------------------------------------------------------------------
 
-pub open spec fn spec_state_new(cfg: ConfigSpec) -> S {
-    S {
-        node: crate::state_node::spec_node_new(cfg),
-        timers: crate::state_timers::spec_timers_new(),
-        cache: crate::cache::spec_new(cfg.cache_entries, cfg.cache_bytes),
-        clock: 0,
-        tokens: (hash(cfg.url + "/"@ + cfg.node_id) as u64) | 1,
-        next_op: 1,
-        next_flight: 1,
-        ops: Map::empty(),
-        flights: crate::handler_docs::spec_flights_new(),
-        debug: crate::debug::spec_debug_new(),
-        loops: false,
-        out: Seq::empty(),
-        last_wake: None,
-        keys: KeySpaceSpec {
-            prefix: spec_normalize_prefix(cfg.prefix),
-            bucket_ms: if cfg.timer_bucket_ms < 1 { 1u64 } else { cfg.timer_bucket_ms },
-        },
-        cfg,
-    }
-}
+
 
 /// The fleet's time: this node's clock, or the latest announcement it has
 /// listed, whichever is later.
-pub open spec fn spec_now(s: S) -> u64 {
-    if s.clock > s.node.fleet_at { s.clock } else { s.node.fleet_at }
-}
 
-pub open spec fn spec_fresh(s: S) -> bool {
-    crate::verified::node_spec::spec_fresh(s.node.core, spec_now(s) as nat)
-}
 
-pub open spec fn spec_acting(s: S) -> bool {
-    s.node.core.members.len() != 0 && spec_fresh(s)
-}
 
-pub open spec fn spec_emit(s: S, e: EffectSpec) -> S {
-    S { out: s.out.push(e), ..s }
-}
 
-pub open spec fn spec_note(s: S, n: NoteSpec) -> S {
-    S { out: s.out.push(EffectSpec::Note(n)), ..s }
-}
+
+
+
+
+
 
 /// Issue a store call; `owner` gets its answer.
-pub open spec fn spec_store(s: S, request: StoreReqSpec, owner: Owner) -> (S, OpId) {
-    let op = s.next_op;
-    (S {
-        next_op: s.next_op.wrapping_add(1),
-        ops: s.ops.insert(op, owner),
-        out: s.out.push(EffectSpec::Store { op, request }),
-        ..s
-    }, op)
-}
+
 
 /// A token no other arm of this node has used.
-pub open spec fn spec_token(s: S) -> (S, u64) {
-    (S { tokens: s.tokens.wrapping_add(0x9e37_79b9_7f4a_7c15), ..s }, s.tokens)
-}
+
 
 /// The name of a key in the bucket, armed by `by`.
-pub open spec fn spec_key_name(s: S, k: AKey, by: Seq<char>) -> Seq<char> {
-    if crate::verified::text::spec_starts_with(k.origin, "sched:"@) {
-        spec_sched_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin.skip(6), k.at as u64, k.token as u64, by)
-    } else {
-        spec_timer_key(s.keys.prefix, s.keys.bucket_ms, k.origin, k.at as u64, k.token as u64, by)
-    }
-}
+
 
 /// Forget every origin the cache evicted, in order.
-pub open spec fn spec_forget_all(core: ANode, evicted: Seq<Seq<char>>) -> ANode
-    decreases evicted.len(),
-{
-    if evicted.len() == 0 { core } else { spec_forget_all(spec_forget(core, evicted[0]), evicted.drop_first()) }
-}
+
 
 /// Remember a document and report its version to the core: read or wrote.
-pub open spec fn spec_remember(s: S, origin: Seq<char>, c: CachedSpec) -> S {
-    let (evicted, cache) = crate::cache::spec_put(s.cache, origin, c);
-    let core = spec_forget_all(s.node.core, evicted);
-    let core = spec_filled(core, origin, c.etag.0, c.filled_at as nat);
-    S { cache, node: crate::state_node::NodeSpec { core, ..s.node }, ..s }
-}
 
-pub open spec fn spec_forget_origin(s: S, origin: Seq<char>) -> S {
-    S {
-        cache: crate::cache::spec_remove(s.cache, origin),
-        node: crate::state_node::NodeSpec { core: spec_forget(s.node.core, origin), ..s.node },
-        ..s
-    }
-}
 
-pub open spec fn spec_wake_moved(s: S, next: Option<(u64, Armed)>) -> (S, bool) {
-    if next == s.last_wake { (s, false) } else { (S { last_wake: next, ..s }, true) }
-}
+
+
+
 
 // ---------------------------------------------------------------------------
 // The process, step for step

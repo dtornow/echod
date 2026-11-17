@@ -5,6 +5,14 @@ use vstd::prelude::*;
 use crate::verified::node::str_eq;
 use crate::verified::text::{concat, copy_string, strip_prefix, text};
 
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::state::ProductionTargetV as TargetSpec;
+#[cfg(verus_keep_ghost)]
+pub use echod_concrete_spec::handler::{
+    production_target_spec_name as spec_name,
+    production_target_spec_of_name as spec_of_name,
+};
+
 verus! {
 
 /// What a step is run on.
@@ -15,11 +23,7 @@ pub enum Target {
     Schedule(String),
 }
 
-#[cfg(verus_keep_ghost)]
-pub ghost enum TargetSpec {
-    Origin(Seq<char>),
-    Schedule(Seq<char>),
-}
+
 
 #[cfg(verus_keep_ghost)]
 impl DeepView for Target {
@@ -34,21 +38,10 @@ impl DeepView for Target {
 
 /// The name the keys and the node's decisions go by: the origin, or
 /// `sched:<id>`.
-pub open spec fn spec_name(t: TargetSpec) -> Seq<char> {
-    match t {
-        TargetSpec::Origin(o) => o,
-        TargetSpec::Schedule(id) => "sched:"@ + id,
-    }
-}
+
 
 /// The target a timer key's name says.
-pub open spec fn spec_of_name(name: Seq<char>) -> TargetSpec {
-    if name.len() >= 6 && name.subrange(0, 6) == "sched:"@ {
-        TargetSpec::Schedule(name.subrange(6, name.len() as int))
-    } else {
-        TargetSpec::Origin(name)
-    }
-}
+
 
 impl Target {
     /// The name the keys and the node's decisions go by.
