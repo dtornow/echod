@@ -77,7 +77,7 @@ pub fn schedule_out(c: &rows::Schedule) -> w::ScheduleRecord {
         promise_param: value_out(&c.promise_param),
         promise_tags: map(&c.promise_tags),
         created_at: c.created_at as i64,
-        next_run_at: c.next_run_at as i64,
+        next_run_at: c.next_run_at.unwrap_or(0) as i64,
         last_run_at: c.last_run_at.map(|x| x as i64),
     }
 }

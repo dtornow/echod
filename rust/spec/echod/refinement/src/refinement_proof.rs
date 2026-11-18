@@ -4451,7 +4451,7 @@ pub(crate) proof fn lemma_schedule_create_agrees(
     lemma_schedule_key(req.id@);
     let slot = doc->Schedule_0;
     let next_run_at = echod_types::common::spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+    if next_run_at.is_none() || !spec_deadline_bounded(next_run_at.unwrap(), req.promise_timeout)
         || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags)) {
         assert(outs == spec_out(spec_schedule_res(400, None), s));
         lemma_others_same(key, s);
@@ -5237,7 +5237,7 @@ pub(crate) proof fn lemma_over_tasks_offered(
 /// The timeout work of a schedule.
 pub(crate) open spec fn schedule_work(s: AStore, id: Seq<char>) -> InternalV {
     let c = s.schedules[id];
-    InternalV::ScheduleTimeout { id, promise: spec_expand(c.promise_id, id, c.next_run_at) }
+    InternalV::ScheduleTimeout { id, promise: spec_expand(c.promise_id, id, c.next_run_at.unwrap()) }
 }
 
 pub(crate) proof fn lemma_over_schedules_offered(
@@ -5249,6 +5249,7 @@ pub(crate) proof fn lemma_over_schedules_offered(
 )
     requires
         keys.contains(id),
+        state.store.schedules[id].next_run_at.is_some(),
     ensures
         offered(
             config,
@@ -5260,7 +5261,11 @@ pub(crate) proof fn lemma_over_schedules_offered(
     decreases keys.len(),
 {
     let head = keys[0];
-    let first = spec_keep(config, state, now, schedule_work(state.store, head), Seq::empty());
+    let first = if state.store.schedules[head].next_run_at.is_some() {
+        spec_keep(config, state, now, schedule_work(state.store, head), Seq::empty())
+    } else {
+        Seq::empty()
+    };
     let rest = spec_over_schedules(config, state, now, keys.drop_first());
     assert(spec_over_schedules(config, state, now, keys) == first + rest);
     if head == id {
@@ -5296,7 +5301,8 @@ pub(crate) proof fn lemma_timeout_offered(config: AbstractConfig, state: Proc, n
                 spec_run_timeout(config, state, now),
             ),
         forall|id: Seq<char>|
-            #[trigger] state.store.schedules.contains_key(id) ==> offered(
+            #[trigger] state.store.schedules.contains_key(id)
+                && state.store.schedules[id].next_run_at.is_some() ==> offered(
                 config,
                 state,
                 now,
@@ -5346,7 +5352,8 @@ pub(crate) proof fn lemma_timeout_offered(config: AbstractConfig, state: Proc, n
             lemma_offered_right(config, state, now, InternalV::TaskRetryTimeout(id), queued, op + ot + os);
         }
     };
-    assert forall|id: Seq<char>| #[trigger] s.schedules.contains_key(id) implies offered(
+    assert forall|id: Seq<char>| #[trigger] s.schedules.contains_key(id)
+        && s.schedules[id].next_run_at.is_some() implies offered(
         config,
         state,
         now,
@@ -5372,6 +5379,7 @@ pub(crate) open spec fn work_known(s: AStore, work: InternalV) -> bool {
         InternalV::TaskRetryTimeout(id) => s.tasks.contains_key(id)
             && s.tasks[id].retry_timeout_at is Some,
         InternalV::ScheduleTimeout { id, promise } => s.schedules.contains_key(id)
+            && s.schedules[id].next_run_at.is_some()
             && work == schedule_work(s, id),
         InternalV::Occurrence { .. } => false,
     }
@@ -6281,7 +6289,8 @@ pub(crate) proof fn lemma_schedule_due(
         key == spec_schedule_key(id),
         slot_rel(Some(sch), id, state.store),
         finite_store(state.store),
-        sch.next_run_at <= now,
+        sch.next_run_at.is_some(),
+        sch.next_run_at.unwrap() <= now,
     ensures
         due_agrees(config, key, DocumentBodyV::Schedule(Some(sch)), state, now),
 {
@@ -6291,8 +6300,8 @@ pub(crate) proof fn lemma_schedule_due(
     let c = s.schedules[id];
     assert(schedule_rel(sch, c));
     assert(sch.id@ == id);
-    let at = sch.next_run_at;
-    assert(c.next_run_at == at);
+    let at = sch.next_run_at.unwrap();
+    assert(c.next_run_at == Some(at));
     let work = schedule_work(s, id);
     let results = spec_run_timeout(config, state, now);
     lemma_work_offered(config, state, now, work);
@@ -6363,7 +6372,7 @@ pub(crate) proof fn lemma_due_agrees(config: AbstractConfig, key: Seq<char>, doc
         assert(key == spec_schedule_key(id));
         match doc {
             DocumentBodyV::Schedule(Some(sch)) => {
-                if sch.next_run_at <= now {
+                if sch.next_run_at.is_some() && sch.next_run_at.unwrap() <= now {
                     lemma_schedule_due(config, key, id, sch, state, now);
                 } else {
                     assert(spec_run_due(doc, now, config.retry_timeout) == (doc, None::<Response>, Seq::<PendingV>::empty(), Seq::<NoteV>::empty()));

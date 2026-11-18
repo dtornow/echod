@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 struct Bucket {
     objects: BTreeMap<String, (Vec<u8>, u64)>,
     next_version: u64,
+    lose_put_ack: Option<String>,
 }
 
 impl Bucket {
@@ -25,7 +26,8 @@ impl Bucket {
     }
 
     fn call(&mut self, request: StoreReq) -> StoreRes {
-        match request {
+        let lose_ack = matches!(&request, StoreReq::PutIfMatch { key, .. } if self.lose_put_ack.as_ref() == Some(key));
+        let result = match request {
             StoreReq::Get { key } => StoreRes::Get { result: Ok(self.objects.get(&key).map(|(b, v)| (b.clone(), Self::etag(b, *v)))) },
             StoreReq::GetIfNoneMatch { key, etag } => StoreRes::GetIfNoneMatch { result: Ok(match self.objects.get(&key) {
                 None => Read::Absent,
@@ -74,6 +76,12 @@ impl Bucket {
                 }
                 StoreRes::ListPrefixes { result: Ok(out) }
             }
+        };
+        if lose_ack && matches!(&result, StoreRes::PutIfMatch { result: Ok(_) }) {
+            self.lose_put_ack = None;
+            StoreRes::PutIfMatch { result: Err(echod_logic::types::StoreError::Unavailable("committed but acknowledgement lost".into())) }
+        } else {
+            result
         }
     }
 }
@@ -1091,7 +1099,7 @@ fn failed_cas_discards_notifications_and_reloads_before_retry() {
     let (write_op, write) = calls.pop().unwrap();
     assert!(matches!(write, StoreReq::PutIfMatch { .. }));
     let probe = h.replay_probe.as_ref().unwrap();
-    let mut branch_bucket = Bucket { objects: h.bucket.objects.clone(), next_version: h.bucket.next_version };
+    let mut branch_bucket = Bucket { objects: h.bucket.objects.clone(), next_version: h.bucket.next_version, lose_put_ack: h.bucket.lose_put_ack.clone() };
     let successful = branch_bucket.call(write.clone());
     let success_event = Event::Store { op: write_op, response: successful, clock: h.clock };
     let failure_event = Event::Store {
@@ -1312,6 +1320,82 @@ fn the_same_events_give_the_same_effects() {
         h.bucket.objects.keys().cloned().collect::<Vec<_>>()
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn impossible_and_expired_schedules_are_rejected() {
+    let mut h = Harness::new("n1");
+    h.clock = 1_767_225_600_000;
+    h.start(true);
+    h.advance(100);
+    for cron in ["0 0 30 2 *", "0 0 0 1 1 * 2020"] {
+        let (status, data) = h.request("schedule.create", json!({
+            "id": "never", "cron": cron, "promiseId": "never-{{.timestamp}}",
+            "promiseTimeout": 60_000,
+            "promiseTags": {"resonate:target": "http://worker/"},
+        }));
+        assert_eq!(status, 400, "{data}");
+        assert!(data.to_string().contains("no future occurrence"), "{data}");
+        assert_eq!(h.request("schedule.get", json!({"id": "never"})).0, 404);
+    }
+    assert!(!h.notes.iter().any(|n| matches!(n, Note::FireBegin { .. })));
+}
+
+#[test]
+fn final_schedule_occurrence_retires_and_stays_retired_after_restart() {
+    check_schedule_retirement(false);
+}
+
+#[test]
+fn final_schedule_retirement_survives_a_lost_commit_acknowledgement() {
+    check_schedule_retirement(true);
+}
+
+fn check_schedule_retirement(lose_ack: bool) {
+    let mut h = Harness::new("n1");
+    let mut config = h.state.config().clone();
+    config.debug = true;
+    h.state = State::new(config);
+    h.start(true);
+    h.advance(100);
+    let (status, data) = h.request("schedule.create", json!({
+        "id": "final", "cron": "42 16 0 1 1 * 1970",
+        "promiseId": "final-{{.timestamp}}", "promiseTimeout": 60_000,
+        "promiseTags": {"resonate:target": "http://worker/"},
+    }));
+    assert_eq!(status, 200, "{data}");
+    assert_eq!(data["schedule"]["nextRunAt"], 1_002_000);
+    if lose_ack {
+        h.bucket.lose_put_ack = Some("sched/final".into());
+    }
+    h.advance(5_000);
+    assert!(h.bucket.lose_put_ack.is_none(), "the retirement commit exercised the injected failure");
+    let (status, retired) = h.request("schedule.get", json!({"id": "final"}));
+    assert_eq!(status, 200);
+    assert_eq!(retired["schedule"]["nextRunAt"], 0);
+    assert_eq!(retired["schedule"]["lastRunAt"], 1_002_000);
+    assert_eq!(h.request("promise.get", json!({"id": "final-1002000"})).0, 200);
+    let wire: resonate_core::types::ScheduleRecord = serde_json::from_value(retired["schedule"].clone()).unwrap();
+    assert_eq!(wire.next_run_at, 0);
+    let (status, snapshot) = h.request("debug.snap", json!({}));
+    assert_eq!(status, 200);
+    assert_eq!(snapshot["schedules"][0], retired["schedule"]);
+    let bytes = &h.bucket.objects["sched/final"].0;
+    let loaded = echod_logic::document::codec::decode_schedule(bytes).unwrap();
+    let echod_logic::concrete::StoredDocument::Schedule(stored) = loaded.document else {
+        panic!("expected a persisted schedule");
+    };
+    assert_eq!(stored.next_wake_at, None);
+    assert_eq!(stored.schedule.unwrap().next_run_at, None);
+    h.advance(5_000);
+    assert_eq!(h.notes.iter().filter(|n| matches!(n, Note::FireBegin { .. })).count(), 1);
+    let mut restarted = Harness::new("n1");
+    restarted.clock = h.clock;
+    restarted.bucket = h.bucket;
+    restarted.start(true);
+    restarted.advance(5_000);
+    assert_eq!(restarted.request("schedule.get", json!({"id": "final"})).1, retired);
+    assert!(!restarted.notes.iter().any(|n| matches!(n, Note::FireBegin { .. })));
 }
 
 #[test]

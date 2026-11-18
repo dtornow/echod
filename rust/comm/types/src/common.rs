@@ -4,12 +4,15 @@ use crate::{Tags, Value};
 
 verus! {
 
-pub uninterp spec fn spec_next_cron(cron: Seq<char>, after: u64) -> u64;
+pub uninterp spec fn spec_next_cron(cron: Seq<char>, after: u64) -> Option<u64>;
 
 #[verifier::external_body]
 pub proof fn axiom_next_cron_after(cron: Seq<char>, after: u64)
     ensures
-        spec_next_cron(cron, after) > after,
+        match spec_next_cron(cron, after) {
+            Some(next) => next > after,
+            None => true,
+        },
 {
 }
 

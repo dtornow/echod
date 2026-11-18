@@ -721,7 +721,10 @@ impl<'cfg> Handlers<'cfg> {
             outs_v(outs@) == spec_schedule_create(*req, s@, now),
     {
         broadcast use group_exec_views;
-        let next_run_at = next_cron(&req.cron, now);
+        let next_run_at = match next_cron(&req.cron, now) {
+            Some(next) => next,
+            None => return status(schedule_res(400, None), mk("schedule: no future occurrence (400)"), s),
+        };
         if !deadline_bounded(next_run_at, req.promise_timeout)
             || (is_timer(&req.promise_tags) && has_target(&req.promise_tags))
         {
@@ -754,7 +757,7 @@ impl<'cfg> Handlers<'cfg> {
             promise_param,
             promise_tags,
             created_at: now,
-            next_run_at,
+            next_run_at: Some(next_run_at),
             last_run_at: None,
         };
         let d = c.dup();

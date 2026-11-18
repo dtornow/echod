@@ -294,9 +294,9 @@ pub enum ProductionNoteData {
     Sweep(ProductionSweepOutcome),
     SweepBegin { flight: u64, target: String, now: u64 },
     SweepEnd { flight: u64, committed: bool },
-    FireBegin { flight: u64, origin: String, now: u64, row: Box<Schedule>, at: u64, promise_id: String, next: u64 },
+    FireBegin { flight: u64, origin: String, now: u64, row: Box<Schedule>, at: u64, promise_id: String, next: Option<u64> },
     FireEnd { flight: u64, committed: bool },
-    AdvanceBegin { flight: u64, schedule: String, now: u64, at: u64, next: u64 },
+    AdvanceBegin { flight: u64, schedule: String, now: u64, at: u64, next: Option<u64> },
     AdvanceEnd { flight: u64, committed: bool },
     ConfigurationRead { epoch: u64, members: Vec<String> },
     ConfigurationWritten { epoch: u64, members: Vec<String> },
@@ -894,9 +894,9 @@ pub ghost enum ProductionNoteV {
     Sweep(ProductionSweepOutcome),
     SweepBegin { flight: u64, target: Seq<char>, now: u64 },
     SweepEnd { flight: u64, committed: bool },
-    FireBegin { flight: u64, origin: Seq<char>, now: u64, row: ScheduleSpec, at: u64, promise_id: Seq<char>, next: u64 },
+    FireBegin { flight: u64, origin: Seq<char>, now: u64, row: ScheduleSpec, at: u64, promise_id: Seq<char>, next: Option<u64> },
     FireEnd { flight: u64, committed: bool },
-    AdvanceBegin { flight: u64, schedule: Seq<char>, now: u64, at: u64, next: u64 },
+    AdvanceBegin { flight: u64, schedule: Seq<char>, now: u64, at: u64, next: Option<u64> },
     AdvanceEnd { flight: u64, committed: bool },
     ConfigurationRead { epoch: u64, members: Seq<Seq<char>> },
     ConfigurationWritten { epoch: u64, members: Seq<Seq<char>> },
@@ -1063,7 +1063,7 @@ pub ghost struct ProductionFireCtxV {
     pub pending: PendingV,
     pub t1: u64,
     pub origin: Seq<char>,
-    pub next: u64,
+    pub next: Option<u64>,
 }
 
 #[cfg(verus_keep_ghost)]

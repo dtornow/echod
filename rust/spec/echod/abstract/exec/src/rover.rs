@@ -785,7 +785,18 @@ fn over_schedules(
             vstd::pervasive::unreached()
         }
     };
-    let promise = crate::runtime::expand(&c.promise_id, id, c.next_run_at);
+    let at = match c.next_run_at {
+        Some(at) => at,
+        None => {
+            proof {
+                assert(strs(keys@).skip(i as int).drop_first() =~= strs(keys@).skip(i as int + 1));
+                assert(strs(keys@).skip(i as int)[0] == id@);
+                assert(state@.store.schedules[id@] == schedule_v(*c));
+            }
+            return over_schedules(config, state, now, keys, i + 1);
+        },
+    };
+    let promise = crate::runtime::expand(&c.promise_id, id, at);
     let mut results = keep(config, state, now, Work::ScheduleTimeout { id: copy(id), promise });
     let ghost head = results_v(results@);
     let mut rest = over_schedules(config, state, now, keys, i + 1);

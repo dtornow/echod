@@ -152,9 +152,24 @@ pub fn srec(c: &Value) -> Option<rows::Schedule> {
         promise_param: value_in(&c["promiseParam"]),
         promise_tags: tags_in(&c["promiseTags"]),
         created_at: c["createdAt"].as_u64()?,
-        next_run_at: c["nextRunAt"].as_u64()?,
+        next_run_at: match c["nextRunAt"].as_u64()? {
+            0 => None,
+            next => Some(next),
+        },
         last_run_at: c["lastRunAt"].as_u64(),
     })
+}
+
+#[test]
+fn wire_zero_is_retirement_not_an_epoch_deadline() {
+    let mut record = serde_json::json!({
+        "id": "final", "cron": "0 0 0 1 1 * 1970", "promiseId": "final-{{.timestamp}}",
+        "promiseTimeout": 100, "createdAt": 1, "nextRunAt": 0, "lastRunAt": 2,
+        "promiseParam": {}, "promiseTags": {},
+    });
+    assert_eq!(srec(&record).unwrap().next_run_at, None);
+    record["nextRunAt"] = serde_json::json!(1000);
+    assert_eq!(srec(&record).unwrap().next_run_at, Some(1000));
 }
 
 /// The answer as the model types it. `kind` is the request's kind: each kind

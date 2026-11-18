@@ -46,7 +46,7 @@ pub struct ScheduleV {
     pub promise_param: Value,
     pub promise_tags: Tags,
     pub created_at: Time,
-    pub next_run_at: Time,
+    pub next_run_at: Option<Time>,
     pub last_run_at: Option<Time>,
 }
 

@@ -992,7 +992,7 @@ pub open spec fn spec_heartbeat(pid: String, refs: Seq<TaskRef>, s: StoreV, now:
 
 pub open spec fn spec_schedule_create(req: ScheduleCreateReq, s: StoreV, now: Time) -> Seq<OutV> {
     let next_run_at = spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+    if next_run_at.is_none() || !spec_deadline_bounded(next_run_at.unwrap(), req.promise_timeout)
         || (spec_is_timer(req.promise_tags) && spec_has_target(req.promise_tags))
     {
         spec_out(spec_schedule_res(400, None), s)
@@ -1395,10 +1395,10 @@ pub open spec fn spec_schedule_step(s: StoreV, id: Seq<char>, now: Time) -> InOu
         spec_noop(s)
     } else {
         let c = s.schedules[id];
-        if c.next_run_at > now {
+        if c.next_run_at.is_none() || c.next_run_at.unwrap() > now {
             spec_noop(s)
         } else {
-            let at = c.next_run_at;
+            let at = c.next_run_at.unwrap();
             let promise = spec_expand(c.promise_id, id, at);
             let d = ScheduleV {
                 last_run_at: Some(at),
@@ -1677,9 +1677,14 @@ pub open spec fn spec_over_schedules(config: Config, state: Proc, now: Time, key
     } else {
         let id = keys[0];
         let c = state.store.schedules[id];
-        let promise = spec_expand(c.promise_id, id, c.next_run_at);
-        spec_keep(config, state, now, InternalV::ScheduleTimeout { id, promise }, Seq::empty())
-            + spec_over_schedules(config, state, now, keys.drop_first())
+        match c.next_run_at {
+            Some(at) => {
+                let promise = spec_expand(c.promise_id, id, at);
+                spec_keep(config, state, now, InternalV::ScheduleTimeout { id, promise }, Seq::empty())
+                    + spec_over_schedules(config, state, now, keys.drop_first())
+            },
+            None => spec_over_schedules(config, state, now, keys.drop_first()),
+        }
     }
 }
 

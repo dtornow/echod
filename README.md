@@ -5,6 +5,26 @@ described in [DOCUMENT_SEMANTICS.md](DOCUMENT_SEMANTICS.md). The global producti
 trace-refinement theorem is unfinished; component verification is not an
 end-to-end guarantee.
 
+## Cron exhaustion
+
+Schedules store an optional `next_run_at`. After their final occurrence they
+retain their history with `None`, have no timer deadline, and do not fire again.
+Public schedule responses and snapshots encode this as numeric `nextRunAt: 0`;
+clients must interpret zero as “no future run”, not a Unix-epoch deadline.
+Existing numeric-only clients can deserialize it; that alone does not mean they
+understand the sentinel.
+
+The new reader accepts existing numeric stored deadlines. Retired records store
+`null` internally, so older binaries that require a numeric stored deadline
+cannot read those records; rolling back after retirement requires a compatible
+reader.
+
+Creation rejects expressions without a future occurrence in the supported
+calendar. The shared cron engine supports years **1970–2100 inclusive**.
+This bound also applies to recurring expressions: exhaustion of that calendar
+does not mean an expression is mathematically impossible beyond 2100.
+No year remapping or synthetic one-minute fallback is used.
+
 ## Timer discovery
 
 `--timer-rediscovery-ms` (or `ECHOD_TIMER_REDISCOVERY`) sets the target interval

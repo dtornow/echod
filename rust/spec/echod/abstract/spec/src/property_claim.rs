@@ -325,7 +325,10 @@ pub open spec fn well_formed_task_has_matching_promise(
 pub open spec fn well_formed_schedule_created_at_lte_next_run_at_at(
     schedule: ScheduleV,
 ) -> bool {
-    schedule.created_at <= schedule.next_run_at
+    match schedule.next_run_at {
+        Some(next) => schedule.created_at <= next,
+        None => true,
+    }
 }
 
 pub open spec fn well_formed_schedule_created_at_lte_last_run_at_at(
@@ -341,7 +344,10 @@ pub open spec fn well_formed_schedule_last_run_at_lt_next_run_at_at(
     schedule: ScheduleV,
 ) -> bool {
     match schedule.last_run_at {
-        Some(last) => last < schedule.next_run_at,
+        Some(last) => match schedule.next_run_at {
+            Some(next) => last < next,
+            None => true,
+        },
         None => true,
     }
 }

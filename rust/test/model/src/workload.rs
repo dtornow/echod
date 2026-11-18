@@ -21,7 +21,7 @@ fn origin(id: &str) -> &str {
     echod_types::origin_of(id)
 }
 
-pub fn next_cron(cron: &str, after_ms: u64) -> u64 {
+pub fn next_cron(cron: &str, after_ms: u64) -> Option<u64> {
     echod_cron::next_run_at(cron, after_ms)
 }
 
@@ -49,7 +49,7 @@ fn settle(id: &Id) -> PromiseSettleReq {
 /// A schedule whose occurrences are tasks in the origin its id names:
 /// `sa` fires into `a`. (A schedule's id has no `:`, so it cannot carry an
 /// origin of its own the way a promise id does.)
-fn schedule(id: &Id, cron: &str, timeout: Time, now: Time) -> ScheduleCreateReq {
+fn schedule(id: &Id, cron: &str, timeout: Time, _now: Time) -> ScheduleCreateReq {
     let into = id.strip_prefix('s').unwrap_or(id);
     let cron = cron.to_string();
     ScheduleCreateReq {
@@ -59,7 +59,7 @@ fn schedule(id: &Id, cron: &str, timeout: Time, now: Time) -> ScheduleCreateReq 
         promise_timeout: timeout,
         promise_param: Value::empty(),
         promise_tags: target_tags(),
-        next_run_at: next_cron(&cron, now),
+        next_run_at: 0,
     }
 }
 
@@ -169,8 +169,10 @@ pub fn suggest(s: &Store, now: Time) -> Vec<(Action<Request>, &'static str)> {
             push(Action::Request(Request::ScheduleGet(ScheduleGetReq { id: id.clone() })), "get a schedule");
             push(Action::Request(Request::ScheduleDelete(ScheduleDeleteReq { id: id.clone() })), "delete a schedule");
             push(Action::Request(Request::ScheduleCreate(schedule(id, "* * * * * *", 10, now))), "create a schedule again");
-            push(Action::Clock(c.next_run_at.saturating_sub(1)), "clock to just before a schedule runs");
-            push(Action::Clock(c.next_run_at), "clock to a schedule's run");
+            if let Some(at) = c.next_run_at {
+                push(Action::Clock(at.saturating_sub(1)), "clock to just before a schedule runs");
+                push(Action::Clock(at), "clock to a schedule's run");
+            }
         }
         for id in SCHEDULES {
             let id = id.to_string();

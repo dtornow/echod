@@ -334,7 +334,9 @@ pub fn decode(req: &RequestEnvelope, now: u64, pinned: bool) -> Result<Decoded, 
                 Ok(v) => v,
                 Err(m) => return err(400, &m),
             };
-            let next_run_at = echod_cron::next_run_at(&d.cron, now);
+            let Some(next_run_at) = echod_cron::next_run_at(&d.cron, now) else {
+                return err(400, "Cron expression has no future occurrence in the supported calendar");
+            };
             if !rows::deadline_bounded(next_run_at, promise_timeout) {
                 return err(400, &format!(
                     "promiseTimeout produces a deadline above {}",

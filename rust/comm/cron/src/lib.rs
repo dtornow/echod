@@ -1,11 +1,7 @@
-//! The next time a schedule is due.
-//!
-//! A 5-field expression is read as minutes first, with the seconds field
-//! fixed at 0. The cron calendar stops around year 2100, so a later instant
-//! is matched to the same month, day, weekday and time of day inside that
-//! range, and the distance is added back.
+//! The next supported occurrence of a schedule, without synthetic deadlines.
+//! Five-field expressions have an implicit zero seconds field. Calendar
+//! support follows the cron engine (1970 through 2100, inclusive).
 
-use chrono::{Datelike, Timelike};
 use cron::Schedule;
 use std::str::FromStr;
 
@@ -17,52 +13,78 @@ fn normalize(expr: &str) -> String {
     }
 }
 
-/// Whether the engine accepts the expression.
 pub fn valid(expr: &str) -> bool {
     Schedule::from_str(&normalize(expr)).is_ok()
 }
 
-/// The next occurrence strictly after `after_ms`, in milliseconds.
-/// An expression that does not parse is retried a minute later.
-pub fn next_after(expr: &str, after_ms: i64) -> i64 {
-    let full = normalize(expr);
-    if let Ok(schedule) = Schedule::from_str(&full) {
-        let after_secs = after_ms / 1000;
-        let after_dt = chrono::DateTime::from_timestamp(after_secs, 0).unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
-        const MAX_CRON_YEAR: i32 = 2099;
-        let (ref_dt, delta_secs) = if after_dt.year() <= MAX_CRON_YEAR {
-            (after_dt, 0i64)
-        } else {
-            let naive = after_dt.naive_utc();
-            let (month, day, hour, minute, second) = (naive.month(), naive.day(), naive.hour(), naive.minute(), naive.second());
-            let target_weekday = naive.weekday();
-            let is_leap_day = month == 2 && day == 29;
-            let equiv_secs = (1970i32..=MAX_CRON_YEAR).rev().find_map(|y| {
-                if is_leap_day && chrono::NaiveDate::from_ymd_opt(y, 2, 29).is_none() {
-                    return None;
-                }
-                chrono::NaiveDate::from_ymd_opt(y, month, day)
-                    .filter(|d| d.weekday() == target_weekday)
-                    .and_then(|d| d.and_hms_opt(hour, minute, second))
-                    .map(|dt| dt.and_utc().timestamp())
-            });
-            if let Some(ref_secs) = equiv_secs {
-                let ref_dt = chrono::DateTime::from_timestamp(ref_secs, 0).unwrap();
-                (ref_dt, after_secs - ref_secs)
-            } else {
-                (after_dt, 0i64)
-            }
-        };
-        if let Some(next) = schedule.after(&ref_dt).next() {
-            return (next.timestamp() + delta_secs) * 1000;
-        }
-    }
-    after_ms + 60_000
+/// None means no supported future occurrence, including invalid input.
+pub fn next_after(expr: &str, after_ms: i64) -> Option<i64> {
+    let schedule = Schedule::from_str(&normalize(expr)).ok()?;
+    let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
+    schedule.after(&after).next().map(|next| next.timestamp_millis())
 }
 
-/// `next_after`, as a `u64` instant strictly after `after_ms`.
-pub fn next_run_at(expr: &str, after_ms: u64) -> u64 {
-    let after = i64::try_from(after_ms).unwrap_or(i64::MAX);
-    let next = next_after(expr, after).max(after.saturating_add(1));
-    u64::try_from(next).unwrap_or_else(|_| after_ms.saturating_add(60_000).max(after_ms.saturating_add(1)))
+pub fn next_run_at(expr: &str, after_ms: u64) -> Option<u64> {
+    let after = i64::try_from(after_ms).ok()?;
+    u64::try_from(next_after(expr, after)?).ok().filter(|next| *next > after_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instant(value: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(value).unwrap().timestamp_millis()
+    }
+
+    #[test]
+    fn invalid_and_impossible_expressions_have_no_occurrence() {
+        let now = instant("2026-01-01T00:00:00Z");
+        assert_eq!(next_after("", now), None);
+        assert_eq!(next_after("not a cron", now), None);
+        assert!(valid("0 0 30 2 *"));
+        assert_eq!(next_after("0 0 30 2 *", now), None);
+    }
+
+    #[test]
+    fn finite_year_expires_at_its_final_occurrence() {
+        let final_run = instant("2020-01-01T00:00:00Z");
+        let cron = "0 0 0 1 1 * 2020";
+        assert_eq!(next_after(cron, final_run - 1), Some(final_run));
+        assert_eq!(next_after(cron, final_run), None);
+        assert_eq!(next_after(cron, final_run + 1), None);
+        assert_eq!(next_after(cron, instant("2200-01-01T00:00:00Z")), None);
+    }
+
+    #[test]
+    fn year_2100_is_supported_without_remapping() {
+        let at = instant("2100-01-01T00:00:00Z");
+        assert_eq!(next_after("0 0 0 1 1 * 2100", at - 1), Some(at));
+        assert_eq!(next_after("0 0 0 1 1 * 2100", at), None);
+        assert_eq!(next_after("0 0 1 1 *", at - 1), Some(at));
+        assert_eq!(next_after("0 0 1 1 *", at), None);
+    }
+
+    #[test]
+    fn ordinary_schedules_are_strictly_future() {
+        let at = instant("2026-01-01T00:00:00Z");
+        assert_eq!(next_after("* * * * *", at), Some(at + 60_000));
+        assert_eq!(next_after("* * * * * *", at + 999), Some(at + 1_000));
+        assert_eq!(next_run_at("* * * * * *", at as u64), Some(at as u64 + 1_000));
+    }
+
+    #[test]
+    fn leap_days_follow_the_calendar() {
+        assert_eq!(
+            next_after("0 0 29 2 *", instant("2026-01-01T00:00:00Z")),
+            Some(instant("2028-02-29T00:00:00Z")),
+        );
+        assert_eq!(next_after("0 0 29 2 *", instant("2096-02-29T00:00:00Z")), None);
+    }
+
+    #[test]
+    fn unrepresentable_instants_have_no_occurrence() {
+        assert_eq!(next_after("* * * * * *", i64::MAX), None);
+        assert_eq!(next_run_at("* * * * * *", u64::MAX), None);
+    }
 }
