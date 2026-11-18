@@ -1352,29 +1352,31 @@ fn final_schedule_retirement_survives_a_lost_commit_acknowledgement() {
 }
 
 fn check_schedule_retirement(lose_ack: bool) {
+    let final_at = 1_767_225_600_000u64;
     let mut h = Harness::new("n1");
+    h.clock = final_at - 10_000;
     let mut config = h.state.config().clone();
     config.debug = true;
     h.state = State::new(config);
     h.start(true);
     h.advance(100);
     let (status, data) = h.request("schedule.create", json!({
-        "id": "final", "cron": "42 16 0 1 1 * 1970",
+        "id": "final", "cron": "0 0 0 1 1 * 2026",
         "promiseId": "final-{{.timestamp}}", "promiseTimeout": 60_000,
         "promiseTags": {"resonate:target": "http://worker/"},
     }));
     assert_eq!(status, 200, "{data}");
-    assert_eq!(data["schedule"]["nextRunAt"], 1_002_000);
+    assert_eq!(data["schedule"]["nextRunAt"], final_at);
     if lose_ack {
         h.bucket.lose_put_ack = Some("sched/final".into());
     }
-    h.advance(5_000);
+    h.advance(15_000);
     assert!(h.bucket.lose_put_ack.is_none(), "the retirement commit exercised the injected failure");
     let (status, retired) = h.request("schedule.get", json!({"id": "final"}));
     assert_eq!(status, 200);
     assert_eq!(retired["schedule"]["nextRunAt"], 0);
-    assert_eq!(retired["schedule"]["lastRunAt"], 1_002_000);
-    assert_eq!(h.request("promise.get", json!({"id": "final-1002000"})).0, 200);
+    assert_eq!(retired["schedule"]["lastRunAt"], final_at);
+    assert_eq!(h.request("promise.get", json!({"id": format!("final-{final_at}")})).0, 200);
     let wire: resonate_core::types::ScheduleRecord = serde_json::from_value(retired["schedule"].clone()).unwrap();
     assert_eq!(wire.next_run_at, 0);
     let (status, snapshot) = h.request("debug.snap", json!({}));
