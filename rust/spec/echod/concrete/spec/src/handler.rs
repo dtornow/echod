@@ -1290,7 +1290,7 @@ pub open spec fn production_handler_sched_spec_fire_decide(s: ProductionStateV, 
                 Some((row, pending)) => {
                     let next = match production_handler_sched_spec_schedule_row(advanced) {
                         Some(c) => c.next_run_at,
-                        None => pending.at,
+                        None => None,
                     };
                     let origin = echod_types::origin(pending.promise);
                     production_handler_sched_spec_fire_claim(s, f, ProductionFireCtxV { ws, row, advanced, pending, t1, origin, next })
@@ -4740,7 +4740,7 @@ pub open spec fn spec_schedule_get(doc: DocumentBodyV, id: String) -> (DocumentB
 
 pub open spec fn spec_schedule_create(doc: DocumentBodyV, req: ScheduleCreateReq, now: Time) -> (DocumentBodyV, Response) {
     let next_run_at = echod_types::common::spec_next_cron(req.cron@, now);
-    if !spec_deadline_bounded(next_run_at, req.promise_timeout)
+    if next_run_at.is_none() || !spec_deadline_bounded(next_run_at.unwrap(), req.promise_timeout)
         || (spec_targeted(req.promise_tags) && spec_timer(req.promise_tags))
     {
         (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None }))
@@ -4774,8 +4774,8 @@ pub open spec fn spec_schedule_delete(doc: DocumentBodyV, id: String) -> (Docume
 
 pub open spec fn spec_run_due(doc: DocumentBodyV, now: Time, retry_timeout: u64) -> (DocumentBodyV, Option<Response>, Seq<PendingV>, Seq<NoteV>) {
     match doc {
-        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => {
-            let at = schedule.next_run_at;
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at.is_some() && schedule.next_run_at.unwrap() <= now => {
+            let at = schedule.next_run_at.unwrap();
             let pending = PendingV {
                 promise: echod_types::common::spec_expand(schedule.promise_id@, schedule.id@, at),
                 at,
@@ -5256,7 +5256,10 @@ pub open spec fn spec_deadlines(node: NodeV, docs: Seq<CachedV>, i: int) -> Opti
 
 pub open spec fn spec_body_deadline(doc: DocumentBodyV) -> Option<nat> {
     match doc {
-        DocumentBodyV::Schedule(Some(schedule)) => Some(schedule.next_run_at as nat),
+        DocumentBodyV::Schedule(Some(schedule)) => match schedule.next_run_at {
+            Some(at) => Some(at as nat),
+            None => None,
+        },
         DocumentBodyV::Workflow(map) => spec_map_deadline(map, spec_sorted(map.dom())),
         DocumentBodyV::Schedule(None) => None,
     }
@@ -5301,7 +5304,7 @@ pub open spec fn spec_earliest_from(node: NodeV, docs: Seq<CachedV>, i: int, now
 
 pub open spec fn spec_earliest_in(doc: DocumentBodyV, now: Time) -> Option<u64> {
     match doc {
-        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at <= now => Some(schedule.next_run_at),
+        DocumentBodyV::Schedule(Some(schedule)) if schedule.next_run_at.is_some() && schedule.next_run_at.unwrap() <= now => schedule.next_run_at,
         DocumentBodyV::Workflow(map) => spec_map_due(map, spec_sorted(map.dom()), now),
         _ => None,
     }

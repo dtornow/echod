@@ -1581,10 +1581,11 @@ proof fn lemma_work_integrity(
         },
         InternalV::ScheduleTimeout { id, .. } => {
             if before.store.schedules.contains_key(id)
-                && before.store.schedules[id].next_run_at <= now
+                && before.store.schedules[id].next_run_at.is_some()
+                && before.store.schedules[id].next_run_at.unwrap() <= now
             {
                 let schedule = before.store.schedules[id];
-                axiom_next_cron_after(schedule.cron, schedule.next_run_at);
+                axiom_next_cron_after(schedule.cron, schedule.next_run_at.unwrap());
             }
             assert(state_properties(now, after));
             assert(transition_properties(now, before, after));
@@ -2145,7 +2146,7 @@ proof fn lemma_over_schedules_integrity(
             promise: echod_types::common::spec_expand(
                 schedule.promise_id,
                 id,
-                schedule.next_run_at,
+                schedule.next_run_at.unwrap(),
             ),
         };
         let head = spec_keep(config, before, now, work, Seq::empty());

@@ -5,10 +5,10 @@ use vstd::prelude::*;
 verus! {
 
 #[verifier::external_body]
-pub fn next_cron(cron: &String, after: u64) -> (result: u64)
+pub fn next_cron(cron: &String, after: u64) -> (result: Option<u64>)
     ensures
         result == echod_types::common::spec_next_cron(cron@, after),
-        result > after,
+        match result { Some(next) => next > after, None => true },
 {
     echod_cron::next_run_at(cron, after)
 }

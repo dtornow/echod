@@ -231,7 +231,7 @@ impl Generator {
 
     /// A schedule: a few ids, firing every few seconds into one origin, so
     /// that fires and client requests collide on the origin's document.
-    fn schedule(&self, rng: &mut Rng, now: u64) -> Request {
+    fn schedule(&self, rng: &mut Rng, _now: u64) -> Request {
         let id = (*rng.pick(&SCHEDULES)).to_string();
         match rng.below(10) {
             0..=2 => Request::ScheduleGet(ScheduleGetReq { id }),
@@ -240,7 +240,6 @@ impl Generator {
                     (*rng.pick(&["*/2 * * * * *", "*/3 * * * * *", "*/5 * * * * *"])).to_string();
                 let promise_id = format!("o{}:{id}-{{{{.timestamp}}}}", rng.below(self.origins));
                 let promise_timeout = rng.range(1, self.timeout_ms);
-                let next_run_at = echod_cron::next_run_at(&cron, now);
                 Request::ScheduleCreate(ScheduleCreateReq {
                     id,
                     cron,
@@ -248,7 +247,7 @@ impl Generator {
                     promise_timeout,
                     promise_param: value(None),
                     promise_tags: self.tags(rng, true),
-                    next_run_at,
+                    next_run_at: 0,
                 })
             }
             _ => Request::ScheduleDelete(ScheduleDeleteReq { id }),

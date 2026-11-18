@@ -149,7 +149,7 @@ pub struct Schedule {
     pub promise_param: Value,
     #[cfg_attr(not(verus_keep_ghost), serde(default, skip_serializing_if = "Vec::is_empty"))]
     pub promise_tags: Tags,
-    pub next_run_at: u64,
+    pub next_run_at: Option<u64>,
     #[cfg_attr(not(verus_keep_ghost), serde(default, skip_serializing_if = "Option::is_none"))]
     pub last_run_at: Option<u64>,
     pub created_at: u64,
@@ -247,7 +247,7 @@ pub struct ScheduleCreateReq {
     pub promise_timeout: u64,
     pub promise_param: Value,
     pub promise_tags: Tags,
-    /// `nextCron cron now`, computed by the caller's cron engine.
+    /// Ignored compatibility field; the server computes the next occurrence.
     pub next_run_at: u64,
 }
 

@@ -2463,7 +2463,7 @@ pub fn body_deadline(doc: &DocumentBody) -> (r: Option<u64>)
         nat_v(r) == spec_body_deadline(doc@),
 {
     match doc {
-        DocumentBody::Schedule(Some(schedule)) => Some(schedule.next_run_at),
+        DocumentBody::Schedule(Some(schedule)) => schedule.next_run_at,
         DocumentBody::Workflow(objs) => objs.deadline(),
         DocumentBody::Schedule(None) => None,
     }
@@ -2476,7 +2476,10 @@ fn earliest_in(doc: &DocumentBody, now: u64) -> (r: Option<u64>)
         r == spec_earliest_in(doc@, now),
 {
     match doc {
-        DocumentBody::Schedule(Some(schedule)) => if schedule.next_run_at <= now { Some(schedule.next_run_at) } else { None },
+        DocumentBody::Schedule(Some(schedule)) => match schedule.next_run_at {
+            Some(at) => if at <= now { Some(at) } else { None },
+            None => None,
+        },
         DocumentBody::Workflow(objs) => objs.earliest(now),
         DocumentBody::Schedule(None) => None,
     }
@@ -3421,7 +3424,10 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
     ensures
         (r.0@, r.1) == spec_schedule_create(doc@, *req, now),
 {
-    let next_run_at = next_cron(&req.cron, now);
+    let next_run_at = match next_cron(&req.cron, now) {
+        Some(next) => next,
+        None => return (doc, Response::Schedule(ScheduleRes { status: 400, schedule: None })),
+    };
     if !deadline_bounded(next_run_at, req.promise_timeout)
         || (targeted(&req.promise_tags) && timer(&req.promise_tags))
     {
@@ -3441,7 +3447,7 @@ fn schedule_create(doc: DocumentBody, req: &ScheduleCreateReq, now: u64) -> (r: 
                 promise_timeout: req.promise_timeout,
                 promise_param: copy(&req.promise_param),
                 promise_tags: copy(&req.promise_tags),
-                next_run_at,
+                next_run_at: Some(next_run_at),
                 last_run_at: None,
                 created_at: now,
             };
@@ -3986,8 +3992,11 @@ pub fn run_due(doc: DocumentBody, now: u64, retry_timeout: u64) -> (r: (Document
     }
     match doc {
         DocumentBody::Schedule(Some(schedule)) => {
-            if schedule.next_run_at <= now {
-                let at = schedule.next_run_at;
+            let at = match schedule.next_run_at {
+                Some(at) => at,
+                None => return (DocumentBody::Schedule(Some(schedule)), Vec::new(), Vec::new()),
+            };
+            if at <= now {
                 let pending = Pending {
                     promise: expand(&schedule.promise_id, &schedule.id, at),
                     at,

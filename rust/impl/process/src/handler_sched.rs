@@ -179,7 +179,7 @@ impl State {
                 }
                 let next = match schedule_row(&advanced) {
                     Some(c) => c.next_run_at,
-                    None => pending.at,
+                    None => None,
                 };
                 let origin = text(origin_of(pending.promise.as_str()));
                 self.fire_claim(f, FireCtx { ws, row, advanced, pending, t1, origin, next });

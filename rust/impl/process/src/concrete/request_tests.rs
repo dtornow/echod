@@ -13,6 +13,54 @@ const NOW: u64 = 1_000;
 const RETRY: u64 = 100;
 
 #[test]
+fn raw_schedule_creation_rejects_no_future_occurrence() {
+    for cron in ["0 0 30 2 *", "0 0 0 1 1 * 1970"] {
+        let request = Request::ScheduleCreate(ScheduleCreateReq {
+            id: "never".into(),
+            cron: cron.into(),
+            promise_id: "wf.{{.timestamp}}".into(),
+            promise_timeout: 100,
+            promise_param: Value::default(),
+            promise_tags: Vec::new(),
+            next_run_at: 0,
+        });
+        let (doc, response, born, notes) = request_transition(empty_schedule(), &request, NOW, RETRY, REQUEST_SWEEP_STEPS);
+        assert_eq!(doc, empty_schedule());
+        assert_eq!(response, Response::Schedule(echod_types::ScheduleRes { status: 400, schedule: None }));
+        assert!(born.is_empty());
+        assert!(notes.is_empty());
+    }
+}
+
+#[test]
+fn final_occurrence_preserves_history_without_a_deadline() {
+    let request = Request::ScheduleCreate(ScheduleCreateReq {
+        id: "final".into(),
+        cron: "2 0 0 1 1 * 1970".into(),
+        promise_id: "wf.{{.timestamp}}".into(),
+        promise_timeout: 100,
+        promise_param: Value::default(),
+        promise_tags: Vec::new(),
+        next_run_at: 0,
+    });
+    let (doc, response, _, _) = request_transition(empty_schedule(), &request, NOW, RETRY, REQUEST_SWEEP_STEPS);
+    assert!(matches!(response, Response::Schedule(echod_types::ScheduleRes { status: 200, .. })));
+    assert_eq!(crate::concrete::document::body_deadline(&doc), Some(2_000));
+    let (retired, born, notes) = crate::concrete::document::run_due(doc, 2_000, RETRY);
+    assert_eq!(born.len(), 1);
+    assert_eq!(born[0].at, 2_000);
+    assert!(notes.is_empty());
+    assert_eq!(crate::concrete::document::body_deadline(&retired), None);
+    let DocumentBody::Schedule(Some(row)) = &retired else { panic!("history must remain") };
+    assert_eq!(row.next_run_at, None);
+    assert_eq!(row.last_run_at, Some(2_000));
+    let (unchanged, born, notes) = crate::concrete::document::run_due(retired.clone(), 3_000, RETRY);
+    assert_eq!(unchanged, retired);
+    assert!(born.is_empty());
+    assert!(notes.is_empty());
+}
+
+#[test]
 fn raw_document_fence_is_not_the_public_detached_operation() {
     let request = Request::TaskFence(echod_types::TaskFenceReq {
         id: "a:missing".into(),
@@ -424,7 +472,7 @@ fn schedule_request_leaves_due_timer_for_internal_processing() {
         promise_param: Value::default(),
         promise_tags: Vec::new(),
         created_at: 1,
-        next_run_at: 10,
+        next_run_at: Some(10),
         last_run_at: None,
     };
     let original = DocumentBody::Schedule(Some(schedule));

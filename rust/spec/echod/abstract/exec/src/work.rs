@@ -508,10 +508,13 @@ impl<'cfg> Handlers<'cfg> {
     {
         broadcast use group_exec_views;
         let Some(c) = s.schedules.get(id) else { return self.noop(s) };
-        if c.next_run_at > now {
+        let at_ = match c.next_run_at {
+            Some(at) => at,
+            None => return self.noop(s),
+        };
+        if at_ > now {
             return self.noop(s);
         }
-        let at_ = c.next_run_at;
         let promise = expand(&c.promise_id, id, at_);
         let mut n = copy_store(s);
         let mut d = copy(c);

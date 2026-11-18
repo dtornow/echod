@@ -265,7 +265,7 @@ mod tests {
             promise_timeout: 1_000,
             promise_param: Value::default(),
             promise_tags: Vec::new(),
-            next_run_at,
+            next_run_at: Some(next_run_at),
             last_run_at: None,
             created_at: 1,
         }

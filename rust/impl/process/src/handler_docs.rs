@@ -469,7 +469,7 @@ pub struct FireCtx {
     pub pending: crate::concrete::Pending,
     pub t1: u64,
     pub origin: String,
-    pub next: u64,
+    pub next: Option<u64>,
 }
 
 pub enum Phase {

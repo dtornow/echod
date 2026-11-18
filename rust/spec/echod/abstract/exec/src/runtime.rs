@@ -51,13 +51,12 @@ pub fn cron_valid(cron: &String) -> (r: bool)
     echod_cron::valid(cron)
 }
 
-/// Lean's `nextCron`: the first instant strictly after `after` the cron names,
-/// as the reference server computes it (whole seconds, in milliseconds).
+/// The next supported occurrence strictly after `after`, or no occurrence.
 #[verifier::external_body]
-pub fn next_cron(cron: &String, after: u64) -> (r: u64)
+pub fn next_cron(cron: &String, after: u64) -> (r: Option<u64>)
     ensures
         r == spec_next_cron(cron@, after),
-        r > after,
+        match r { Some(next) => next > after, None => true },
 {
     echod_cron::next_run_at(cron, after)
 }

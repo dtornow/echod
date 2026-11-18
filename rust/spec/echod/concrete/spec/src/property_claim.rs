@@ -201,9 +201,15 @@ pub open spec fn schedule_body_well_formed(
             &&& row.id@ == document
             &&& row.promise_timeout <= MAX_TIME
             &&& row.created_at <= committed_at
-            &&& row.created_at <= row.next_run_at
+            &&& match row.next_run_at {
+                Some(next) => row.created_at <= next,
+                None => true,
+            }
             &&& match row.last_run_at {
-                Some(last) => row.created_at <= last < row.next_run_at,
+                Some(last) => row.created_at <= last && match row.next_run_at {
+                    Some(next) => last < next,
+                    None => true,
+                },
                 None => true,
             }
             &&& !(crate::handler::spec_targeted(row.promise_tags)
@@ -252,9 +258,15 @@ pub open spec fn schedule_well_formed(schedule: ScheduleDocumentV) -> bool {
             &&& row.id@ == schedule.document
             &&& row.promise_timeout <= MAX_TIME
             &&& row.created_at <= schedule.committed_at
-            &&& row.created_at <= row.next_run_at
+            &&& match row.next_run_at {
+                Some(next) => row.created_at <= next,
+                None => true,
+            }
             &&& match row.last_run_at {
-                Some(last) => row.created_at <= last < row.next_run_at,
+                Some(last) => row.created_at <= last && match row.next_run_at {
+                    Some(next) => last < next,
+                    None => true,
+                },
                 None => true,
             }
             &&& !(crate::handler::spec_targeted(row.promise_tags)
