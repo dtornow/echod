@@ -11,6 +11,9 @@ use echod_types::spec_deadline_bounded;
 #[cfg(verus_keep_ghost)]
 use echod_concrete_spec::Config as ConcreteConfig;
 
+#[cfg(verus_keep_ghost)]
+mod invocations;
+
 mod frames {
 use vstd::prelude::*;
 use echod_abstract_spec::state::StoreV;
