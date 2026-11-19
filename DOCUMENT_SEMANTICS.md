@@ -1,6 +1,6 @@
 # Document processing: implementation and verification boundary
 
-**Draft; merge hold.** This change delivers reviewable implementation, executable
+**Component proofs; global theorem open.** The implementation includes executable
 adapters, component proofs, and regression tests. It does not establish global
 production-to-abstract trace refinement, even with the storage premise below.
 The legacy full-refinement target is not a passing verification suite.
@@ -126,6 +126,80 @@ guarantee supplied by the S3 adapter**. The implementation still uses its
 actual validators and comparison semantics. No hash-injectivity axiom,
 revision-token substitution, or storage redesign is introduced. This
 approval does not authorize additional codec or identifier-freshness premises.
+
+## Read-to-write provenance components
+
+The `refinement_proof::provenance` module adds local obligations on the production
+definitions, based on main `40fbe51` (including periodic timer rediscovery and
+optional cron deadlines). These are not an inductive invariant of all executions.
+
+| Component | Claim | Remaining connection |
+| --- | --- | --- |
+| Workflow and schedule reads | A successful matched `spec_apply(Get)` supplies the actual stored bytes and validator; successful decoding produces the exact working snapshot. | Establish that the accepted completion belongs to that invocation and key. |
+| Cache revalidation | `NotModified`, the retained decode observation, and operation-scoped validator separation preserve the captured working snapshot. | Maintain the same raw-byte witness through cache history; do not choose current bytes as a fresh witness. |
+| Commit initialization | The real commit constructor retains the working snapshot and captures its validator. | Connect the input working snapshot to the matched receipt. |
+| Prewrite advancement | Start/key-put stages retain the snapshot and validator; an issued document write uses that key and validator and records the actual flight owner. | Establish the phase relation along the entire controller history and match key-put completions. |
+| Write issuance | The emitted operation carries the specified key/validator, preserves the working snapshot, and registers its flight owner. | Registration can overwrite a reused numeric operation ID; no freshness or response-correlation claim is made. |
+| Rejected comparison | A failed create/rewrite/append comparison leaves the modeled store unchanged. | Relate the response accepted by the controller to that operation. |
+| Fault branches | The fleet store's before-application fault preserves old entries; its lost-ack branch retains exactly the normally applied state despite returning an error. | The existing `(node, op)` replay suppression is not a faithful invocation-lifecycle proof for reused IDs. |
+
+### Trust ledger for this slice
+
+- **New checked content:** the local implications above, over existing production
+  transition definitions. Their branch guards and matched-receipt/decode inputs
+  are explicit local prerequisites, not assumed global reachable invariants.
+- **Approved conditional storage boundary:** only
+  `document_validator_separation` for the selected conditional operation and its
+  retained captured bytes. No injectivity, unique-revision, or fresh-token law.
+- **Inherited realization axiom:** the read proof calls the existing
+  `lemma_bytes_realised`, which uses `echod_types::common::axiom_bytes_realised`
+  to relate the model's chosen byte vector to its sequence.
+- **Inherited native trust:** production decode/encode observations remain the
+  four uninterpreted `production_document_spec_*` codec functions and their
+  existing native `assume_specification` bindings. No new trusted binding is
+  introduced. Decode success is not an encode/decode round-trip theorem and
+  does not by itself establish `loaded.bytes == captured.len()`.
+- **Unchanged gaps:** byte-codec fidelity, version/count/byte-bound preservation,
+  receipt identity, faithful invocation lifecycle, delayed-controller composition,
+  and cross-model trace refinement remain open.
+
+The next dependency chain is: retain a ghost receipt from a matched invocation;
+preserve it through cache/flight transitions; compose the checked prewrite path
+with the operation-scoped storage lemmas; connect encoded bytes to the committed
+typed document; then compose timer, admission, detached-stage and observation
+transitions. The typed codec-algebra work is independent of the byte bridge.
+
+### Typed codec algebra
+
+The ghost-only `echod_concrete_spec::codec_algebra` module contains 16 authored
+proof functions (23 Verus verification obligations), covering snapshot and delta
+map reconstruction, checked fold append, snapshot/delta metadata validity, and
+change counts. Caller-supplied key order is retained; exact-domain enumeration
+and uniqueness are explicit typed prerequisites, not a new serialization policy.
+Version and time bounds in `partial_valid` are local lemma prerequisites, not
+claims that every runtime transition preserves them.
+
+The schedule specialization proves that a retired row with `next_run_at: None`
+still produces one upsert, whereas an absent schedule produces zero. It does not
+collapse retirement into deletion. The merged internal-`None`/public-`0` contract
+is unchanged.
+
+This algebra operates on `PartialV`/`FoldedV`, not serialized bytes. It introduces
+no axiom, uninterpreted function, `assume`, or `external_body`, and does not
+strengthen the production codec symbols. Matching native JSON equality, encoding,
+parsing, newline provenance, byte lengths and machine-sized counts remains open.
+In particular, the current append gate does not establish strict version advance
+at saturated document version; that cannot be repaired by assuming a bound here.
+
+Operation identity is a substantive obstruction, not just a solver obligation.
+Independent characterization on this baseline bootstraps the actual core, holds
+an old read's first completion, seeds the allocator near wrap, and reuses its
+numeric operation ID for another key. Delivering each invocation's completion
+only once can still send the old absent-read result to the new owner. This is a
+seeded boundary countermodel, not a proved reachable `2^64`-operation prefix or
+a deployed failure. A ghost invocation identity must retain this collision when
+erased to the real bare-ID handler; it must not silently filter the completion.
+No no-wrap premise or allocation-policy change is part of these proofs.
 
 ## Open global obligations and characterization tests
 
