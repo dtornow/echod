@@ -191,6 +191,50 @@ parsing, newline provenance, byte lengths and machine-sized counts remains open.
 In particular, the current append gate does not establish strict version advance
 at saturated document version; that cannot be repaired by assuming a bound here.
 
+### Invocation lifecycle and receipt prefixes
+
+The private `refinement_proof::invocations` module defines an adapter-side ghost
+history with a distinct sequence index for each emitted store effect, separate
+from its reusable wire `u64`. Each record retains a symbolic node-object
+incarnation, request, wire ID, optional outcome, and delivery state. Incarnation
+is not the configured node name. Connecting that symbol to the actual captured
+`Arc<Node>` remains a runtime-refinement obligation.
+
+Checked lifecycle components preserve issued identity fields and already-recorded
+outcomes across transitions; delivered/cancelled records remain terminal.
+Induction over accepted action prefixes preserves those identity fields, known
+outcomes and terminal states, and the condition that delivered records have
+outcomes. Recording an outcome and delivering a callback are
+separate actions, so completed-but-undelivered work remains represented. Fresh
+ghost indices impose no freshness condition on real wire IDs.
+
+Cancellation here means an irrevocably suppressed callback, not a cancellation
+request or an observed crash flag. It does not erase a known outcome and still
+allows a previously unknown outcome to be recorded afterward. Thus this model
+does not assert that dropping a future rolls back storage effects. Proving when
+the actual runtime establishes this cancellation condition is still open.
+Likewise, recording one abstract outcome is not a proof that an SDK performs
+only one physical storage attempt.
+
+The callback projection constructs the existing `ProductionEventV::Store`
+without a ghost invocation ID or request identity. Equal incarnation/wire
+ID/outcome callbacks project identically, even if their original requests differ.
+A checked reuse example explicitly leaves an older first completion deliverable
+after a new invocation reuses its wire ID. No ghost comparison filters the real
+handler.
+
+Local composition calls the previously checked read and issuance lemmas: a
+matched modeled Get records its actual response and decoded working snapshot;
+an issued write records the real emitted request and owner without a no-reuse
+condition. Rewrite bodies and append bodies/offsets are tied to the existing
+codec observations, not to a new round-trip law or inferred byte length.
+
+These are ghost lifecycle and projection proofs, not a completed proof that
+every native async execution refines the lifecycle. Matched-read premises remain
+explicit inputs; they do not establish that the current flight owns the receipt.
+The legacy fleet's `(node, op)` deduplication is unchanged, and neither the
+allocator nor the generic Rover replay semantics are modified.
+
 Operation identity is a substantive obstruction, not just a solver obligation.
 Independent characterization on this baseline bootstraps the actual core, holds
 an old read's first completion, seeds the allocator near wrap, and reuses its
