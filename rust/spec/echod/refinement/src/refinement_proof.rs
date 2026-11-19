@@ -161,6 +161,217 @@ pub proof fn same_body_suffices(store: StoreV, request: StoreReq, captured: Seq<
 }
 }
 
+mod provenance {
+use vstd::prelude::*;
+use echod_concrete_spec::state::*;
+use echod_types::ProductionOwner;
+use echod_concrete_spec::rover::Pid;
+use rover_spec::rover::comm::ProcessEvent;
+#[cfg(verus_keep_ghost)]
+use echod_concrete_spec::handler::*;
+
+verus! {
+pub proof fn successful_read_binds_working_snapshot(
+    store: StoreV, state: ProductionStateV, origin: Seq<char>,
+    key: String, bytes: Vec<u8>, etag: Etag, loaded: LoadedDocumentV,
+)
+    requires
+        key@ == production_keys_spec_doc_key(state.keys.prefix, origin),
+        spec_apply(store, StoreReq::Get { key }).1
+            == (StoreRes::Get { result: Ok(Some((bytes, etag))) }),
+        production_document_spec_decode_workflow(bytes@) == Ok(loaded),
+    ensures
+        spec_find(store.entries, key@, 0).is_some(),
+        store.entries[spec_find(store.entries, key@, 0).unwrap()].body == bytes@,
+        etag == spec_etag(bytes@),
+        production_handler_docs_spec_loaded_origin(state, origin, None,
+            StoreRes::Get { result: Ok(Some((bytes, etag))) }).1
+            == Ok(ProductionWorkingV {
+                target: origin, key: key@, loaded, etag: Some(etag.deep_view()),
+            }),
+{
+    match spec_find(store.entries, key@, 0) {
+        Some(i) => {
+            echod_concrete_spec::property_proof::lemma_bytes_realised(store.entries[i].body);
+        },
+        None => {},
+    }
+    reveal(production_handler_docs_spec_loaded_origin);
+}
+
+pub proof fn successful_schedule_read_binds_working_snapshot(
+    store: StoreV, state: ProductionStateV, id: Seq<char>,
+    key: String, bytes: Vec<u8>, etag: Etag, loaded: LoadedDocumentV,
+)
+    requires
+        key@ == production_keys_spec_sched_key(state.keys.prefix, id),
+        spec_apply(store, StoreReq::Get { key }).1
+            == (StoreRes::Get { result: Ok(Some((bytes, etag))) }),
+        production_document_spec_decode_schedule(bytes@) == Ok(loaded),
+    ensures
+        spec_find(store.entries, key@, 0).is_some(),
+        store.entries[spec_find(store.entries, key@, 0).unwrap()].body == bytes@,
+        etag == spec_etag(bytes@),
+        production_handler_sched_spec_loaded_schedule(state, id,
+            StoreRes::Get { result: Ok(Some((bytes, etag))) }).1
+            == Ok(ProductionWorkingV {
+                target: production_target_spec_name(ProductionTargetV::Schedule(id)),
+                key: key@, loaded, etag: Some(etag.deep_view()),
+            }),
+{
+    match spec_find(store.entries, key@, 0) {
+        Some(i) => {
+            echod_concrete_spec::property_proof::lemma_bytes_realised(store.entries[i].body);
+        },
+        None => {},
+    }
+    reveal(production_handler_sched_spec_loaded_schedule);
+}
+
+pub proof fn revalidation_keeps_captured_snapshot(
+    store: StoreV, state: ProductionStateV, origin: Seq<char>,
+    key: String, etag: Etag, cached: ProductionCachedV, captured: Seq<u8>,
+)
+    requires
+        key@ == production_keys_spec_doc_key(state.keys.prefix, origin),
+        cached.etag == etag.deep_view(),
+        production_document_spec_decode_workflow(captured) == Ok(cached.loaded),
+        crate::document_validator_separation(store, StoreReq::GetIfNoneMatch { key, etag }, captured),
+        spec_apply(store, StoreReq::GetIfNoneMatch { key, etag }).1
+            == (StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }),
+    ensures
+        store.entries[spec_find(store.entries, key@, 0).unwrap()].body == captured,
+        production_handler_docs_spec_loaded_origin(state, origin, Some(cached),
+            StoreRes::GetIfNoneMatch { result: Ok(Read::NotModified) }).1
+            == Ok(ProductionWorkingV {
+                target: origin, key: key@, loaded: cached.loaded, etag: Some(cached.etag),
+            }),
+{
+    super::storage::conditional_read_uses_captured_body(
+        store, StoreReq::GetIfNoneMatch { key, etag }, captured);
+    reveal(production_handler_docs_spec_loaded_origin);
+}
+
+pub proof fn write_issue_preserves_working_snapshot(
+    state: ProductionStateV, fid: u64, commit: ProductionCommittingV,
+    cond: Option<Seq<char>>, idle: bool,
+)
+    ensures
+        production_handler_docs_spec_issue_write(state, fid, commit, cond, idle).1.w == commit.w,
+        production_handler_docs_spec_issue_write(state, fid, commit, cond, idle).0.out.len()
+            == state.out.len() + 1,
+        production_handler_docs_spec_issue_write(state, fid, commit, cond, idle).0.ops[state.next_op]
+            == ProductionOwner::Flight(fid),
+        match production_handler_docs_spec_issue_write(state, fid, commit, cond, idle).0.out.last() {
+            ProductionEffectV::Store { op, request } => {
+                &&& op == state.next_op
+                &&& match request {
+                    StoreReqSpec::PutIfNoneMatch { key, .. } => key == commit.w.key && cond.is_none(),
+                    StoreReqSpec::PutIfMatch { key, etag, .. }
+                    | StoreReqSpec::AppIfMatch { key, etag, .. } =>
+                        key == commit.w.key && cond == Some(etag.0),
+                    _ => false,
+                }
+            },
+            _ => false,
+        },
+{
+    reveal(production_handler_docs_spec_issue_write);
+}
+
+pub proof fn new_commit_captures_working_validator(
+    state: ProductionStateV, working: ProductionWorkingV, after: DocumentBodyV,
+    deadline: Option<nat>, now: u64, fired: Option<AFired>,
+)
+    ensures ({
+        let commit = production_handler_docs_spec_commit_new(state, working, after, deadline, now, fired).1;
+        &&& commit.w == working
+        &&& commit.issued.is_none()
+        &&& commit.seq.step is Start
+        &&& commit.seq.etag == match working.etag { Some(e) => Some(e.0), None => None }
+    }),
+{
+    reveal(production_handler_docs_spec_commit_new);
+}
+
+pub proof fn prewrite_advance_preserves_receipt(
+    state: ProductionStateV, fid: u64, commit: ProductionCommittingV, answer: Option<StoreRes>,
+)
+    requires
+        (commit.seq.step is Start && commit.issued.is_none())
+            || (commit.seq.step is PuttingKey && commit.issued.is_some()
+                && commit.issued.unwrap() is Key),
+        commit.seq.etag == match commit.w.etag { Some(e) => Some(e.0), None => None },
+    ensures ({
+        let (next, advanced, progress) = production_handler_docs_spec_commit_advance(state, fid, commit, answer);
+        &&& advanced.w == commit.w
+        &&& advanced.seq.etag == commit.seq.etag
+        &&& match advanced.issued {
+            Some(ProductionIssuedV::Write { op, .. }) => {
+                &&& next.ops[op] == ProductionOwner::Flight(fid)
+                &&& match next.out.last() {
+                    ProductionEffectV::Store { op: emitted, request } => {
+                        &&& emitted == op
+                        &&& match request {
+                            StoreReqSpec::PutIfNoneMatch { key, .. } => key == commit.w.key && commit.w.etag.is_none(),
+                            StoreReqSpec::PutIfMatch { key, etag, .. }
+                            | StoreReqSpec::AppIfMatch { key, etag, .. } =>
+                                key == commit.w.key && commit.w.etag == Some(etag),
+                            _ => false,
+                        }
+                    },
+                    _ => false,
+                }
+            },
+            _ => true,
+        }
+    }),
+{
+    reveal(production_handler_docs_spec_commit_advance);
+    reveal(production_handler_docs_spec_answered);
+    reveal(production_handler_docs_spec_issue_write);
+}
+
+pub proof fn rejected_document_write_preserves_store(store: StoreV, request: StoreReq)
+    requires
+        match (request, spec_apply(store, request).1) {
+            (StoreReq::PutIfMatch { .. }, StoreRes::PutIfMatch { result: Err(StoreError::PreconditionFailed) })
+            | (StoreReq::PutIfNoneMatch { .. }, StoreRes::PutIfNoneMatch { result: Err(StoreError::PreconditionFailed) })
+            | (StoreReq::AppIfMatch { .. }, StoreRes::AppIfMatch { result: Err(StoreError::PreconditionFailed) }) => true,
+            _ => false,
+        },
+    ensures spec_apply(store, request).0 == store,
+{
+}
+
+pub proof fn fault_branches_distinguish_unapplied_and_lost_ack(
+    store: StoreV, node: u64, op: u64, request: StoreReq, error: String,
+)
+    ensures ({
+        let results = production_fleet_store_step(store, Some(error),
+            ProcessEvent::Receive { sender: Pid::Node(node),
+                message: ProductionWireMessage::StoreCall { op, request } });
+        if store.seen.contains((Pid::Node(node), op)) {
+            &&& results.len() == 1
+            &&& results[0].state == ProductionFleetModel::Store(store)
+            &&& results[0].send.len() == 0
+        } else {
+            let applied = spec_apply(store, request).0;
+            let seen = store.seen.push((Pid::Node(node), op));
+            &&& results.len() == 3
+            &&& results[0].state == ProductionFleetModel::Store(StoreV { seen, ..applied })
+            &&& results[1].state == ProductionFleetModel::Store(StoreV { seen, ..store })
+            &&& results[2].state == results[0].state
+            &&& results[1].send == results[2].send
+            &&& results[2].send == seq![(Pid::Node(node),
+                ProductionWireMessage::StoreReply { op, response: production_store_failure(request, error) })]
+        }
+    }),
+{
+}
+}
+}
+
 mod network {
 use vstd::prelude::*;
 use rover_spec::rover::RoverSpec as transport;

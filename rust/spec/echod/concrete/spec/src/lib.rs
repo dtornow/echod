@@ -34,6 +34,8 @@ pub mod rover;
 pub mod property_claim;
 #[cfg(verus_keep_ghost)]
 pub mod property_proof;
+#[cfg(verus_keep_ghost)]
+pub mod codec_algebra;
 
 pub use rover::{Config, Spec};
 pub use state::Proc;
